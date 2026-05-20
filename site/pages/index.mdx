@@ -10,7 +10,7 @@ import { Cards, Steps, Callout } from 'nextra/components'
 > 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
 
 <Callout type="info">
-  当前收录 **2 本手册 · 67 篇深度长文 · 66 个可运行 demo**，覆盖 LangChain 全家桶与 Pydantic AI。
+  当前收录 **3 本手册 · 102 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI 与 MCP 协议。
 </Callout>
 
 ## 当前手册
@@ -21,6 +21,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
   </Cards.Card>
   <Cards.Card title="🤖 Pydantic AI（33 篇）" href="/docs/02-pydantic-ai/01-basics/01-overview" arrow>
     Pydantic 团队出的 Python 原生 Agent 框架，类型安全、模型无关、生产可用。
+  </Cards.Card>
+  <Cards.Card title="🔌 MCP 协议（35 篇）" href="/docs/03-mcp/01-basics/01-overview" arrow>
+    基于 2025-11-25 规范 + Python SDK 的 Model Context Protocol 系统教程，含 OAuth、远程部署、3 个实战项目。
   </Cards.Card>
 </Cards>
 
@@ -56,6 +59,16 @@ import { Cards, Steps, Callout } from 'nextra/components'
 [多 Agent 协作模式](/docs/02-pydantic-ai/05-patterns/01-multi-agent) →
 [多 Agent 研究助手实战](/docs/02-pydantic-ai/06-practice/03-project-research)
 
+### 🔌 用 MCP 把内部能力接给 AI 应用
+
+跑通这条线，你写的 Server 就能被 Claude Code / Cursor / LangChain / Pydantic AI 共同消费：
+
+[MCP 是什么 & 为什么](/docs/03-mcp/01-basics/01-overview) →
+[三大原语](/docs/03-mcp/01-basics/03-primitives) →
+[Hello World Server](/docs/03-mcp/01-basics/06-first-server) →
+[接到 Claude Code](/docs/03-mcp/04-integration/01-claude-code) →
+[内部知识库 MCP 实战](/docs/03-mcp/07-practice/01-project-internal-kb)
+
 </Steps>
 
 ## 写作约定
@@ -76,10 +89,10 @@ import { Cards, Steps, Callout } from 'nextra/components'
 |------|------|
 | LlamaIndex 深度教程 | 待写 |
 | OpenAI Agents SDK | 待写 |
-| MCP 协议深入 | 待写 |
 | Prompt Engineering 实战 | 待写 |
 | 大模型评测（Evals）专题 | 待写 |
+| Embedding / 向量检索专题 | 待写 |
 
 ---
 
-👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview)
+👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP 入门](/docs/03-mcp/01-basics/01-overview)

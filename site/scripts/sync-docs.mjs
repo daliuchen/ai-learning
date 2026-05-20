@@ -25,6 +25,7 @@ const DST_DEMOS = path.join(SITE_ROOT, 'public', 'demos')
 const MANUAL_TITLES = {
   '01-langchain': '🦜 LangChain 全家桶',
   '02-pydantic-ai': '🤖 Pydantic AI',
+  '03-mcp': '🔌 MCP（Model Context Protocol）',
 }
 
 const SECTION_TITLES = {
@@ -40,6 +41,14 @@ const SECTION_TITLES = {
   '04-modules': '配套模块',
   '05-patterns': '模式与协作',
   '06-practice': '实战与对比',
+  // MCP
+  // 01-basics 复用上面的「基础入门」
+  '02-server': '构建 Server',
+  '03-client': '构建 Client',
+  '04-integration': '集成与生态',
+  '05-production': '生产化',
+  '06-advanced': '进阶 & 新特性',
+  '07-practice': '实战项目',
 }
 
 async function rmrf(p) {
@@ -125,7 +134,7 @@ async function copyDocs(src, dst, manualSlug, manualRoot) {
 
 function shortTitle(rawTitle, slug) {
   let t = rawTitle.replace(
-    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目)\s*\d+\s*[：:]\s*/i,
+    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?)\s*\d+\s*[：:]\s*/i,
     '',
   )
   const m = slug.match(/^(\d+)[-_]/)

@@ -1,0 +1,46 @@
+# ===== MCP 核心 =====
+mcp>=1.10.0                    # MCP Python SDK（含 Server + Client + FastMCP）
+
+# ===== 数据校验 =====
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+
+# ===== 异步运行时与 HTTP =====
+anyio>=4.5.0
+httpx>=0.27.0
+httpx-sse>=0.4.0
+
+# ===== 远程 MCP 部署（Streamable HTTP） =====
+starlette>=0.37.0
+uvicorn>=0.27.0
+sse-starlette>=2.0.0
+
+# ===== OAuth 与鉴权（05-production 用到） =====
+authlib>=1.3.0
+pyjwt[crypto]>=2.8.0
+
+# ===== Agent 框架集成（04-integration 用到） =====
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-mcp-adapters>=0.1.0
+langchain-openai>=0.2.0
+pydantic-ai>=0.0.13
+
+# ===== 模型 Provider（demo 用到） =====
+openai>=1.30.0
+anthropic>=0.30.0
+
+# ===== Logging / 可观测性 =====
+logfire>=0.50.0
+rich>=13.7.0
+structlog>=24.1.0
+
+# ===== 实战项目用到 =====
+sqlalchemy>=2.0.0
+sqlparse>=0.5.0                 # 02-project-db-mcp 用：SQL 安全过滤
+chromadb>=0.5.0                 # 01-project-internal-kb 用：向量检索
+sentence-transformers>=3.0.0    # 01-project-internal-kb 用：embedding
+
+# ===== 杂项 =====
+python-dotenv>=1.0.0
+typing-extensions>=4.10.0
