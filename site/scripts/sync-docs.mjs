@@ -27,6 +27,7 @@ const MANUAL_TITLES = {
   '02-pydantic-ai': '🤖 Pydantic AI',
   '03-mcp': '🔌 MCP（Model Context Protocol）',
   '04-prompt-engineering': '✍️ Prompt Engineering 实战',
+  '05-openai-agents-sdk': '🧭 OpenAI Agents SDK',
 }
 
 const SECTION_TITLES = {
@@ -59,6 +60,15 @@ const SECTION_TITLES = {
   '06-models': '模型差异',
   // 07-production 复用「生产化」
   '08-practice': '实战项目',
+  // OpenAI Agents SDK
+  // 01-basics 复用「基础入门」
+  // 02-tools 复用「工具系统」
+  '03-handoffs': 'Handoffs（独门）',
+  '04-guardrails': '守卫体系',
+  '05-advanced': '进阶能力',
+  '06-integration': '集成与生态',
+  '07-production': '生产化',
+  // 08-practice 复用「实战项目」
 }
 
 async function rmrf(p) {
@@ -144,7 +154,7 @@ async function copyDocs(src, dst, manualSlug, manualRoot) {
 
 function shortTitle(rawTitle, slug) {
   let t = rawTitle.replace(
-    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?|PE(?:\s+(?:Process|Technique|Advanced|By-Task|Models|Production|Practice))?)\s*\d+\s*[：:]\s*/i,
+    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|实战|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?|PE(?:\s+(?:Process|Technique|Advanced|By-Task|Models|Production|Practice))?)\s*\d*\s*[：:]\s*/i,
     '',
   )
   const m = slug.match(/^(\d+)[-_]/)

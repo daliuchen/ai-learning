@@ -10,7 +10,7 @@ import { Cards, Steps, Callout } from 'nextra/components'
 > 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
 
 <Callout type="info">
-  当前收录 **4 本手册 · 146 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering 实战。
+  当前收录 **5 本手册 · 184 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK。
 </Callout>
 
 ## 当前手册
@@ -27,6 +27,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
   </Cards.Card>
   <Cards.Card title="✍️ Prompt Engineering（44 篇）" href="/docs/04-prompt-engineering/01-foundations/01-overview" arrow>
     把"PE 工程流程"作为中轴线——评测先于 prompt、迭代闭环、跨家可移植、生产化全流程。
+  </Cards.Card>
+  <Cards.Card title="🧭 OpenAI Agents SDK（38 篇）" href="/docs/05-openai-agents-sdk/01-basics/01-overview" arrow>
+    OpenAI 官方 Agent 框架——最小原语 + Hosted Tools + Handoffs 一等公民，含 Realtime / Voice / Computer Use 实战。
   </Cards.Card>
 </Cards>
 
@@ -82,6 +85,16 @@ import { Cards, Steps, Callout } from 'nextra/components'
 [迭代闭环](/docs/04-prompt-engineering/02-process/04-iteration-loop) →
 [实战：从 0 到分类器](/docs/04-prompt-engineering/08-practice/01-build-classifier)
 
+### 🧭 OpenAI Agents SDK：最小原语 + 最大火力
+
+OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
+
+[SDK 概览 vs 其它](/docs/05-openai-agents-sdk/01-basics/01-overview) →
+[Hosted Tools（独门）](/docs/05-openai-agents-sdk/02-tools/02-hosted-tools) →
+[Handoffs 概念](/docs/05-openai-agents-sdk/03-handoffs/01-handoffs-concept) →
+[Triage Pattern](/docs/05-openai-agents-sdk/03-handoffs/02-triage-pattern) →
+[实战：客服 Triage](/docs/05-openai-agents-sdk/08-practice/01-customer-triage)
+
 </Steps>
 
 ## 写作约定
@@ -101,10 +114,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
 | 候选 | 状态 |
 |------|------|
 | LlamaIndex 深度教程 | 待写 |
-| OpenAI Agents SDK | 待写 |
 | 大模型评测（Evals）专题 | 待写 |
 | Embedding / 向量检索专题 | 待写 |
 
 ---
 
-👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP 入门](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering 入门](/docs/04-prompt-engineering/01-foundations/01-overview)
+👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP 入门](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering 入门](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK 入门](/docs/05-openai-agents-sdk/01-basics/01-overview)
