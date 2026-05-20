@@ -1,0 +1,27 @@
+{
+  "name": "ai-learning-site",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nextra 站点 - AI Learning 大模型应用开发学习手册集合",
+  "scripts": {
+    "presync": "node scripts/sync-docs.mjs",
+    "predev": "node scripts/sync-docs.mjs",
+    "prebuild": "node scripts/sync-docs.mjs",
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "sync": "node scripts/sync-docs.mjs"
+  },
+  "dependencies": {
+    "next": "^14.2.15",
+    "nextra": "^3.0.15",
+    "nextra-theme-docs": "^3.0.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.10",
+    "@types/react": "^18.3.11",
+    "typescript": "^5.6.3"
+  }
+}

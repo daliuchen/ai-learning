@@ -1,0 +1,56 @@
+# ===== 核心 =====
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-community>=0.3.0
+langchain-text-splitters>=0.3.0
+
+# ===== 模型供应商 =====
+langchain-openai>=0.2.0
+langchain-anthropic>=0.2.0
+# langchain-google-genai>=2.0.0     # 可选：Gemini
+# langchain-ollama>=0.2.0           # 可选：本地 Ollama
+# langchain-deepseek>=0.1.0         # 可选：DeepSeek
+
+# ===== LangGraph =====
+langgraph>=0.2.0
+langgraph-checkpoint>=2.0.0
+langgraph-checkpoint-sqlite>=2.0.0
+# langgraph-checkpoint-postgres>=2.0.0   # 可选：Postgres 持久化
+langgraph-supervisor>=0.0.1           # 可选：Supervisor prebuilt
+langgraph-swarm>=0.0.1                # 可选：Swarm prebuilt
+
+# ===== LangSmith =====
+langsmith>=0.1.0
+
+# ===== 向量数据库 =====
+chromadb>=0.5.0
+faiss-cpu>=1.8.0
+# pgvector>=0.3.0                   # 可选
+
+# ===== Embedding =====
+sentence-transformers>=3.0.0
+# tiktoken 由 langchain-openai 间接安装
+
+# ===== Document Loaders 常用依赖 =====
+pypdf>=4.0.0
+beautifulsoup4>=4.12.0
+unstructured>=0.15.0
+markdown>=3.5.0
+lxml>=5.0.0
+
+# ===== 工具与搜索 =====
+tavily-python>=0.4.0
+duckduckgo-search>=6.0.0
+wikipedia>=1.4.0
+requests>=2.31.0
+
+# ===== Web / API =====
+fastapi>=0.110.0
+uvicorn>=0.27.0
+sse-starlette>=2.0.0
+
+# ===== 杂项 =====
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+typing-extensions>=4.10.0
+rich>=13.7.0

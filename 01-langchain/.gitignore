@@ -1,0 +1,47 @@
+# ===== Node / Next.js / Nextra =====
+node_modules/
+.next/
+out/
+.vercel/
+
+# pages/docs 与 public/demos 由 sync 脚本生成，但需要 commit 入库：
+# Vercel monorepo（Root Directory=site）拿不到仓库根的 docs/，
+# 所以构建时不能依赖 sync 重新生成。本地 sync 后请把变更一起提交。
+
+# ===== Python =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ===== Demo 跑出来的数据 =====
+*.db
+*.db-journal
+chroma_db/
+chroma_kb/
+rag_db/
+faiss_index/
+.cache.db
+
+# ===== 环境与密钥 =====
+.env
+.env.local
+*.local
+
+# ===== 系统/编辑器 =====
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 日志 =====
+*.log
+npm-debug.log*

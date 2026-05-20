@@ -1,0 +1,85 @@
+---
+title: AI Learning · 大模型应用开发学习手册集合
+description: LangChain / Pydantic AI 等系列中文深度教程，含可运行 demo
+---
+
+import { Cards, Steps, Callout } from 'nextra/components'
+
+# 📚 AI Learning · 大模型应用开发学习手册集合
+
+> 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
+
+<Callout type="info">
+  当前收录 **2 本手册 · 67 篇深度长文 · 66 个可运行 demo**，覆盖 LangChain 全家桶与 Pydantic AI。
+</Callout>
+
+## 当前手册
+
+<Cards>
+  <Cards.Card title="🦜 LangChain 全家桶（34 篇）" href="/docs/01-langchain/01-langchain/01-overview" arrow>
+    LangChain + LangSmith + LangGraph + 横向对比，从零到生产级 LLM 应用。
+  </Cards.Card>
+  <Cards.Card title="🤖 Pydantic AI（33 篇）" href="/docs/02-pydantic-ai/01-basics/01-overview" arrow>
+    Pydantic 团队出的 Python 原生 Agent 框架，类型安全、模型无关、生产可用。
+  </Cards.Card>
+</Cards>
+
+## 学习路径推荐
+
+<Steps>
+
+### 🚀 从 LangChain 入门 LLM 应用开发
+
+跑通这条线就能搭出 RAG 小问答应用：
+
+[Overview](/docs/01-langchain/01-langchain/01-overview) →
+[LCEL](/docs/01-langchain/01-langchain/05-lcel) →
+[Tools](/docs/01-langchain/01-langchain/07-tools) →
+[RAG 实战](/docs/01-langchain/01-langchain/13-rag)
+
+### 🤖 直奔 Agent 框架（已有 LLM 调用经验）
+
+[Pydantic AI 概述](/docs/02-pydantic-ai/01-basics/01-overview) →
+[第一个 Agent](/docs/02-pydantic-ai/01-basics/03-first-agent) →
+[函数工具](/docs/02-pydantic-ai/02-tools/01-function-tools) →
+[RAG 实战](/docs/02-pydantic-ai/06-practice/02-project-rag)
+
+### ⚔️ 选型对比
+
+[Pydantic AI vs LangChain 等横向对比](/docs/02-pydantic-ai/06-practice/01-vs-langchain) →
+[LangChain 视角的框架对比](/docs/01-langchain/04-comparison/01-frameworks)
+
+### 🕸️ 复杂多 Agent 工作流
+
+[LangGraph 全部](/docs/01-langchain/03-langgraph/01-introduction) →
+[Pydantic Graph](/docs/02-pydantic-ai/04-modules/03-graph) →
+[多 Agent 协作模式](/docs/02-pydantic-ai/05-patterns/01-multi-agent) →
+[多 Agent 研究助手实战](/docs/02-pydantic-ai/06-practice/03-project-research)
+
+</Steps>
+
+## 写作约定
+
+所有手册都遵循同一套约定：
+
+- **每篇结构统一**：一句话总结 → 概念 → 最小代码 → 进阶 → 生产建议 → 常见坑（表格）→ demo 入口
+- **代码全部可独立运行**：每段 import 完整，不依赖前文
+- **关键 API 写完整路径**：例如 `pydantic_ai.Agent` 而非只写 `Agent`
+- **错误示范有标注**：`# ❌ 错误写法` / `# ✅ 正确写法` 对比
+- **横向对比**：合适的地方插入相邻框架（如 PydanticAI vs LangChain）的等价代码
+
+## 未来计划
+
+按需扩展，每个新主题独立一个 `NN-xxx/` 目录，sync 脚本会自动收录：
+
+| 候选 | 状态 |
+|------|------|
+| LlamaIndex 深度教程 | 待写 |
+| OpenAI Agents SDK | 待写 |
+| MCP 协议深入 | 待写 |
+| Prompt Engineering 实战 | 待写 |
+| 大模型评测（Evals）专题 | 待写 |
+
+---
+
+👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview)

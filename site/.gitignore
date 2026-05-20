@@ -1,0 +1,10 @@
+node_modules
+.next
+out
+.DS_Store
+*.log
+.env*.local
+
+# pages/docs 与 public/demos 由 sync 脚本生成，但需要 commit 入库
+# Vercel monorepo 模式下 Root Directory=site 拿不到仓库根的 docs/，
+# 所以构建时不能依赖 sync 重新生成。本地开发后请把变更一起提交。
