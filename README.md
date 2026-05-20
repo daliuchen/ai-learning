@@ -11,6 +11,7 @@
 | 01 | **LangChain 全家桶** | LangChain / LangSmith / LangGraph + 横向对比 | 34 篇 | [01-langchain/README.md](01-langchain/README.md) |
 | 02 | **Pydantic AI** | Pydantic 团队出的 Python 原生 Agent 框架 | 33 篇 | [02-pydantic-ai/README.md](02-pydantic-ai/README.md) |
 | 03 | **MCP（Model Context Protocol）** | AI 与外部世界连接的开放协议（基于 2025-11-25 规范 + Python SDK） | 35 篇 | [03-mcp/README.md](03-mcp/README.md) |
+| 04 | **Prompt Engineering 实战** | 把 PE 工程流程（评测→迭代→上线→监控）作为中轴线的系统教程 | 44 篇 | [04-prompt-engineering/README.md](04-prompt-engineering/README.md) |
 
 每本手册都是独立的工程：自带 `README.md`、`requirements.txt`、`docs/`、`demos/`，互不依赖，可以单独 clone / 单独跑。
 
@@ -68,26 +69,40 @@ ai-learning/
 │       ├── patterns/
 │       └── practice/
 │
-└── 03-mcp/                                  # 手册 3：MCP（Model Context Protocol）
+├── 03-mcp/                                  # 手册 3：MCP（Model Context Protocol）
+│   ├── README.md                            # 手册入口
+│   ├── requirements.txt
+│   ├── .env.example
+│   ├── docs/
+│   │   ├── 01-basics/                       # 6 篇：协议总览与基础
+│   │   ├── 02-server/                       # 8 篇：构建 MCP Server
+│   │   ├── 03-client/                       # 5 篇：构建 MCP Client
+│   │   ├── 04-integration/                  # 5 篇：与 Claude Code / Cursor / LangChain / Pydantic AI 集成
+│   │   ├── 05-production/                   # 5 篇：远程部署 / OAuth / 安全 / 可观测
+│   │   ├── 06-advanced/                     # 3 篇：MCP Apps / Agent Skills / Registry
+│   │   └── 07-practice/                     # 3 篇：实战项目
+│   └── demos/
+│       ├── basics/
+│       ├── server/
+│       ├── client/
+│       ├── integration/
+│       ├── production/
+│       ├── advanced/
+│       └── practice/
+│
+└── 04-prompt-engineering/                   # 手册 4：Prompt Engineering 实战
     ├── README.md                            # 手册入口
     ├── requirements.txt
     ├── .env.example
-    ├── docs/
-    │   ├── 01-basics/                       # 6 篇：协议总览与基础
-    │   ├── 02-server/                       # 8 篇：构建 MCP Server
-    │   ├── 03-client/                       # 5 篇：构建 MCP Client
-    │   ├── 04-integration/                  # 5 篇：与 Claude Code / Cursor / LangChain / Pydantic AI 集成
-    │   ├── 05-production/                   # 5 篇：远程部署 / OAuth / 安全 / 可观测
-    │   ├── 06-advanced/                     # 3 篇：MCP Apps / Agent Skills / Registry
-    │   └── 07-practice/                     # 3 篇：实战项目
-    └── demos/
-        ├── basics/
-        ├── server/
-        ├── client/
-        ├── integration/
-        ├── production/
-        ├── advanced/
-        └── practice/
+    └── docs/
+        ├── 01-foundations/                  # 5 篇：基础
+        ├── 02-process/                      # 6 篇：★ 中轴线（PE 怎么产生）
+        ├── 03-techniques/                   # 10 篇：核心技法
+        ├── 04-advanced/                     # 6 篇：进阶（ReAct/Tool/RAG/Multimodal/Meta/Injection）
+        ├── 05-by-task/                      # 5 篇：按任务组装
+        ├── 06-models/                       # 4 篇：模型差异
+        ├── 07-production/                   # 5 篇：生产化
+        └── 08-practice/                     # 3 篇：实战项目
 ```
 
 ---
@@ -141,7 +156,6 @@ ai-learning/
 | LlamaIndex 深度教程 | 待写 |
 | OpenAI Agents SDK | 待写 |
 | Embedding / 向量检索专题 | 待写 |
-| Prompt Engineering 实战 | 待写 |
 | 大模型评测（Evals）专题 | 待写 |
 
 新增手册时，参照 01-langchain 或 02-pydantic-ai 的目录结构即可。

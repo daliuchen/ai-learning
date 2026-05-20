@@ -26,6 +26,7 @@ const MANUAL_TITLES = {
   '01-langchain': '🦜 LangChain 全家桶',
   '02-pydantic-ai': '🤖 Pydantic AI',
   '03-mcp': '🔌 MCP（Model Context Protocol）',
+  '04-prompt-engineering': '✍️ Prompt Engineering 实战',
 }
 
 const SECTION_TITLES = {
@@ -49,6 +50,15 @@ const SECTION_TITLES = {
   '05-production': '生产化',
   '06-advanced': '进阶 & 新特性',
   '07-practice': '实战项目',
+  // Prompt Engineering
+  '01-foundations': '基础',
+  '02-process': '中轴线：好 prompt 怎么产生',
+  '03-techniques': '核心技法',
+  // 04-advanced 复用「进阶 & 新特性」
+  '05-by-task': '按任务组装',
+  '06-models': '模型差异',
+  // 07-production 复用「生产化」
+  '08-practice': '实战项目',
 }
 
 async function rmrf(p) {
@@ -134,7 +144,7 @@ async function copyDocs(src, dst, manualSlug, manualRoot) {
 
 function shortTitle(rawTitle, slug) {
   let t = rawTitle.replace(
-    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?)\s*\d+\s*[：:]\s*/i,
+    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?|PE(?:\s+(?:Process|Technique|Advanced|By-Task|Models|Production|Practice))?)\s*\d+\s*[：:]\s*/i,
     '',
   )
   const m = slug.match(/^(\d+)[-_]/)

@@ -10,7 +10,7 @@ import { Cards, Steps, Callout } from 'nextra/components'
 > 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
 
 <Callout type="info">
-  当前收录 **3 本手册 · 102 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI 与 MCP 协议。
+  当前收录 **4 本手册 · 146 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering 实战。
 </Callout>
 
 ## 当前手册
@@ -24,6 +24,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
   </Cards.Card>
   <Cards.Card title="🔌 MCP 协议（35 篇）" href="/docs/03-mcp/01-basics/01-overview" arrow>
     基于 2025-11-25 规范 + Python SDK 的 Model Context Protocol 系统教程，含 OAuth、远程部署、3 个实战项目。
+  </Cards.Card>
+  <Cards.Card title="✍️ Prompt Engineering（44 篇）" href="/docs/04-prompt-engineering/01-foundations/01-overview" arrow>
+    把"PE 工程流程"作为中轴线——评测先于 prompt、迭代闭环、跨家可移植、生产化全流程。
   </Cards.Card>
 </Cards>
 
@@ -69,6 +72,16 @@ import { Cards, Steps, Callout } from 'nextra/components'
 [接到 Claude Code](/docs/03-mcp/04-integration/01-claude-code) →
 [内部知识库 MCP 实战](/docs/03-mcp/07-practice/01-project-internal-kb)
 
+### ✍️ 把 prompt 工程从"玄学"做成"工程"
+
+学会"评测驱动 prompt 迭代"——本手册的中轴线就是这条：
+
+[PE 是什么 / 不是什么](/docs/04-prompt-engineering/01-foundations/01-overview) →
+[评测先于 prompt](/docs/04-prompt-engineering/01-foundations/05-eval-first) →
+[6 阶段生命周期](/docs/04-prompt-engineering/02-process/01-lifecycle) →
+[迭代闭环](/docs/04-prompt-engineering/02-process/04-iteration-loop) →
+[实战：从 0 到分类器](/docs/04-prompt-engineering/08-practice/01-build-classifier)
+
 </Steps>
 
 ## 写作约定
@@ -89,10 +102,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
 |------|------|
 | LlamaIndex 深度教程 | 待写 |
 | OpenAI Agents SDK | 待写 |
-| Prompt Engineering 实战 | 待写 |
 | 大模型评测（Evals）专题 | 待写 |
 | Embedding / 向量检索专题 | 待写 |
 
 ---
 
-👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP 入门](/docs/03-mcp/01-basics/01-overview)
+👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP 入门](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering 入门](/docs/04-prompt-engineering/01-foundations/01-overview)
