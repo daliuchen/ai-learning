@@ -28,6 +28,7 @@ const MANUAL_TITLES = {
   '03-mcp': '🔌 MCP（Model Context Protocol）',
   '04-prompt-engineering': '✍️ Prompt Engineering 实战',
   '05-openai-agents-sdk': '🧭 OpenAI Agents SDK',
+  '06-embedding': '🔍 Embedding & 向量检索',
 }
 
 const SECTION_TITLES = {
@@ -69,6 +70,15 @@ const SECTION_TITLES = {
   '06-integration': '集成与生态',
   '07-production': '生产化',
   // 08-practice 复用「实战项目」
+  // Embedding & 向量检索
+  // 01-foundations 复用「基础」
+  '02-models': '模型选型',
+  '03-vector-db': '向量数据库',
+  '04-chunking': '切片策略',
+  '05-retrieval': '检索策略',
+  '06-evaluation': '评测',
+  // 07-production 复用「生产化」
+  '08-applications': '应用场景',
 }
 
 async function rmrf(p) {

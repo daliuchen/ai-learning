@@ -10,7 +10,7 @@ import { Cards, Steps, Callout } from 'nextra/components'
 > 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
 
 <Callout type="info">
-  当前收录 **5 本手册 · 184 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK。
+  当前收录 **6 本手册 · 228 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK、Embedding & 向量检索。
 </Callout>
 
 ## 当前手册
@@ -30,6 +30,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
   </Cards.Card>
   <Cards.Card title="🧭 OpenAI Agents SDK（38 篇）" href="/docs/05-openai-agents-sdk/01-basics/01-overview" arrow>
     OpenAI 官方 Agent 框架——最小原语 + Hosted Tools + Handoffs 一等公民，含 Realtime / Voice / Computer Use 实战。
+  </Cards.Card>
+  <Cards.Card title="🔍 Embedding & 向量检索（44 篇）" href="/docs/06-embedding/01-foundations/01-what-is-embedding" arrow>
+    把 RAG pipeline 拆成 chunk → embed → 索引 → 检索 → 重排 → 评测 6 个独立环节，工程权衡 + 评测驱动。
   </Cards.Card>
 </Cards>
 
@@ -95,6 +98,16 @@ OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
 [Triage Pattern](/docs/05-openai-agents-sdk/03-handoffs/02-triage-pattern) →
 [实战：客服 Triage](/docs/05-openai-agents-sdk/08-practice/01-customer-triage)
 
+### 🔍 把 RAG 底层每个旋钮都搞明白
+
+从原理到生产化，每个组件讲清 trade-off：
+
+[Embedding 是什么 / 为啥能 work](/docs/06-embedding/01-foundations/01-what-is-embedding) →
+[Chunking 决定 RAG 上限](/docs/06-embedding/04-chunking/01-why-chunking) →
+[混合检索 BM25 + Dense](/docs/06-embedding/05-retrieval/02-bm25-fusion) →
+[Rerank 精排](/docs/06-embedding/05-retrieval/05-rerank-pipeline) →
+[完整 RAG 实战](/docs/06-embedding/08-applications/01-full-rag)
+
 </Steps>
 
 ## 写作约定
@@ -115,8 +128,7 @@ OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
 |------|------|
 | LlamaIndex 深度教程 | 待写 |
 | 大模型评测（Evals）专题 | 待写 |
-| Embedding / 向量检索专题 | 待写 |
 
 ---
 
-👉 立即开始：[LangChain 入门](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI 入门](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP 入门](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering 入门](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK 入门](/docs/05-openai-agents-sdk/01-basics/01-overview)
+👉 立即开始：[LangChain](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK](/docs/05-openai-agents-sdk/01-basics/01-overview) · [Embedding](/docs/06-embedding/01-foundations/01-what-is-embedding)

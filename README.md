@@ -13,6 +13,7 @@
 | 03 | **MCP（Model Context Protocol）** | AI 与外部世界连接的开放协议（基于 2025-11-25 规范 + Python SDK） | 35 篇 | [03-mcp/README.md](03-mcp/README.md) |
 | 04 | **Prompt Engineering 实战** | 把 PE 工程流程（评测→迭代→上线→监控）作为中轴线的系统教程 | 44 篇 | [04-prompt-engineering/README.md](04-prompt-engineering/README.md) |
 | 05 | **OpenAI Agents SDK** | OpenAI 官方 Agent 框架——最小原语 + Hosted Tools + Handoffs 一等公民 | 38 篇 | [05-openai-agents-sdk/README.md](05-openai-agents-sdk/README.md) |
+| 06 | **Embedding & 向量检索** | 把 RAG pipeline 拆成 6 个组件，每个讲 trade-off + 工业默认值 | 44 篇 | [06-embedding/README.md](06-embedding/README.md) |
 
 每本手册都是独立的工程：自带 `README.md`、`requirements.txt`、`docs/`、`demos/`，互不依赖，可以单独 clone / 单独跑。
 
@@ -105,19 +106,33 @@ ai-learning/
 │       ├── 07-production/                   # 5 篇：生产化
 │       └── 08-practice/                     # 3 篇：实战项目
 │
-└── 05-openai-agents-sdk/                    # 手册 5：OpenAI Agents SDK
+├── 05-openai-agents-sdk/                    # 手册 5：OpenAI Agents SDK
+│   ├── README.md                            # 手册入口
+│   ├── requirements.txt
+│   ├── .env.example
+│   └── docs/
+│       ├── 01-basics/                       # 6 篇：基础入门
+│       ├── 02-tools/                        # 5 篇：工具系统（含 Hosted Tools）
+│       ├── 03-handoffs/                     # 4 篇：★ Handoffs 独门
+│       ├── 04-guardrails/                   # 3 篇：★ 守卫体系
+│       ├── 05-advanced/                     # 6 篇：进阶（Tracing/Realtime/Voice）
+│       ├── 06-integration/                  # 4 篇：集成与生态
+│       ├── 07-production/                   # 5 篇：生产化
+│       └── 08-practice/                     # 5 篇：实战项目
+│
+└── 06-embedding/                            # 手册 6：Embedding & 向量检索
     ├── README.md                            # 手册入口
     ├── requirements.txt
     ├── .env.example
     └── docs/
-        ├── 01-basics/                       # 6 篇：基础入门
-        ├── 02-tools/                        # 5 篇：工具系统（含 Hosted Tools）
-        ├── 03-handoffs/                     # 4 篇：★ Handoffs 独门
-        ├── 04-guardrails/                   # 3 篇：★ 守卫体系
-        ├── 05-advanced/                     # 6 篇：进阶（Tracing/Realtime/Voice）
-        ├── 06-integration/                  # 4 篇：集成与生态
-        ├── 07-production/                   # 5 篇：生产化
-        └── 08-practice/                     # 5 篇：实战项目
+        ├── 01-foundations/                  # 6 篇：原理 / 相似度 / 训练 / 维度 / 多语言 / 多模态
+        ├── 02-models/                       # 6 篇：OpenAI / Cohere / 开源 / sentence-transformers / rerank / MTEB
+        ├── 03-vector-db/                    # 7 篇：选型 / Pinecone / Qdrant / pgvector / Chroma / 索引算法
+        ├── 04-chunking/                     # 5 篇：策略 / 结构感知 / small-to-big / metadata
+        ├── 05-retrieval/                    # 6 篇：BM25+Dense / HyDE / Multi-query / Rerank / Self-query
+        ├── 06-evaluation/                   # 4 篇：指标 / 建集 / 端到端 / 持续评测
+        ├── 07-production/                   # 5 篇：增量 / 批量 / 缓存 / 部署 / 监控
+        └── 08-applications/                 # 5 篇：RAG / 语义搜索 / 多模态 / 推荐 / 去重
 ```
 
 ---

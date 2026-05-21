@@ -1,0 +1,38 @@
+# Embedding API
+openai>=1.50.0
+cohere>=5.10.0
+voyageai>=0.2.0
+
+# 开源 embedding
+sentence-transformers>=3.0.0
+torch>=2.2.0
+transformers>=4.40.0
+FlagEmbedding>=1.2.0
+
+# 向量数据库
+qdrant-client>=1.10.0
+pinecone-client>=5.0.0
+chromadb>=0.5.0
+lancedb>=0.13.0
+pgvector>=0.3.0
+psycopg[binary]>=3.2.0
+
+# 检索 / 评测
+rank-bm25>=0.2.2
+ranx>=0.3.20
+beir>=2.0.0
+
+# Chunking
+langchain-text-splitters>=0.3.0
+unstructured>=0.15.0
+pypdf>=4.3.0
+
+# 多模态
+pillow>=10.4.0
+open-clip-torch>=2.26.0
+
+# 工具
+numpy>=1.26.0
+pandas>=2.2.0
+python-dotenv>=1.0.0
+tqdm>=4.66.0
