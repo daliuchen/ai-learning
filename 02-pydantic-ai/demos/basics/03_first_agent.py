@@ -90,7 +90,7 @@ def demo_dynamic_prompt() -> None:
     def add_user(ctx: RunContext[UserCtx]) -> str:
         return f"当前用户：{ctx.deps.name}（ID={ctx.deps.user_id}）"
 
-    result = agent.run_sync("我是谁？", deps=UserCtx(user_id="u-001", name="刘晨"))
+    result = agent.run_sync("我是谁？", deps=UserCtx(user_id="u-001", name="Ethan"))
     print(f"output : {result.output}")
     print()
 

@@ -107,8 +107,8 @@ def demo_validator() -> None:
 
     @agent.output_validator
     def must_have_name(ctx: RunContext[None], output: Greeting) -> Greeting:
-        if "刘晨" not in output.text:
-            raise ModelRetry("必须在问候语中包含名字 '刘晨'")
+        if "Ethan" not in output.text:
+            raise ModelRetry("必须在问候语中包含名字 'Ethan'")
         return output
 
     try:

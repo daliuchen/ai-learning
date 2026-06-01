@@ -285,7 +285,7 @@ python demos/basics/06_first_client.py
     "hello-mcp": {
       "command": "python",
       "args": [
-        "/Users/cliu/cliu/me_workspace/ai-learning/03-mcp/demos/basics/06_first_server.py"
+        "/absolute/path/to/03-mcp/demos/basics/06_first_server.py"
       ]
     }
   }

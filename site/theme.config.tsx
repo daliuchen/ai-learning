@@ -8,13 +8,11 @@ const config: DocsThemeConfig = {
       📚 AI Learning · 大模型应用开发学习手册集合
     </span>
   ),
-  project: {
-    link: 'https://github.com/daliuchen/ai-learning',
-  },
   footer: {
     content: (
-      <span>
-        非官方教程 · 个人学习笔记 · 全部内容对照各官方文档独立编写
+      <span style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        <span>非官方教程 · 个人学习笔记 · 全部内容对照各官方文档独立编写</span>
+        <span>新章节同步更新公众号「Ethan 的 LLM 工程手册」</span>
       </span>
     ),
   },

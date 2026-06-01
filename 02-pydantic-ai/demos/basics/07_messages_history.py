@@ -63,7 +63,7 @@ def demo_multi_turn() -> None:
     print("===== 2) 多轮聊天 =====")
     agent = Agent(MODEL, system_prompt="你是一位会记住用户名字的助手。")
 
-    r1 = agent.run_sync("我叫刘晨")
+    r1 = agent.run_sync("我叫 Ethan")
     print(f"turn 1: {r1.output}")
 
     r2 = agent.run_sync("我刚刚说我叫什么？", message_history=r1.new_messages())

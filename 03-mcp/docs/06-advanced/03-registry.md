@@ -42,23 +42,23 @@ Server 名用**反向 DNS** 格式：
 
 ```json
 {
-  "name": "io.github.cliu/03-mcp-hello",
+  "name": "io.github.yourname/03-mcp-hello",
   "description": "本手册的 hello-mcp 演示 Server",
   "version": "1.0.0",
   "repository": {
-    "url": "https://github.com/cliu/03-mcp"
+    "url": "https://github.com/yourname/03-mcp"
   },
   "packages": [
     {
       "registry_type": "npm",
-      "identifier": "@cliu/03-mcp-hello",
+      "identifier": "@yourname/03-mcp-hello",
       "version": "1.0.0",
       "runtime_arguments": [],
       "environment_variables": []
     },
     {
       "registry_type": "pypi",
-      "identifier": "cliu-03-mcp-hello",
+      "identifier": "yourname-03-mcp-hello",
       "version": "1.0.0"
     }
   ],
@@ -193,7 +193,7 @@ GET https://registry.modelcontextprotocol.io/v0/servers?limit=100&cursor=...
 ```bash
 # pyproject.toml
 [project]
-name = "cliu-03-mcp-hello"
+name = "yourname-03-mcp-hello"
 version = "1.0.0"
 dependencies = ["mcp>=1.10"]
 
@@ -210,16 +210,16 @@ twine upload dist/*
 
 ```json
 {
-  "name": "io.github.cliu/03-mcp-hello",
+  "name": "io.github.yourname/03-mcp-hello",
   "description": "本手册的 hello-mcp 演示 Server，三大原语示例",
   "version": "1.0.0",
   "repository": {
-    "url": "https://github.com/cliu/03-mcp"
+    "url": "https://github.com/yourname/03-mcp"
   },
   "packages": [
     {
       "registry_type": "pypi",
-      "identifier": "cliu-03-mcp-hello",
+      "identifier": "yourname-03-mcp-hello",
       "version": "1.0.0",
       "runtime_arguments": [],
       "environment_variables": []
@@ -235,7 +235,7 @@ mcp-publisher publish
 # 第一次会引导 GitHub OAuth 验证
 ```
 
-发布后用户能在 Registry 搜到，并用 `uvx cliu-03-mcp-hello` 一行运行。
+发布后用户能在 Registry 搜到，并用 `uvx yourname-03-mcp-hello` 一行运行。
 
 ### 9.4 配置到 Claude Code
 
@@ -244,7 +244,7 @@ mcp-publisher publish
   "mcpServers": {
     "hello": {
       "command": "uvx",
-      "args": ["cliu-03-mcp-hello"]
+      "args": ["yourname-03-mcp-hello"]
     }
   }
 }

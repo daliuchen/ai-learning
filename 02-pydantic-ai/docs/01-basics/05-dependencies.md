@@ -269,7 +269,7 @@ def query_orders(ctx: RunContext[CustomerDeps]) -> list[dict]:
 deps = CustomerDeps(
     user_id="u-001",
     db={
-        "users": {"u-001": {"name": "刘晨", "vip": 3}},
+        "users": {"u-001": {"name": "Ethan", "vip": 3}},
         "orders": {"u-001": [{"id": "o-1", "item": "键盘", "status": "已发货"}]},
     },
 )

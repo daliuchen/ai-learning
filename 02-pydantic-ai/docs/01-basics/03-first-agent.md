@@ -174,7 +174,7 @@ async def add_time(ctx: RunContext[UserCtx]) -> str:
     import datetime
     return f"当前时间：{datetime.datetime.now().isoformat()}"
 
-result = agent.run_sync("我是谁？", deps=UserCtx("u1", "刘晨"))
+result = agent.run_sync("我是谁？", deps=UserCtx("u1", "Ethan"))
 ```
 
 执行顺序：

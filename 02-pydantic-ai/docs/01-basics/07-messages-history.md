@@ -167,7 +167,7 @@ def chat(conv_id: str, prompt: str) -> str:
     conn.commit()
     return r.output
 
-print(chat("u1", "我叫刘晨"))
+print(chat("u1", "我叫 Ethan"))
 print(chat("u1", "我刚刚说我叫什么？"))  # 应该记得名字
 ```
 
@@ -265,7 +265,7 @@ LangChain 等价：
 from langchain_core.messages import HumanMessage, AIMessage
 
 messages = []
-messages.append(HumanMessage("我叫刘晨"))
+messages.append(HumanMessage("我叫 Ethan"))
 ai = model.invoke(messages)
 messages.append(ai)
 messages.append(HumanMessage("我叫什么？"))
@@ -275,7 +275,7 @@ print(model.invoke(messages).content)
 Pydantic AI 等价：
 
 ```python
-r1 = agent.run_sync("我叫刘晨")
+r1 = agent.run_sync("我叫 Ethan")
 r2 = agent.run_sync("我叫什么？", message_history=r1.new_messages())
 print(r2.output)
 ```
