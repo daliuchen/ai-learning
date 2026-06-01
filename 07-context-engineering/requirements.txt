@@ -1,0 +1,5 @@
+# Context Engineering 手册 demo 依赖
+openai>=1.40.0
+anthropic>=0.40.0
+tiktoken>=0.7.0
+pydantic>=2.7.0

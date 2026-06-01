@@ -29,6 +29,7 @@ const MANUAL_TITLES = {
   '04-prompt-engineering': '✍️ Prompt Engineering 实战',
   '05-openai-agents-sdk': '🧭 OpenAI Agents SDK',
   '06-embedding': '🔍 Embedding & 向量检索',
+  '07-context-engineering': '🧩 Context Engineering 上下文工程',
 }
 
 const SECTION_TITLES = {
@@ -79,6 +80,16 @@ const SECTION_TITLES = {
   '06-evaluation': '评测',
   // 07-production 复用「生产化」
   '08-applications': '应用场景',
+  // Context Engineering
+  // 01-foundations 复用「基础」
+  '02-anatomy': '上下文的组成',
+  '03-retrieval': '检索与注入',
+  '04-memory': '记忆系统',
+  '05-compaction': '压缩与裁剪',
+  '06-agent-context': 'Agent 上下文',
+  '07-long-context': '长上下文',
+  '08-production': '生产化',
+  '09-practice': '实战项目',
 }
 
 async function rmrf(p) {
@@ -145,6 +156,17 @@ function fixLinks(content, manualSlug, manualRoot) {
   return content
 }
 
+const PROMO_FOOTER = `
+
+---
+
+## 📬 持续追更
+
+如果这篇对你有帮助，欢迎关注公众号「**Ethan 的 LLM 工程手册**」，新章节同步更新。
+
+<img src="/qrcode.png" alt="公众号 Ethan 的 LLM 工程手册" width="200" style="border-radius: 8px; margin: 12px 0;" />
+`
+
 async function copyDocs(src, dst, manualSlug, manualRoot) {
   await fs.mkdir(dst, { recursive: true })
   for (const entry of await fs.readdir(src, { withFileTypes: true })) {
@@ -156,7 +178,7 @@ async function copyDocs(src, dst, manualSlug, manualRoot) {
     if (entry.name.endsWith('.md')) {
       const d = path.join(dst, entry.name)
       const raw = await fs.readFile(s, 'utf8')
-      const fixed = fixLinks(raw, manualSlug, manualRoot)
+      const fixed = fixLinks(raw, manualSlug, manualRoot) + PROMO_FOOTER
       await fs.writeFile(d, fixed, 'utf8')
     }
   }

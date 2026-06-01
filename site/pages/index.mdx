@@ -10,7 +10,7 @@ import { Cards, Steps, Callout } from 'nextra/components'
 > 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
 
 <Callout type="info">
-  当前收录 **6 本手册 · 228 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK、Embedding & 向量检索。
+  当前收录 **7 本手册 · 274 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK、Embedding & 向量检索、Context Engineering 上下文工程。
 </Callout>
 
 ## 当前手册
@@ -33,6 +33,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
   </Cards.Card>
   <Cards.Card title="🔍 Embedding & 向量检索（44 篇）" href="/docs/06-embedding/01-foundations/01-what-is-embedding" arrow>
     把 RAG pipeline 拆成 chunk → embed → 索引 → 检索 → 重排 → 评测 6 个独立环节，工程权衡 + 评测驱动。
+  </Cards.Card>
+  <Cards.Card title="🧩 Context Engineering（46 篇）" href="/docs/07-context-engineering/01-foundations/01-what-is-context-engineering" arrow>
+    把"喂给模型的整个上下文"当工程对象——组成 / 检索注入 / 记忆 / 压缩 / Agent 上下文 / 长上下文 / 生产化，指令之外、窗口之内的一切。
   </Cards.Card>
 </Cards>
 
@@ -108,6 +111,17 @@ OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
 [Rerank 精排](/docs/06-embedding/05-retrieval/05-rerank-pipeline) →
 [完整 RAG 实战](/docs/06-embedding/08-applications/01-full-rag)
 
+### 🧩 把上下文从"塞满窗口"做成"工程"
+
+学会按预算管理窗口里的每一个 token——这是 Agent 和长会话应用的真正上限：
+
+[什么是上下文工程](/docs/07-context-engineering/01-foundations/01-what-is-context-engineering) →
+[最少必要上下文](/docs/07-context-engineering/01-foundations/06-minimal-context) →
+[历史压缩](/docs/07-context-engineering/05-compaction/02-summarization) →
+[Agent 上下文累积](/docs/07-context-engineering/06-agent-context/01-accumulation) →
+[长上下文 vs RAG](/docs/07-context-engineering/07-long-context/02-long-context-vs-rag) →
+[带记忆的客服 Agent 实战](/docs/07-context-engineering/09-practice/01-memory-customer-agent)
+
 </Steps>
 
 ## 写作约定
@@ -131,4 +145,13 @@ OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
 
 ---
 
-👉 立即开始：[LangChain](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK](/docs/05-openai-agents-sdk/01-basics/01-overview) · [Embedding](/docs/06-embedding/01-foundations/01-what-is-embedding)
+## 📬 持续追更
+
+新章节会同步发布到公众号「**Ethan 的 LLM 工程手册**」，  
+关注后第一时间获取更新：
+
+<img src="/qrcode.png" alt="公众号 Ethan 的 LLM 工程手册" width="200" style={{ borderRadius: 8, margin: '12px 0' }} />
+
+---
+
+👉 立即开始：[LangChain](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK](/docs/05-openai-agents-sdk/01-basics/01-overview) · [Embedding](/docs/06-embedding/01-foundations/01-what-is-embedding) · [Context Engineering](/docs/07-context-engineering/01-foundations/01-what-is-context-engineering)

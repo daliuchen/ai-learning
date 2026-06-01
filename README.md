@@ -14,6 +14,7 @@
 | 04 | **Prompt Engineering 实战** | 把 PE 工程流程（评测→迭代→上线→监控）作为中轴线的系统教程 | 44 篇 | [04-prompt-engineering/README.md](04-prompt-engineering/README.md) |
 | 05 | **OpenAI Agents SDK** | OpenAI 官方 Agent 框架——最小原语 + Hosted Tools + Handoffs 一等公民 | 38 篇 | [05-openai-agents-sdk/README.md](05-openai-agents-sdk/README.md) |
 | 06 | **Embedding & 向量检索** | 把 RAG pipeline 拆成 6 个组件，每个讲 trade-off + 工业默认值 | 44 篇 | [06-embedding/README.md](06-embedding/README.md) |
+| 07 | **Context Engineering** | 把"喂给模型的整个上下文"当工程对象——组成/检索/记忆/压缩/Agent 上下文/长上下文/生产化 | 46 篇 | [07-context-engineering/README.md](07-context-engineering/README.md) |
 
 每本手册都是独立的工程：自带 `README.md`、`requirements.txt`、`docs/`、`demos/`，互不依赖，可以单独 clone / 单独跑。
 
@@ -133,6 +134,20 @@ ai-learning/
         ├── 06-evaluation/                   # 4 篇：指标 / 建集 / 端到端 / 持续评测
         ├── 07-production/                   # 5 篇：增量 / 批量 / 缓存 / 部署 / 监控
         └── 08-applications/                 # 5 篇：RAG / 语义搜索 / 多模态 / 推荐 / 去重
+
+07-context-engineering/                      # 手册 7：Context Engineering 上下文工程
+    ├── README.md                            # 手册入口
+    ├── requirements.txt
+    └── docs/
+        ├── 01-foundations/                  # 6 篇：CE 是什么 / 窗口本质 / Context Rot / 成本 / 预算 / 最少必要
+        ├── 02-anatomy/                      # 6 篇：指令 / 历史 / 检索 / 工具 / few-shot / 组织结构
+        ├── 03-retrieval/                    # 5 篇：RAG 作上下文 / 静态 vs 动态 / JIT / 排序裁剪 / 归因
+        ├── 04-memory/                       # 6 篇：短期 vs 长期 / 会话 / 存储召回 / Agent 记忆架构 / 个性化 / 遗忘
+        ├── 05-compaction/                   # 5 篇：为何压缩 / 摘要 / 滑窗 / 剪枝 / 触发时机
+        ├── 06-agent-context/                # 6 篇：累积 / 工具结果 / 多 Agent 传递 / 隔离 / state / 失败模式
+        ├── 07-long-context/                 # 4 篇：1M 时代 / vs RAG / 缓存复用 / 注意力优化
+        ├── 08-production/                   # 5 篇：可观测 / 成本 / 排障 / 评测 / 安全
+        └── 09-practice/                     # 3 篇：记忆客服 / 长文档问答 / 多 Agent 研究
 ```
 
 ---
