@@ -1,0 +1,23 @@
+# 企业知识库实战 —— 依赖
+# AI 服务核心
+pydantic-ai>=0.0.14
+openai>=1.40.0
+anthropic>=0.34.0
+
+# 检索 / 向量
+pgvector>=0.3.0
+psycopg[binary]>=3.2.0
+rank-bm25>=0.2.2          # BM25 关键词检索
+sentence-transformers>=3.0.0  # 本地 embedding / rerank（可选）
+
+# 文档解析 / 分块
+markdown-it-py>=3.0.0
+beautifulsoup4>=4.12.0
+
+# Web 服务
+fastapi>=0.115.0
+uvicorn>=0.30.0
+sse-starlette>=2.1.0      # SSE 流式回答
+
+# 评估
+numpy>=1.26.0

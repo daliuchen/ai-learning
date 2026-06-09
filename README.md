@@ -15,6 +15,7 @@
 | 05 | **OpenAI Agents SDK** | OpenAI 官方 Agent 框架——最小原语 + Hosted Tools + Handoffs 一等公民 | 38 篇 | [05-openai-agents-sdk/README.md](05-openai-agents-sdk/README.md) |
 | 06 | **Embedding & 向量检索** | 把 RAG pipeline 拆成 6 个组件，每个讲 trade-off + 工业默认值 | 44 篇 | [06-embedding/README.md](06-embedding/README.md) |
 | 07 | **Context Engineering** | 把"喂给模型的整个上下文"当工程对象——组成/检索/记忆/压缩/Agent 上下文/长上下文/生产化 | 46 篇 | [07-context-engineering/README.md](07-context-engineering/README.md) |
+| 08 | **企业知识库实战** | 一个项目从 0 到生产——选型/评估先行/Ingest/检索增强/权限/前端/生产化，把前 7 本零件拼成带权限、带引用、可评估的 RAG 系统 | 52 篇 | [08-enterprise-kb/README.md](08-enterprise-kb/README.md) |
 
 每本手册都是独立的工程：自带 `README.md`、`requirements.txt`、`docs/`、`demos/`，互不依赖，可以单独 clone / 单独跑。
 
@@ -148,6 +149,21 @@ ai-learning/
         ├── 07-long-context/                 # 4 篇：1M 时代 / vs RAG / 缓存复用 / 注意力优化
         ├── 08-production/                   # 5 篇：可观测 / 成本 / 排障 / 评测 / 安全
         └── 09-practice/                     # 3 篇：记忆客服 / 长文档问答 / 多 Agent 研究
+
+08-enterprise-kb/                            # 手册 8：企业知识库实战
+    ├── README.md                            # 手册入口
+    ├── requirements.txt
+    └── docs/
+        ├── 01-intro/                        # 5 篇：为什么做 / 成品 / 技术栈 / MVP 优先 / 怎么用
+        ├── 02-design/                       # 5 篇：真实需求 / 对内 vs 对外 / 边界 / 数据模型 / 架构
+        ├── 03-selection/                    # 6 篇：选型方法论 / pgvector / Embedding / Pydantic AI / 何时上重框架 / 决策表
+        ├── 04-eval/                         # 4 篇：评估先行 / 测试集 / 指标 / 评估脚本
+        ├── 05-ingest/                       # 6 篇：demo 数据 / 解析 / 语义分块 / embedding / 入库 / 增量
+        ├── 06-basic-rag/                    # 5 篇：向量检索 / 结构化输出 / 引用 / 答不出就承认 / 端到端
+        ├── 07-retrieval/                    # 6 篇：检索是命门 / BM25 / 混合 RRF / Rerank / Query 改写 / 量化提升
+        ├── 08-permission/                   # 5 篇：权限是魔鬼 / ACL / 检索阶段过滤 / 多角色 / 越权零泄漏
+        ├── 09-frontend/                     # 4 篇：流式问答 / 引用回链 / 文档后台 / TS+Python 拆分
+        └── 10-production/                   # 6 篇：缓存降本 / 成本延迟 / 反馈闭环 / 可观测 / 排障 / 上线 checklist
 ```
 
 ---
@@ -190,6 +206,20 @@ ai-learning/
   → 02-pydantic-ai/06-practice/03-project-research
 ```
 
+### 路径 E：把零件拼成系统——从 0 到生产做企业知识库（综合实战）
+
+```
+08-enterprise-kb/01-intro/01-why-this-project   （读完手册≠会落地）
+  → 08-enterprise-kb/03-selection/01-selection-methodology  （选型方法论）
+  → 08-enterprise-kb/04-eval/01-why-eval-first    （评估先行）
+  → 08-enterprise-kb/06-basic-rag/05-end-to-end   （端到端 MVP）
+  → 08-enterprise-kb/07-retrieval/06-quantify-gains  （检索增强量化提升）
+  → 08-enterprise-kb/08-permission/01-permission-is-devil  （权限：越权零泄漏）
+  → 08-enterprise-kb/10-production/06-launch-checklist  （上线 Checklist）
+```
+
+学完前几本零件后走这条主线，体会"选型→评估→检索→权限→上线"如何串成真实系统。
+
 ---
 
 ## 五、未来计划（占位）
@@ -199,7 +229,6 @@ ai-learning/
 | 候选主题 | 状态 |
 |----------|------|
 | LlamaIndex 深度教程 | 待写 |
-| Embedding / 向量检索专题 | 待写 |
 | 大模型评测（Evals）专题 | 待写 |
 
 新增手册时，参照 01-langchain 或 02-pydantic-ai 的目录结构即可。

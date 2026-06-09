@@ -10,7 +10,7 @@ import { Cards, Steps, Callout } from 'nextra/components'
 > 一套自用 + 可分享的中文深度学习手册集合。每个子手册都对照官方文档系统编写，包含核心概念、原理剖析、可运行 demo 与生产建议。
 
 <Callout type="info">
-  当前收录 **7 本手册 · 274 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK、Embedding & 向量检索、Context Engineering 上下文工程。
+  当前收录 **8 本手册 · 326 篇深度长文**，覆盖 LangChain 全家桶、Pydantic AI、MCP 协议、Prompt Engineering、OpenAI Agents SDK、Embedding & 向量检索、Context Engineering 上下文工程、企业知识库实战。
 </Callout>
 
 ## 当前手册
@@ -36,6 +36,9 @@ import { Cards, Steps, Callout } from 'nextra/components'
   </Cards.Card>
   <Cards.Card title="🧩 Context Engineering（46 篇）" href="/docs/07-context-engineering/01-foundations/01-what-is-context-engineering" arrow>
     把"喂给模型的整个上下文"当工程对象——组成 / 检索注入 / 记忆 / 压缩 / Agent 上下文 / 长上下文 / 生产化，指令之外、窗口之内的一切。
+  </Cards.Card>
+  <Cards.Card title="🏢 企业知识库实战（52 篇）" href="/docs/08-enterprise-kb/01-intro/01-why-this-project" arrow>
+    一个项目从 0 到生产——选型 / 评估先行 / Ingest / 检索增强 / 权限 / 前端 / 生产化，把前 7 本的零件拼成带权限、带引用、可评估的企业知识库。
   </Cards.Card>
 </Cards>
 
@@ -122,6 +125,18 @@ OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
 [长上下文 vs RAG](/docs/07-context-engineering/07-long-context/02-long-context-vs-rag) →
 [带记忆的客服 Agent 实战](/docs/07-context-engineering/09-practice/01-memory-customer-agent)
 
+### 🏢 把零件拼成系统：从 0 到生产做一个企业知识库
+
+学完前几本的零件后，跟着这条主线把它们拼成一个真实系统——选型、评估、检索、权限、上线一条龙：
+
+[读完手册≠会落地](/docs/08-enterprise-kb/01-intro/01-why-this-project) →
+[选型方法论](/docs/08-enterprise-kb/03-selection/01-selection-methodology) →
+[评估先行](/docs/08-enterprise-kb/04-eval/01-why-eval-first) →
+[端到端 MVP](/docs/08-enterprise-kb/06-basic-rag/05-end-to-end) →
+[检索增强量化提升](/docs/08-enterprise-kb/07-retrieval/06-quantify-gains) →
+[权限：越权零泄漏](/docs/08-enterprise-kb/08-permission/01-permission-is-devil) →
+[上线 Checklist](/docs/08-enterprise-kb/10-production/06-launch-checklist)
+
 </Steps>
 
 ## 写作约定
@@ -154,4 +169,4 @@ OpenAI 官方 Agent 框架，Handoffs / Hosted Tools / Realtime 三大独门：
 
 ---
 
-👉 立即开始：[LangChain](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK](/docs/05-openai-agents-sdk/01-basics/01-overview) · [Embedding](/docs/06-embedding/01-foundations/01-what-is-embedding) · [Context Engineering](/docs/07-context-engineering/01-foundations/01-what-is-context-engineering)
+👉 立即开始：[LangChain](/docs/01-langchain/01-langchain/01-overview) · [Pydantic AI](/docs/02-pydantic-ai/01-basics/01-overview) · [MCP](/docs/03-mcp/01-basics/01-overview) · [Prompt Engineering](/docs/04-prompt-engineering/01-foundations/01-overview) · [OpenAI Agents SDK](/docs/05-openai-agents-sdk/01-basics/01-overview) · [Embedding](/docs/06-embedding/01-foundations/01-what-is-embedding) · [Context Engineering](/docs/07-context-engineering/01-foundations/01-what-is-context-engineering) · [企业知识库实战](/docs/08-enterprise-kb/01-intro/01-why-this-project)

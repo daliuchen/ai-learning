@@ -30,6 +30,7 @@ const MANUAL_TITLES = {
   '05-openai-agents-sdk': '🧭 OpenAI Agents SDK',
   '06-embedding': '🔍 Embedding & 向量检索',
   '07-context-engineering': '🧩 Context Engineering 上下文工程',
+  '08-enterprise-kb': '🏢 企业知识库实战',
 }
 
 const SECTION_TITLES = {
@@ -90,6 +91,17 @@ const SECTION_TITLES = {
   '07-long-context': '长上下文',
   '08-production': '生产化',
   '09-practice': '实战项目',
+  // Enterprise KB（企业知识库实战）
+  '01-intro': '开篇导引',
+  '02-design': '需求与设计',
+  '03-selection': '技术选型',
+  '04-eval': '评估先行',
+  '05-ingest': 'Ingest 管道',
+  '06-basic-rag': '基础 RAG',
+  '07-retrieval': '检索增强',
+  '08-permission': '权限',
+  '09-frontend': '前端',
+  '10-production': '生产化（上线）',
 }
 
 async function rmrf(p) {
@@ -186,7 +198,7 @@ async function copyDocs(src, dst, manualSlug, manualRoot) {
 
 function shortTitle(rawTitle, slug) {
   let t = rawTitle.replace(
-    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|实战|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?|PE(?:\s+(?:Process|Technique|Advanced|By-Task|Models|Production|Practice))?)\s*\d*\s*[：:]\s*/i,
+    /^(?:Lang(?:Chain|Smith|Graph)|Pydantic\s*AI|实战项目|实战|MCP(?:\s+(?:Server|Client|Integration|Production|Advanced|Practice))?|PE(?:\s+(?:Process|Technique|Advanced|By-Task|Models|Production|Practice))?|EKB)\s*\d*\s*[：:]\s*/i,
     '',
   )
   const m = slug.match(/^(\d+)[-_]/)
