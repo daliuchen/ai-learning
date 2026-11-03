@@ -196,10 +196,11 @@ function fixLinks(content, manualSlug, manualRoot, srcPath) {
   content = inlineDemoCode(content, manualRoot, manualSlug)
   // 先按源文件位置处理所有带 ../ 或 ./ 的相对链接（跳过代码块）
   if (srcPath) {
-    const parts = content.split(/(```[\s\S]*?```)/g)
+    // 只认行首的代码围栏，正文里落单的 ``` 不会打乱奇偶
+    const parts = content.split(/(^```[^\n]*\n[\s\S]*?^```[ \t]*$)/gm)
     content = parts
-      .map((seg, i) => {
-        if (i % 2 === 1) return seg
+      .map((seg) => {
+        if (/^```/.test(seg)) return seg
         return seg.replace(/\]\(((?:\.\.?\/)[^)\s]*)\)/g, (all, t) => {
           if (/^\.\.\/\.\.\/demos\//.test(t)) return all
           const r = resolveRelLink(t, srcPath)
