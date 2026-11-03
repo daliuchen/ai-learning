@@ -1,7 +1,7 @@
 """
 project_research_team.py
 ========================
-实战项目 2：多 Agent 研究助手
+实战项目 2：多 Agent 研究助手（LangGraph 1.x：StateGraph + 子图 + Send + interrupt）
 - 顶层 Supervisor
 - 研究子团队（web/doc/arxiv 并行）
 - 写作 fan-out（Send，每节并行）
@@ -12,6 +12,8 @@ project_research_team.py
 from operator import add
 from typing_extensions import Annotated, TypedDict
 
+import os
+
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
@@ -20,6 +22,9 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Send, interrupt
 
 load_dotenv()
+
+# OpenAI 兼容接口（如通义千问）：OPENAI_API_KEY / OPENAI_BASE_URL；模型名取 QWEN_MODEL
+MODEL = os.environ.get("QWEN_MODEL", "gpt-4o-mini")
 
 SECTIONS = ["概述", "核心特性", "与其他框架对比", "适用场景"]
 
@@ -47,7 +52,7 @@ def arxiv_node(s: ResearchState):
 
 def summarize_research(s: ResearchState):
     text = "\n".join([s["web_results"], s["doc_results"], s["arxiv_results"]])
-    out = ChatOpenAI(model="gpt-4o-mini").invoke(f"整合以下资料成 200 字摘要：\n{text}").content
+    out = ChatOpenAI(model=MODEL).invoke(f"整合以下资料成 200 字摘要：\n{text}").content
     return {"summary": out}
 
 
@@ -85,10 +90,9 @@ def call_research(s: MainState):
 
 
 def review_research(s: MainState):
+    """第一个 HITL：审研究摘要。interrupt 会暂停整张图，等 Command(resume=...) 恢复。"""
     ans = interrupt({"stage": "research_done", "summary": s["research"]})
-    if ans != "yes":
-        return {"research": "", "stage": "init"}   # 重新研究
-    return {"stage": "writing"}
+    return {"stage": "writing" if ans == "yes" else "init"}
 
 
 class SectionInput(TypedDict):
@@ -100,59 +104,40 @@ class SectionInput(TypedDict):
 def section_writer(inp: SectionInput):
     prompt = (
         f"主题：{inp['topic']}\n研究资料：{inp['research']}\n"
-        f"请写'{inp['section_title']}'一节，300 字以内。"
+        f"请写'{inp['section_title']}'一节，120 字以内。"
     )
-    text = ChatOpenAI(model="gpt-4o-mini", temperature=0.4).invoke(prompt).content
+    text = ChatOpenAI(model=MODEL, temperature=0.4).invoke(prompt).content
     return {"sections": [(inp["section_title"], text)]}
 
 
-def fan_out_sections(state: MainState):
+def after_research_review(s: MainState):
+    """通过 → 用 Send 动态 fan-out，每节一个并行 worker；拒绝 → 回到 research 重做。"""
+    if s["stage"] != "writing":
+        return "research"
     return [
         Send("section_writer", {
-            "topic": state["topic"],
-            "research": state["research"],
+            "topic": s["topic"],
+            "research": s["research"],
             "section_title": sec,
         })
         for sec in SECTIONS
     ]
 
 
-def post_write(s: MainState):
-    return {"stage": "draft_done"}
-
-
 def review_draft(s: MainState):
+    """第二个 HITL：审初稿。"""
     preview = {t: c[:60] for t, c in s["sections"]}
     ans = interrupt({"stage": "draft_done", "preview": preview})
-    if ans != "yes":
-        return {"sections": [], "stage": "writing"}
-    return {"stage": "editing"}
+    return {"stage": "editing" if ans == "yes" else "rejected"}
 
 
 def edit(s: MainState):
     ordered = sorted(s["sections"], key=lambda x: SECTIONS.index(x[0]))
     draft = "\n\n".join(f"## {t}\n{c}" for t, c in ordered)
-    polished = ChatOpenAI(model="gpt-4o-mini").invoke(
+    polished = ChatOpenAI(model=MODEL).invoke(
         f"对以下报告整体润色，保持 markdown 标题不变：\n{draft}"
     ).content
     return {"final": polished, "stage": "done"}
-
-
-def stage_router(s: MainState):
-    stage = s.get("stage") or "init"
-    return {
-        "init": "research",
-        "research_done": "review_research",
-        "writing": "fan_out",
-        "drafting": "post_write",
-        "draft_done": "review_draft",
-        "editing": "edit",
-        "done": END,
-    }.get(stage, END)
-
-
-def post_fan_out_router(_s):
-    return "post_write"
 
 
 def build_main():
@@ -160,36 +145,19 @@ def build_main():
     g.add_node("research", call_research)
     g.add_node("review_research", review_research)
     g.add_node("section_writer", section_writer)
-    g.add_node("post_write", post_write)
     g.add_node("review_draft", review_draft)
     g.add_node("edit", edit)
 
-    g.add_conditional_edges(
-        START, stage_router,
-        {
-            "research": "research",
-            "review_research": "review_research",
-            "fan_out": "section_writer",      # 用 fan_out 触发 Send
-            "post_write": "post_write",
-            "review_draft": "review_draft",
-            "edit": "edit",
-            END: END,
-        },
-    )
+    g.add_edge(START, "research")
     g.add_edge("research", "review_research")
-    # review_research 决定是否进入 fan_out
-    g.add_conditional_edges(
-        "review_research",
-        lambda s: "fan_out" if s.get("research") else "research",
-        {"fan_out": "section_writer", "research": "research"},
-    )
-    # section_writer 完成后 → post_write
-    g.add_edge("section_writer", "post_write")
-    g.add_edge("post_write", "review_draft")
+    # 返回 Send 列表 → 并行跑多个 section_writer；返回 "research" → 重来
+    g.add_conditional_edges("review_research", after_research_review, ["section_writer", "research"])
+    # 所有 section_writer 都完成后（同一 superstep）才进入 review_draft
+    g.add_edge("section_writer", "review_draft")
     g.add_conditional_edges(
         "review_draft",
-        lambda s: "edit" if s.get("sections") else "section_writer",
-        {"edit": "edit", "section_writer": "section_writer"},
+        lambda s: "edit" if s["stage"] == "editing" else END,
+        {"edit": "edit", END: END},
     )
     g.add_edge("edit", END)
     return g

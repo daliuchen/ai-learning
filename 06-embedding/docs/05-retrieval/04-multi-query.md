@@ -1,6 +1,6 @@
 # Multi-query / Sub-query 拆解
 
-> **一句话**：用户 query 复杂时，**LLM 先拆成多个独立子问题分别检索**，再合并结果——比直接一次检索召回率高 5-15%，特别适合"AND" 类多条件、跨领域问题。
+> 用户的问题比较复杂时，一次检索往往只能捞到其中一部分。更好的做法是先让 LLM 把问题拆成几个独立的子问题，分别检索后再合并。多条件（"AND"类）和跨领域的问题收益最大，简单问题上基本没有收益。
 
 ---
 
@@ -9,13 +9,13 @@
 ### 例 1：多条件
 
 ```
-用户：列出 2024 年 deep learning 论文和 reinforcement learning 论文，比较它们的引用量
+用户：列出 2025 年 deep learning 论文和 reinforcement learning 论文，比较它们的引用量
 
 直接检索：找不到完美匹配的文档（一篇文档很少同时有 DL + RL + 比较）
 
 拆分：
-  - 子问题 1：2024 年 deep learning 论文
-  - 子问题 2：2024 年 reinforcement learning 论文
+  - 子问题 1：2025 年 deep learning 论文
+  - 子问题 2：2025 年 reinforcement learning 论文
   - 子问题 3：引用量比较
   各自检索，合并结果给 LLM
 ```
@@ -46,12 +46,12 @@
 
 ## 2. Multi-Query 实现：query 改写
 
-最简形式：LLM 给同一 query 改写出 N 个版本，并发检索：
+最简单的形式是让 LLM 把同一个 query 改写出 N 个版本，然后并发检索：
 
 ```python
 def generate_query_variants(query: str, n: int = 3) -> list[str]:
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": f"为下面问题生成 {n} 个不同的改写版本，每行一个，不要序号。"},
             {"role": "user", "content": query},
@@ -76,7 +76,7 @@ def multi_query_search(query, top_k=5):
 
 ## 3. Sub-Query 实现：query 拆分
 
-对复合问题分解：
+对复合问题做分解：
 
 ```python
 import json
@@ -84,14 +84,14 @@ import json
 
 def decompose_query(query: str) -> list[str]:
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": """把用户问题拆成独立子问题。
 
 规则：
 - 复合问题（多个独立维度）→ 拆
 - 简单问题 → 输出原 query
-- 输出 JSON array，例：["子问题 1", "子问题 2"]
+- 输出 JSON 对象，例：{"sub_questions": ["子问题 1", "子问题 2"]}
 """},
             {"role": "user", "content": query},
         ],
@@ -105,8 +105,8 @@ def sub_query_search(query, top_k=5):
     sub_qs = decompose_query(query)
     
     if len(sub_qs) == 1:
-        # 简单 query，正常搜
-        return vector_db.search(embed(query), top_k=top_k)
+        # 简单 query，正常搜（返回结构和复合 query 保持一致）
+        return [{"sub_question": query, "hits": vector_db.search(embed(query), top_k=top_k)}]
     
     # 复合 query：每个子问题独立检索
     all_hits = []
@@ -117,7 +117,7 @@ def sub_query_search(query, top_k=5):
     return all_hits   # 让 LLM 处理多个子结果
 ```
 
-给 LLM 时按子问题组织：
+交给 LLM 生成答案时，按子问题组织上下文：
 
 ```python
 def answer_with_sub_queries(query):
@@ -139,11 +139,11 @@ def answer_with_sub_queries(query):
 | | Multi-Query | Sub-Query |
 |---|---|---|
 | 输入 | 一个 query | 一个 query |
-| LLM 干啥 | 改写成同义 | 拆成子问题 |
-| 输出 | 同语义的多个 query | 不同维度的子问题 |
-| 适合 | 单维度模糊 query | 多维度复合 query |
+| LLM 做什么 | 改写成同义说法 | 拆成子问题 |
+| 输出 | 语义相同的多个 query | 不同维度的子问题 |
+| 适合 | 单维度但表述模糊的 query | 多维度复合 query |
 
-实战：**两者可以串联**：
+两者也可以串起来用：
 
 ```python
 sub_qs = decompose_query(query)
@@ -157,7 +157,6 @@ for sq in sub_qs:
 ## 5. 实战 demo
 
 ```python
-# demos/retrieval/04_multi_query.py
 import json
 import numpy as np
 from openai import OpenAI
@@ -196,7 +195,7 @@ def basic_search(query, top_k=3):
 
 def decompose(query):
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": """把问题拆成 1-3 个独立子问题。
 输出 JSON：{"sub_questions": ["..."]}"""},
@@ -236,13 +235,14 @@ for d in sub_query_search(query, top_k=3):
 ## 6. 跟 LangChain 集成
 
 ```python
-from langchain.retrievers.multi_query import MultiQueryRetriever
+# langchain 1.x 已搬到 langchain-classic
+from langchain_classic.retrievers.multi_query import MultiQueryRetriever
 from langchain_openai import ChatOpenAI
 
 
 retriever = MultiQueryRetriever.from_llm(
     retriever=vector_db.as_retriever(),
-    llm=ChatOpenAI(model="gpt-4o-mini"),
+    llm=ChatOpenAI(model="gpt-6-luna"),
 )
 
 
@@ -274,7 +274,7 @@ query_engine = SubQuestionQueryEngine.from_defaults(
 response = query_engine.query("我的订单退款流程和登录问题")
 ```
 
-LlamaIndex 自动拆问题并调对应工具。
+LlamaIndex 会自动拆问题，并调用对应的工具。
 
 ---
 
@@ -285,21 +285,18 @@ Basic search:
   1 次 embed
   1 次向量库查询
   延迟：~50ms
-  成本：~$0.00001
 
 Multi-Query (3 variants):
-  1 次 LLM 改写 (~$0.0001)
-  3 次 embed + 查询
+  1 次 LLM 改写
+  3 次 embed + 查询（可并发）
   延迟：~500ms
-  成本：~$0.0001
 
 Sub-Query (复杂):
   1 次 LLM 分解 + 多次 embed/查询
   延迟：~800ms
-  成本：~$0.0002
 ```
 
-贵 10-20x。**只对复杂 query 开**。
+（延迟是量级示意。）query 的 embed 费用几乎可以忽略，多出来的成本基本全在那一次 LLM 调用上，延迟也高一个数量级，所以只对复杂 query 开启。
 
 ---
 
@@ -308,14 +305,14 @@ Sub-Query (复杂):
 ```python
 def smart_search(query):
     # 简单启发：query 短而单一 → 直接搜
-    if len(query) < 30 and "和" not in query and "," not in query:
+    if len(query) < 30 and "和" not in query and "," not in query and "，" not in query:
         return basic_search(query)
     
     # 复杂 → multi/sub
     return multi_query_search(query)
 ```
 
-或者让 LLM 自己决定：
+也可以让 LLM 自己判断要不要拆：
 
 ```python
 def decompose(query):
@@ -325,9 +322,9 @@ def decompose(query):
 
 ---
 
-## 10. 实测提升
+## 10. 能提升多少（示意）
 
-200 条复合 evalset（每条带 2+ 子主题）：
+下表是示意数据，设定为 200 条复合 evalset（每条涉及两个以上子主题），没有固定到某个模型，只说明几种做法的相对差距：
 
 | 方法 | Recall@10 |
 |------|-----------|
@@ -336,7 +333,7 @@ def decompose(query):
 | Sub-Query | 86% |
 | Sub-Query + RRF | 88% |
 
-对**复合 query** 提升明显。简单 query 提升小，不值得。
+在复合 query 上，Sub-Query + RRF 比 Basic 高 16 个点；简单 query 上这类改写提升很小，不值得多花这笔 LLM 调用的钱。
 
 ---
 
@@ -344,15 +341,15 @@ def decompose(query):
 
 | 坑 | 解 |
 |----|----|
-| LLM 拆出无意义子问题 | prompt 加 "如果原 query 简单，直接返回原 query" |
-| 每个 query 都 LLM 拆 | 加 query 长度判断 |
-| 子问题答案合并混乱 | LLM 综合时分子问题组织 context |
-| 子问题间冲突答案 | 让 LLM 标注矛盾、给用户决策 |
+| LLM 拆出没意义的子问题 | prompt 里写"如果原 query 很简单，直接返回原 query" |
+| 每个 query 都让 LLM 拆 | 先按 query 长度判断 |
+| 子问题的结果合在一起很乱 | 综合答案时按子问题组织 context |
+| 子问题之间答案冲突 | 让 LLM 标出矛盾，交给用户判断 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 Rerank pipeline → [05-rerank-pipeline.md](./05-rerank-pipeline.md)
-- 📖 Self-query / metadata filter → [06-self-query.md](./06-self-query.md)
-- 📖 端到端 RAG → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
+- [重排 Pipeline：召回 → 精排](./05-rerank-pipeline.md)
+- [Self-Query / Metadata Filter](./06-self-query.md)
+- 端到端搭一遍：[完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)

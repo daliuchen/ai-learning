@@ -10,8 +10,10 @@ Pydantic AI 与 MCP（Model Context Protocol）集成示例。
     python demos/modules/01_mcp.py test       # 没 API Key 也能跑：用 TestModel + 假 MCP server 验证注册流程
 
 参考：
-- https://ai.pydantic.dev/mcp/client/
-- https://ai.pydantic.dev/mcp/server/
+- https://pydantic.dev/docs/ai/mcp/client/
+- https://pydantic.dev/docs/ai/mcp/server/
+
+依赖：pip install "pydantic-ai-slim[mcp,openai]"（装的是 FastMCP 4）
 """
 from __future__ import annotations
 
@@ -34,7 +36,8 @@ async def demo_client() -> None:
     第一次跑 npx 会自动下载 @modelcontextprotocol/server-filesystem。
     """
     from pydantic_ai import Agent
-    from pydantic_ai.mcp import MCPServerStdio
+    from fastmcp.client.transports import StdioTransport
+    from pydantic_ai.mcp import MCPToolset
 
     if not os.getenv("OPENAI_API_KEY"):
         print("[skip] OPENAI_API_KEY 未设置，请用 `python ... test` 跑离线版")
@@ -44,16 +47,17 @@ async def demo_client() -> None:
     workdir = Path("/tmp/mcp-demo")
     workdir.mkdir(exist_ok=True)
 
-    fs = MCPServerStdio(
-        "npx",
-        args=["-y", "@modelcontextprotocol/server-filesystem", str(workdir)],
-        timeout=15,
+    fs = MCPToolset(
+        StdioTransport(
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-filesystem", str(workdir)],
+        )
     )
 
     agent = Agent(
-        "openai:gpt-4o-mini",
+        "openai-chat:qwen-flash",
         toolsets=[fs],
-        system_prompt=(
+        instructions=(
             f"你是文件管家，工作目录是 {workdir}。"
             "用户问你问题时，可以读写该目录下的文件。"
         ),
@@ -83,15 +87,16 @@ def demo_server() -> None:
 
         npx @modelcontextprotocol/inspector python demos/modules/01_mcp.py server
     """
-    from mcp.server.fastmcp import FastMCP
+    from fastmcp import FastMCP
     from pydantic_ai import Agent
 
     mcp = FastMCP("pydantic-ai-demo-server")
 
     # 底层用 Pydantic AI Agent 当"大脑"
+    has_key = bool(os.getenv("OPENAI_API_KEY"))
     poet_agent = Agent(
-        "openai:gpt-4o-mini" if os.getenv("OPENAI_API_KEY") else None,
-        system_prompt="你是一位押韵小诗人，回答必须押韵。",
+        "openai-chat:qwen-flash" if has_key else "test",
+        instructions="你是一位押韵小诗人，回答必须押韵。",
     )
 
     @mcp.tool()
@@ -102,7 +107,7 @@ def demo_server() -> None:
     @mcp.tool()
     async def write_poem(theme: str) -> str:
         """根据主题写一首押韵小诗"""
-        if poet_agent.model is None:
+        if not has_key:
             return f"（假装写了一首关于「{theme}」的诗，因为没设 API Key）"
         r = await poet_agent.run(f"主题：{theme}")
         return r.output
@@ -118,7 +123,7 @@ def demo_server() -> None:
         return f"请用一句中文总结下面这段话：\n\n{text}"
 
     print("[server] starting on stdio... (Ctrl+C to stop)", file=sys.stderr)
-    mcp.run()
+    mcp.run(show_banner=False)
 
 
 # =====================================================================
@@ -130,17 +135,19 @@ async def demo_test() -> None:
     - 启动一个本地写的小 MCP server 子进程
     - 用 TestModel 当模型，验证 toolsets 注册流程
     """
+    from fastmcp.client.transports import StdioTransport
     from pydantic_ai import Agent
-    from pydantic_ai.mcp import MCPServerStdio
+    from pydantic_ai.mcp import MCPToolset
     from pydantic_ai.models.test import TestModel
 
     # 启动同文件作为 server（subcommand=server）
     me = Path(__file__).resolve()
-    server = MCPServerStdio(
-        sys.executable,
-        args=[str(me), "server"],
-        env={"OPENAI_API_KEY": ""},   # 故意空，让 server 里也走 TestModel
-        timeout=10,
+    server = MCPToolset(
+        StdioTransport(
+            command=sys.executable,
+            args=[str(me), "server"],
+            env={"OPENAI_API_KEY": ""},   # 故意空，让 server 里也走 test 模型
+        )
     )
 
     agent = Agent(TestModel(), toolsets=[server])

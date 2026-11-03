@@ -1,12 +1,14 @@
 # Pydantic AI 02：安装、依赖与环境
 
-> **一句话**：`pydantic-ai` 是元包，把所有 provider 全装一遍；想精简，用 `pydantic-ai-slim` + `[extras]` 按需取用。
+> 安装只有两种选择：`pydantic-ai` 主包装上就能用，自带 OpenAI / Anthropic / Google 三家 provider 和少量集成；想精简或者要别家 provider，就用 `pydantic-ai-slim` 加 `[extras]` 按需取。V2 起主包变小了，Groq、Mistral、Bedrock 这些要自己加 extra。
+
+以 `pydantic-ai 2.64.0` 为准，要求 Python 3.11+。
 
 ---
 
-## 1. 三种安装姿势
+## 1. 三种安装方式
 
-### 1.1 全家桶（最省事）
+### 1.1 主包（最省事）
 
 ```bash
 pip install pydantic-ai
@@ -14,30 +16,26 @@ pip install pydantic-ai
 uv add pydantic-ai
 ```
 
-这个包**等价于** `pydantic-ai-slim[openai,anthropic,google,groq,mistral,cohere,bedrock,huggingface,logfire,mcp,evals,graph,...]`。
+这个包等价于 `pydantic-ai-slim[anthropic,cli,evals,google,logfire,mcp,openai,web]`（以 2.64.0 的元数据为准），也就是：
 
-适合：
+- 三家 provider：OpenAI、Anthropic、Google
+- `cli`（`clai` 命令依赖）、`mcp`（MCP 客户端，基于 FastMCP）、`evals`、`logfire`、`web`（内置网页聊天 UI）
 
-- 学习阶段、demo、对比多家模型
-- 不在意几十 MB 的额外依赖
+学习、写 demo、对比多家模型时用它就行。如果在意镜像体积或 Serverless 冷启动，或者只用一家 provider，就别装主包。
 
-不适合：
-
-- Docker 镜像要求 < 200MB
-- Serverless / Lambda 冷启动敏感
-- 明确只用某一家 Provider
+> V1 → V2 的变化：V1 的 `pydantic-ai` 主包把所有 provider 都装上；V2 只带上面三家。如果你的代码用 `groq:` / `mistral:` / `bedrock:` 等字符串，升级后要自己加 extra，例如 `pip install "pydantic-ai[groq]"`。
 
 ### 1.2 精简版（生产推荐）
 
-只装你要用的 Provider：
+只装你要用的 provider：
 
 ```bash
 pip install "pydantic-ai-slim[openai]"
-# 多 Provider
+# 多 provider + 可观测
 pip install "pydantic-ai-slim[openai,anthropic,logfire]"
 ```
 
-镜像/包体积能瘦下来 **50% 以上**，且 import 时间更短。
+镜像和包体积能小很多，import 也更快。本手册的 demo 只需要 `pydantic-ai-slim[openai]`（外加各章用到的少量 extra）。
 
 ### 1.3 用 uv（推荐）
 
@@ -45,50 +43,50 @@ pip install "pydantic-ai-slim[openai,anthropic,logfire]"
 uv add "pydantic-ai-slim[openai]"
 ```
 
-`uv` 比 `pip` 快几十倍，Pydantic 团队官方文档也用它做示例。
+`uv` 比 `pip` 快得多，Pydantic 官方文档的示例也用它。
 
 ---
 
-## 2. 完整 extras 列表
+## 2. extras 列表（节选）
 
-`pydantic-ai-slim` 支持的所有可选组：
+`pydantic-ai-slim` 的可选组，按用途分类（完整列表见 `pip show` 或官方安装页）：
 
-| extra | 装了啥 | 何时用 |
-|-------|--------|--------|
-| `openai` | openai SDK | OpenAI / OpenAI 兼容（DeepSeek / Together / OpenRouter） |
-| `anthropic` | anthropic SDK | Claude 系列 |
-| `google` | google-genai | Gemini API（GLA + Vertex） |
-| `groq` | groq SDK | Groq 超快推理 |
-| `mistral` | mistralai SDK | Mistral 模型 |
-| `cohere` | cohere SDK | Cohere Command 系列 |
-| `bedrock` | boto3 + aws | AWS Bedrock 上的各种模型 |
-| `huggingface` | huggingface_hub | HF Inference / TGI |
-| `logfire` | logfire | 可观测性 |
-| `mcp` | mcp | Model Context Protocol 客户端/服务端 |
-| `evals` | pydantic-evals | 评测框架 |
-| `cli` | rich + prompt-toolkit | `pai` 命令行工具 |
-| `vertexai` | google-cloud-aiplatform | Vertex AI |
+| 类别 | extra | 内容 / 何时用 |
+|------|-------|----------------|
+| Provider | `openai` `anthropic` `google` | 三家前沿 provider（主包默认带） |
+| Provider | `bedrock` `groq` `mistral` `cohere` `huggingface` `openrouter` `xai` `cerebras` `voyageai` `snowflake` `zai` ... | 对应 provider SDK |
+| 协议 / 界面 | `mcp` | MCP 客户端（FastMCP 4） |
+| 协议 / 界面 | `ag-ui` `ui` `web` | AG-UI / Vercel AI 适配、内置网页聊天 UI |
+| 观测 / 评测 | `logfire` `evals` | Logfire；`pydantic-evals` |
+| 持久执行 | `temporal` `dbos` `prefect` | 持久执行引擎集成 |
+| 工具 / 集成 | `duckduckgo` `tavily` `exa` `web-fetch` `retries` | 常用搜索工具、抓取、tenacity 重试传输 |
+| 其它 | `cli` `realtime` `sentence-transformers` `spec` | CLI 依赖、实时语音、本地 embedding、Agent 配置文件 |
 
-组合用：
+可以组合着装：
 
 ```bash
-pip install "pydantic-ai-slim[openai,anthropic,google,logfire,mcp]"
+pip install "pydantic-ai-slim[openai,anthropic,logfire,mcp,retries]"
 ```
 
 ---
 
 ## 3. 配套独立包
 
-下面这些是**独立 pip 包**，不是 `pydantic-ai-slim` 的 extras：
+下面这些是独立的 pip 包（部分也能以 extra 的形式带上）：
 
 ```bash
-pip install pydantic-evals     # 评测
-pip install pydantic-graph     # 状态机
-pip install logfire            # 可观测（其实 pydantic-ai 已带）
-pip install mcp                # MCP 原生协议库
+pip install pydantic-evals            # 评测（与 pydantic-ai 同版本号）
+pip install pydantic-graph            # 状态机（pydantic-ai 已依赖它；也可单独用）
+pip install pydantic-ai-harness       # 官方 capability / harness 库（0.x，独立发版）
+pip install "pydantic-ai-harness[coder,skills]"   # harness 的各个能力有自己的 extra
+pip install logfire                   # 可观测
+pip install clai                      # 命令行（clai 现在是独立的包）
+pip install fastmcp                   # 自己写 MCP server 时用（FastMCP 4）
 ```
 
-为什么独立？因为它们可以**不依赖 pydantic-ai 单独使用**。比如你用 LangChain 但想白嫖 Logfire，直接 `pip install logfire` 即可。
+拆成独立包，一是它们可以脱离 pydantic-ai 单独用，二是 harness 这类变化快的东西需要自己的发版节奏。比如你用 LangChain 但想接 Logfire，直接 `pip install logfire` 就行。
+
+`fastmcp` 是第三方包，后面写 MCP server 的例子都用 `from fastmcp import FastMCP`。官方 SDK 2.x 里对应的是 `mcp.server.MCPServer`，见 MCP 手册的[写第一个 MCP Server 和 Client](../../../03-mcp/docs/01-basics/06-first-server.md)。
 
 ---
 
@@ -96,16 +94,14 @@ pip install mcp                # MCP 原生协议库
 
 | 项 | 要求 |
 |----|------|
-| Python | **>= 3.10** |
-| Pydantic | **>= 2.6** |
+| Python | >= 3.11（V2；V1 时代是 3.9/3.10） |
+| Pydantic | 2.x 最新（本手册用 2.14） |
 | OS | Linux / macOS / Windows / WSL |
-
-⚠️ Python 3.9 不行（用了 `X \| Y` 类型语法、`match` 等 3.10 特性）。
 
 ```python
 # 检查
 import sys
-assert sys.version_info >= (3, 10), "Pydantic AI 需要 Python 3.10+"
+assert sys.version_info >= (3, 11), "Pydantic AI V2 需要 Python 3.11+"
 ```
 
 ---
@@ -116,23 +112,23 @@ assert sys.version_info >= (3, 10), "Pydantic AI 需要 Python 3.10+"
 
 ```python
 # verify.py
-import pydantic
-import pydantic_ai
+from importlib.metadata import version
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
-print(f"pydantic        : {pydantic.VERSION}")
-print(f"pydantic-ai     : {pydantic_ai.__version__}")
+print("pydantic-ai :", version("pydantic-ai"))   # 或 version("pydantic-ai-slim")
 
-agent = Agent(TestModel())
+agent = Agent(TestModel())          # 等价于 Agent("test")
 result = agent.run_sync("ping")
-print(f"TestModel reply : {result.output}")
+print("TestModel reply :", result.output)
 ```
 
-跑通就说明环境 OK。注意：
+能跑通就说明环境没问题。几点说明：
 
-- `TestModel()` 是内置 mock，不会真的调用网络
-- `result.output` 是 `TestModel` 编造的字符串，仅用于打通流程
+- `TestModel()` 是内置 mock，不会真的调用网络；`Agent('test')` 是它的简写
+- `result.output` 是 `TestModel` 编造的字符串，只用来走通流程
+- 第一次运行时终端可能打印一个带 ASCII 图案的横幅（提示接入 Logfire）；设 `PYDANTIC_AI_NO_BANNER=1` 可关掉
+- 读包版本用 `importlib.metadata.version(...)`，比 `module.__version__` 可靠
 
 ---
 
@@ -142,7 +138,7 @@ Pydantic AI 走标准 SDK 的环境变量：
 
 | 环境变量 | 对应 Provider |
 |---------|---------------|
-| `OPENAI_API_KEY` | OpenAI / OpenAIChatModel |
+| `OPENAI_API_KEY`（+ 可选 `OPENAI_BASE_URL`） | OpenAI / 任何 OpenAI 兼容端点（千问、DeepSeek……） |
 | `ANTHROPIC_API_KEY` | Anthropic |
 | `GEMINI_API_KEY` 或 `GOOGLE_API_KEY` | Google GLA |
 | `GROQ_API_KEY` | Groq |
@@ -152,40 +148,44 @@ Pydantic AI 走标准 SDK 的环境变量：
 | `HF_TOKEN` | Hugging Face |
 | `LOGFIRE_TOKEN` | Logfire |
 
-推荐用 `python-dotenv` 管理：
-
-```bash
-pip install python-dotenv
-```
-
-`.env`：
+本手册的 demo 用千问。阿里云百炼提供 OpenAI 兼容端点，只需要这两个变量：
 
 ```ini
 OPENAI_API_KEY=sk-xxxx
-ANTHROPIC_API_KEY=sk-ant-xxxx
-LOGFIRE_TOKEN=lf_xxxx
+OPENAI_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+```
+
+代码里写 `"openai-chat:qwen-flash"` 就行（`openai-chat:` = Chat Completions API；`openai:` 在 V2 默认走 Responses API，千问的兼容端点目前只保证 Chat Completions）。
+
+建议用 `python-dotenv` 管理：
+
+```bash
+pip install python-dotenv
 ```
 
 代码顶部：
 
 ```python
 from dotenv import load_dotenv
-load_dotenv()  # 必须在 import pydantic_ai 之前或在 Agent 实例化之前
+load_dotenv()  # 在创建 Agent 之前调用
 
 from pydantic_ai import Agent
-agent = Agent("openai:gpt-4o-mini")
+agent = Agent("openai-chat:qwen-flash")
 ```
 
-也可以直接显式传：
+也可以显式传参，多账号切换或写单元测试时更清楚：
 
 ```python
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
-model = OpenAIChatModel("gpt-4o-mini", provider=OpenAIProvider(api_key="sk-xxx"))
+model = OpenAIChatModel(
+    "qwen-flash",
+    provider=OpenAIProvider(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", api_key="sk-xxx"),
+)
 ```
 
-显式传的好处是**多账号切换、单元测试**。
+> 没有 key 也能练：`Agent("test")` 用的是内置的离线测试模型。另外，V2 里 `Agent("openai:...")` 在创建时就会检查 key（缺失会立刻抛 `UserError`）；想延迟到第一次运行再检查，传 `defer_model_check=True`。
 
 ---
 
@@ -194,46 +194,55 @@ model = OpenAIChatModel("gpt-4o-mini", provider=OpenAIProvider(api_key="sk-xxx")
 生产项目最小依赖：
 
 ```text
-pydantic-ai-slim[openai,anthropic,logfire]>=0.0.20
-pydantic>=2.6.0
+pydantic-ai-slim[openai,logfire]>=2.64.0
 python-dotenv>=1.0.0
 ```
 
-完整学习项目（本仓库的版本）：
+完整学习项目（见本手册根目录 `requirements.txt`）：
 
 ```text
-pydantic-ai>=0.0.20
-pydantic>=2.6.0
-pydantic-evals>=0.0.20
-pydantic-graph>=0.0.20
-logfire>=2.0.0
-mcp>=1.0.0
-python-dotenv>=1.0.0
-httpx>=0.27.0
+pydantic-ai>=2.64.0
+pydantic-evals>=2.64.0
+pydantic-graph>=2.64.0
+pydantic-ai-harness>=0.64.0
+logfire>=4.0
+fastmcp>=4.0
+clai>=2.64.0
+python-dotenv>=1.0
 ```
 
 ---
 
 ## 8. 升级与版本对齐
 
-Pydantic AI 还在 0.x 阶段，**小版本可能有 break change**。养成习惯：
+Pydantic AI 现在是 2.x（稳定版，有版本策略：主版本内保持兼容、弃用走警告），但 `pydantic-ai-harness` 仍是 0.x，小版本之间可能有不兼容改动。升级前后看一眼版本：
 
 ```bash
 pip install --upgrade pydantic-ai
 pip show pydantic-ai | grep Version
 ```
 
-升级前先看 [CHANGELOG](https://github.com/pydantic/pydantic-ai/releases)。
+升级前先看 [CHANGELOG](https://github.com/pydantic/pydantic-ai/releases)。官方建议的路线是先升到最新的 1.x（≥ 1.100），把弃用警告都处理掉，再升 V2；V1 的消息历史在 V2 里仍然能反序列化。
 
-⚠️ 一个常见的 break：`output_type` 之前叫 `result_type`，0.0.13 之后统一改名。如果你看的是老博客示例，记得改过来：
+老博客示例里常见的几种写法，升级后要改：
 
 ```python
-# ❌ 旧写法（0.0.13 之前）
-agent = Agent("openai:gpt-4o", result_type=Invoice)
+# ❌ 0.0.x 时代
+agent = Agent("openai:gpt-4o", result_type=Invoice)       # result_type 早已改名
+result.data                                                # 早已改名为 result.output
+result.usage()                                             # V2：usage 是属性
 
-# ✅ 新写法
-agent = Agent("openai:gpt-4o", output_type=Invoice)
+# ✅ 现在
+agent = Agent("openai:gpt-6.1-sol", output_type=Invoice)
+result.output
+result.usage
 ```
+
+另外 V2 默认行为的几处变化：
+
+- 模型在同一次回复里既调了普通工具又交了最终输出时，默认策略从 `'early'` 改为 `'graceful'`：工具按模型发出的顺序执行，排在输出工具之前的普通工具现在会被执行（副作用会发生），以前是跳过；
+- 不带类型参数的 `Agent(...)` 推断为 `Agent[object, str]`，不再是 `Agent[None, str]`；
+- `RetryPromptPart` 被废弃，见 [07 篇](07-messages-history.md)。
 
 ---
 
@@ -242,12 +251,13 @@ agent = Agent("openai:gpt-4o", output_type=Invoice)
 | 现象 | 原因 | 解法 |
 |------|------|------|
 | `ImportError: cannot import name 'Agent' from 'pydantic_ai'` | 装成了 `pydantic_ai_xxx` 三方包 | `pip install pydantic-ai`（中划线） |
-| `RuntimeError: pydantic-ai-slim does not include openai` | slim 没装 extras | `pip install "pydantic-ai-slim[openai]"` |
-| `OpenAIError: api_key client option must be set` | 没加载 .env | `load_dotenv()` 加在最顶部 |
-| `ssl: certificate verify failed`（公司网） | 自签证书 | 设 `SSL_CERT_FILE` 或用公司提供的 trust 包 |
-| `metadata-generation-failed: pydantic-core` | Python < 3.10 或 Rust 工具链缺失 | 升 Python；或 `pip install --upgrade pip wheel` |
-| `httpx.RemoteProtocolError` | 国内网络墙 OpenAI | 走代理 / 用 OpenRouter / 用国产模型 |
-| `pip install pydantic-ai` 装到老 pydantic 1.x | 之前的虚拟环境污染 | `pip install -U pydantic-ai` 或新建 venv |
+| `UserError: Set the OPENAI_API_KEY ...` | 没加载 .env / V2 在创建 Agent 时就检查 key | `load_dotenv()` 放在最顶部；或 `defer_model_check=True`；或先用 `Agent('test')` |
+| `ImportError: ... groq`（用 `groq:` 字符串时） | V2 主包不再带 Groq 等 provider | `pip install "pydantic-ai[groq]"` |
+| 找不到 `clai` 命令 | `clai` 现在是独立的包 | `pip install clai`（或 `uvx clai`） |
+| `ssl: certificate verify failed`（公司网） | 自签证书 | Pydantic AI 自己的请求用系统信任库验证证书；确认公司根证书装进了系统信任库，或设 `SSL_CERT_FILE` |
+| `metadata-generation-failed: pydantic-core` | Python < 3.11 或 Rust 工具链缺失 | 升 Python；或 `pip install --upgrade pip wheel` |
+| `httpx.RemoteProtocolError` / `ModelConnectionError` | 国内网络访问国外模型 | 走代理 / 用 OpenRouter / 用国产模型（千问等） |
+| `from mcp.server.fastmcp import FastMCP` 报错 | `mcp` 2.x 把 `FastMCP` 改名为 `MCPServer` | 用 `from fastmcp import FastMCP`（FastMCP 4），或锁 `mcp<2` |
 
 ---
 
@@ -255,18 +265,18 @@ agent = Agent("openai:gpt-4o", output_type=Invoice)
 
 | 维度 | Pydantic AI | LangChain |
 |------|-------------|-----------|
-| 主包是否包含所有 Provider | `pydantic-ai` 包含 / `slim` 不含 | 全部拆 partner 包 |
+| 主包是否包含所有 Provider | `pydantic-ai` 带三家 / `slim` 不带 | 全部拆 partner 包 |
 | 拆包策略 | 一个 slim + extras | 几十个独立包 |
-| 安装心智 | "要不要 slim" | "要装哪几个 partner" |
-| 升级心智 | 一个版本号 | 多个版本号要对齐 |
+| 安装时要想的 | 要不要 slim、要哪些 extra | 要装哪几个 partner |
+| 升级时要想的 | 主包与 evals / graph 同版本号，harness 独立 | 多个版本号要对齐 |
 
-LangChain 的拆包是"一个 partner 一个包"，安装命令更长：
+LangChain 是一个 partner 一个包，安装命令更长：
 
 ```bash
 pip install langchain langchain-openai langchain-anthropic langgraph langsmith
 ```
 
-Pydantic AI 用 `extras` 统一收口：
+Pydantic AI 统一用 `extras`：
 
 ```bash
 pip install "pydantic-ai-slim[openai,anthropic,logfire]"
@@ -276,6 +286,6 @@ pip install "pydantic-ai-slim[openai,anthropic,logfire]"
 
 ## 11. 本章 demo
 
-完整可运行代码：[`demos/basics/02_installation.py`](../../demos/basics/02_installation.py)
+完整可运行代码：[`demos/basics/02_installation.py`](../../demos/basics/02_installation.py)（打印各包版本 + TestModel ping + 真实模型 ping）
 
-跑通后下一章：[03-first-agent.md](03-first-agent.md) —— 详细拆解 Agent。
+下一章：[Pydantic AI 03：第一个 Agent](03-first-agent.md)，把 Agent 拆开细看。

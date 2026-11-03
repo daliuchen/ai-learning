@@ -1,51 +1,53 @@
 # Pydantic AI 进阶 07：HTTP 重试与 ModelRetry
 
-> **一句话**：Pydantic AI 把重试分成两层 —— **HTTP 层**用 `AsyncTenacityTransport` 处理 429/5xx 这种"传输错误"，**模型层**用 `ModelRetry` 处理"模型输出不合规"，加上 `FallbackModel` 兜底，构成一套完整的"抗抖动 + 抗幻觉"防护。
+> Pydantic AI 的重试分布在七个层面，各层预算互不共享。传输层（`AsyncHTTPX2TenacityTransport`，处理 429/5xx）、provider SDK、持久执行引擎、模型回退（`ModelFallback`）这四层，模型是看不到的；工具、输出、模型请求 hook 这三层通过 `ModelRetry` 把错误交给模型。每一层单独看都有用，叠在一起次数会相乘，所以得想清楚由哪一层负责重试。
+
+以 `pydantic-ai 2.64.0` 为准。基于 httpx 的 `AsyncTenacityTransport` / `TenacityTransport` 已弃用，改用基于 `httpx2` 的 `AsyncHTTPX2TenacityTransport` + `create_async_httpx2_client()`。
 
 ---
 
 ## 1. 为什么 LLM 应用必须有重试
 
-裸调 LLM 在生产里大概率挂在这五种错误上：
+直接调 LLM，生产环境里大多会碰到这五种错误：
 
 | 错误 | 层 | 是否可重试 |
 |------|----|-----------|
-| 网络抖动、`ConnectionError` | HTTP | ✅ 立即重试 |
-| 429 Rate Limit | HTTP | ✅ 看 `Retry-After` header 重试 |
-| 5xx 服务端错误 | HTTP | ✅ 指数退避重试 |
-| 模型返回不符 schema | 模型 | ✅ `ModelRetry` 让它再试一次 |
-| 模型返回的字段值业务上不合法（如不存在的用户 ID） | 业务 | ✅ 工具内 raise `ModelRetry` |
+| 网络抖动、`ConnectionError` | HTTP | 可以，立即重试 |
+| 429 Rate Limit | HTTP | 可以，按 `Retry-After` header 等待后重试 |
+| 5xx 服务端错误 | HTTP | 可以，指数退避重试 |
+| 模型返回不符合 schema | 模型 | 可以，用 `ModelRetry` 让它再试一次 |
+| 模型返回的字段值业务上不合法（如不存在的用户 ID） | 业务 | 可以，在工具里 raise `ModelRetry` |
 
-第 1-3 类是"传输问题"，对 LLM 而言只是 SDK 报错；
-第 4-5 类是"语义问题"，要把错误信息回传给模型让它重试。
+前三类是传输问题，对 LLM 来说只是 SDK 报了个错；后两类是语义问题，需要把错误信息交回模型，让它重新生成。
 
-Pydantic AI 把这两层完全解耦：**HTTP 层重试用 tenacity，模型层重试用 ModelRetry 异常**。
+Pydantic AI 把这两层完全分开：HTTP 层用 tenacity 重试，模型层用 `ModelRetry` 异常重试。
 
 ---
 
-## 2. 整体架构
+## 2. 整体架构：七个层面
 
-```
-                ┌──────────────────────────────────────┐
-                │           Agent.run                  │
-                └──────────────────────────────────────┘
-                              │
-              ┌───────────────┴──────────────┐
-              ▼                              ▼
-        ┌──────────┐                  ┌──────────────┐
-        │ 模型层重试 │ ← ModelRetry     │ HTTP 层重试   │
-        │ Agent retries=N             │ Tenacity       │
-        │ 工具/校验失败时再调一次 LLM    │ 429/5xx/网络抖动  │
-        └──────────┘                  └──────────────┘
-              │                              │
-              └────────┬─────────────────────┘
-                       ▼
-              ┌──────────────────┐
-              │  FallbackModel   │  ← 整个链都挂，切到备用模型
-              └──────────────────┘
-```
+| 层面 | 重试的是什么 | 配置 | 模型看得到吗 |
+|------|-------------|------|-------------|
+| 传输层 | 同一个 HTTP 请求 | `AsyncHTTPX2TenacityTransport` | 看不到 |
+| provider SDK | 同一个 HTTP 请求，由 SDK 重发 | SDK 自带（OpenAI / Anthropic 默认 3 次尝试；Google / Mistral / HF 默认 1 次；Bedrock 5 次）；`model_settings={'max_retries': N}` | 看不到 |
+| 持久执行引擎 | 整个模型请求（Temporal 默认无上限重试） | 引擎自己的 `retry_policy` | 看不到 |
+| 模型回退 | 同一个请求换一个模型 | `ModelFallback` / `FallbackModel` | 看不到 |
+| 模型请求尝试 | 同一步骤再试一次（hook 里抛 `RetryModelRequest`，上限 100 次，不耗预算） | hook | 看不到 |
+| 工具 | 一次工具调用：告诉模型让它改 | `retries={'tools': N}` / 单工具 | 看得到（`ToolReturnPart(outcome='retried')`） |
+| 输出 | 最终答案：告诉模型让它改 | `retries={'output': N}` / `ToolOutput(max_retries=N)` | 看得到（`RetryFeedbackPart`） |
+| 模型请求 hook | hook 里抛 `ModelRetry` | 耗输出预算 | 看得到 |
 
-三层各管各的，组合起来才是生产可用。
+表里「模型请求尝试」和「模型请求 hook」是同一层的两种写法（一个不耗预算、对模型不可见，一个耗输出预算、模型看得到），所以官方说的是七个层面，表里有八行。
+
+只有最后三类属于 agent 层面的重试，每次都要多付一轮模型调用；其余各层对模型都不可见。
+
+### 重试相乘
+
+各层不共享预算，但次数会叠加。举个例子：输出重试 2 次（最终答案最多 3 次请求），乘以 OpenAI SDK 默认的 2 次重试（每个请求 3 次尝试），再乘以传输层 2 次重试（又是 3 次尝试），最坏情况下，光为了一个最终答案就可能在网络上发出 3 × 3 × 3 = 27 个请求。所以：
+
+- **只让一层负责重试**：自己装了传输层重试，就用 `model_settings={'max_retries': 0}` 关掉 SDK 层；
+- `UsageLimits` 和各层的超时要按最坏情况来定，而不是按正常情况；
+- 模型回退（`ModelFallback`）只处理「这个模型这会儿用不了」，瞬时故障留给传输层或 SDK 层。
 
 ---
 
@@ -53,25 +55,33 @@ Pydantic AI 把这两层完全解耦：**HTTP 层重试用 tenacity，模型层�
 
 ### 3.1 装依赖
 
-HTTP 重试用 tenacity，是 optional dependency：
+HTTP 重试用的 tenacity 是可选依赖：
 
 ```bash
 pip install 'pydantic-ai-slim[retries]'
 ```
 
-它会把 `tenacity` 和 Pydantic AI 的 `retries` 子模块一起装上。
+会把 `tenacity` 和 Pydantic AI 的 `retries` 子模块一起装上。
 
 ### 3.2 最小配置
 
 ```python
-from httpx import AsyncClient, HTTPStatusError
+import httpx2
 from tenacity import retry_if_exception_type, stop_after_attempt, wait_exponential
 
-from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig, wait_retry_after
+from pydantic_ai.models import create_async_httpx2_client
+from pydantic_ai.retries import AsyncHTTPX2TenacityTransport, RetryConfig, wait_retry_after
 
-transport = AsyncTenacityTransport(
+
+def raise_for_retryable(response):
+    # 只有 429 / 5xx 才触发重试，其它状态码原样返回
+    if response.status_code in (429, 502, 503, 504):
+        response.raise_for_status()      # 抛 httpx2.HTTPStatusError，让 tenacity 接手
+
+
+transport = AsyncHTTPX2TenacityTransport(
     config=RetryConfig(
-        retry=retry_if_exception_type((HTTPStatusError, ConnectionError)),
+        retry=retry_if_exception_type((httpx2.HTTPStatusError, httpx2.ConnectError)),
         wait=wait_retry_after(
             fallback_strategy=wait_exponential(multiplier=1, max=60),
             max_wait=300,
@@ -79,19 +89,20 @@ transport = AsyncTenacityTransport(
         stop=stop_after_attempt(5),
         reraise=True,
     ),
-    validate_response=lambda r: r.raise_for_status(),
+    validate_response=raise_for_retryable,
 )
 
-client = AsyncClient(transport=transport)
+client = create_async_httpx2_client(transport=transport)   # 保留 Pydantic AI 默认的超时 / User-Agent
 ```
 
-关键点：
+参数说明：
 
-- **`retry=`**：什么异常要重试。`HTTPStatusError` 是 httpx 在 4xx/5xx 时抛的（需要配合 `validate_response`）
-- **`wait=wait_retry_after(...)`**：先看响应里的 `Retry-After` header，没有就走 fallback（指数退避）
-- **`stop=stop_after_attempt(5)`**：最多 5 次
-- **`reraise=True`**：跑完还失败，原样抛出原异常（默认会包成 `RetryError`）
-- **`validate_response=lambda r: r.raise_for_status()`**：让 4xx/5xx 触发异常，否则 httpx 默认不抛
+- `retry=`：哪些异常要重试。`HTTPStatusError` 要配合 `validate_response` 才会产生；
+- `wait=wait_retry_after(...)`：先看响应里的 `Retry-After` header，没有的话走 fallback（指数退避）；
+- `stop=stop_after_attempt(5)`：最多 5 次。`reraise=True` 表示重试完还失败时原样抛出原异常（默认会包成 `RetryError`）；
+- 传给 `create_async_httpx2_client(transport=...)` 的 transport 会替换客户端自己创建的那个，所以连接池也由它负责（默认 1000 连接 / 100 保活）。要走代理，就给重试 transport 传一个自己创建的 `wrapped=httpx2.AsyncHTTPTransport(proxy=...)`。
+
+> 旧写法 `from httpx import AsyncClient` + `AsyncTenacityTransport` 在 V2 里会触发弃用警告（`will be removed in v3; use AsyncHTTPX2TenacityTransport with httpx2.AsyncClient instead`）。
 
 ### 3.3 接到 Pydantic AI
 
@@ -101,38 +112,38 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 model = OpenAIChatModel(
-    'gpt-4o-mini',
-    provider=OpenAIProvider(http_client=client),  # ← 把带重试的 client 喂进去
+    'qwen-flash',
+    provider=OpenAIProvider(http_client=client),   # ← 把带重试的 client 喂进去
 )
-agent = Agent(model)
+agent = Agent(model, model_settings={'max_retries': 0})   # ← 让传输层成为唯一的重试方
 ```
 
-Anthropic / Google / 任何 OpenAI-compatible provider 都是同一招：把 `http_client` 参数填上。
+千问等 OpenAI 兼容端点、Anthropic、Google 都是同样的接法，前提是它的 SDK 接受 `httpx2` 客户端；Bedrock 走 boto3，是个例外。
 
 ### 3.4 同步版本
 
-`AsyncTenacityTransport` 用于异步 httpx；同步用 `TenacityTransport`。日常 Agent 都是异步，HTTP transport 用 async 即可，不要混用。
+同步场景用 `HTTPX2TenacityTransport`，配 `httpx2.Client`。Agent 一般都是异步的，用 async 版本就行，不要混用。
 
 ---
 
-## 4. 关键：尊重 Retry-After
+## 4. 遵守 Retry-After
 
-OpenAI / Anthropic 在 429 限流时会返回：
+OpenAI / Anthropic 限流返回 429 时会带上：
 
 ```
 HTTP/1.1 429 Too Many Requests
 Retry-After: 23
 ```
 
-或 HTTP 日期格式：
+或者 HTTP 日期格式：
 
 ```
 Retry-After: Wed, 21 Oct 2026 07:28:00 GMT
 ```
 
-`wait_retry_after()` 会**自动解析这两种格式**，避免你瞎重试反而被 ban。如果 server 没给 header，就走 `fallback_strategy=wait_exponential(...)`。
+`wait_retry_after()` 能自动解析这两种格式，避免盲目重试反而被封。服务端没给这个 header 时，走 `fallback_strategy=wait_exponential(...)`。
 
-这一点比手撸 retry 强很多 —— 自己写 `time.sleep(2)` 这种固定退避在限流场景里会反复触发限流。
+这比自己手写重试强很多。像 `time.sleep(2)` 这种固定间隔的退避，在限流场景下只会一次次再撞上限流。
 
 ---
 
@@ -144,27 +155,27 @@ Retry-After: Wed, 21 Oct 2026 07:28:00 GMT
 from pydantic_ai import Agent
 
 agent = Agent(
-    'openai:gpt-4o-mini',
+    'openai-chat:qwen-flash',
     retries=3,  # 模型输出不合规时，最多重试 3 次
 )
 ```
 
-默认值是 1。`retries` 控制的是**结构化输出校验失败、工具调用失败时**重新让模型生成的次数。注意它**不重试** HTTP 错误，那是上一层 transport 的事。
+默认值是 1。`retries` 控制的是结构化输出校验失败、工具调用失败时，让模型重新生成的次数。它不重试 HTTP 错误，那是 transport 层的事。
 
 更细的写法：
 
 ```python
 agent = Agent(
-    'openai:gpt-4o-mini',
+    'openai-chat:qwen-flash',
     retries={'tools': 3, 'output': 2},
 )
 ```
 
-分别控制工具失败和输出失败的次数。
+分别控制工具失败和输出失败的重试次数。
 
-### 5.2 工具里主动 raise ModelRetry
+### 5.2 在工具里主动 raise ModelRetry
 
-模型经常给你**"看起来合法但业务上没用"**的参数，比如查询一个不存在的用户名：
+模型经常给出看起来合法、但业务上没用的参数，比如查一个不存在的用户名：
 
 ```python
 from pydantic_ai import Agent, ModelRetry, RunContext
@@ -174,7 +185,7 @@ class DatabaseConn:
     users = {'Alice': 1, 'Bob': 2}
 
 
-agent = Agent('openai:gpt-4o-mini', deps_type=DatabaseConn)
+agent = Agent('openai-chat:qwen-flash', deps_type=DatabaseConn)
 
 
 @agent.tool(retries=2)
@@ -189,14 +200,14 @@ def get_user_by_name(ctx: RunContext[DatabaseConn], name: str) -> int:
     return user_id
 ```
 
-工作原理：
+过程是这样的：
 
 1. 模型调用 `get_user_by_name(name="alice")`（小写）
 2. 工具 raise `ModelRetry('No user found with name "alice", ...')`
-3. Pydantic AI 把 retry 消息塞进 `ToolReturnPart`，再次调模型
-4. 模型读到错误信息，重新尝试 `get_user_by_name(name="Alice")`
+3. Pydantic AI 把这条消息放进 `ToolReturnPart`，再次调用模型
+4. 模型读到错误信息，改成 `get_user_by_name(name="Alice")` 重试
 
-**这是 LLM 应用最强大的自愈能力**，把"业务校验"反馈给模型让它自己改。
+把业务校验的结果反馈给模型，让它自己修正，这是 LLM 应用里非常实用的一种自我纠错方式。
 
 ### 5.3 output_validator 触发的重试
 
@@ -210,7 +221,7 @@ class Issue(BaseModel):
     severity: str
 
 
-agent = Agent('openai:gpt-4o-mini', output_type=Issue, retries=3)
+agent = Agent('openai-chat:qwen-flash', output_type=Issue, retries=3)
 
 
 @agent.output_validator
@@ -222,7 +233,7 @@ def validate_issue(ctx: RunContext, issue: Issue) -> Issue:
     return issue
 ```
 
-模型输出过校验前，会反复让它修。
+输出通不过校验时，错误信息会交回模型让它改，最多重试 `retries` 次（这里是 3 次），用完还不过就抛 `UnexpectedModelBehavior`。
 
 ### 5.4 拿到当前重试次数
 
@@ -233,13 +244,13 @@ def search(ctx: RunContext, query: str) -> str:
     ...
 ```
 
-适合在最后一次时降级（比如改用更宽松的查询、或返回降级结果）。
+可以在最后一次时降级，比如换一个更宽松的查询，或者直接返回降级结果。
 
 ---
 
 ## 6. 退避策略
 
-`tenacity` 提供多种 wait 策略，混搭：
+`tenacity` 提供了好几种 wait 策略，可以组合使用：
 
 ```python
 from tenacity import (
@@ -259,101 +270,84 @@ wait_fixed(5)
 wait_combine(wait_exponential(max=60), wait_random(0, 1))
 ```
 
-生产里常用：**`wait_retry_after(fallback_strategy=wait_combine(wait_exponential(), wait_random(0, 2)))`**，既尊重 server 又防群体雪崩。
+我在生产里常用 `wait_retry_after(fallback_strategy=wait_combine(wait_exponential(), wait_random(0, 2)))`：既遵守服务端的要求，又加了随机抖动，避免大量客户端同时重试。
 
 ---
 
-## 7. FallbackModel：换条腿走路
+## 7. 模型回退：`ModelFallback` / `FallbackModel`
 
-当 OpenAI 整体宕机时，单纯重试没意义。`FallbackModel` 让你直接切到另一家：
+OpenAI 整体宕机时，单纯重试没有意义，应该直接切到另一家。V2 推荐用 `ModelFallback` capability，`FallbackModel` 也还能用：
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import ModelFallback
 from pydantic_ai.models.fallback import FallbackModel
 
-fallback_model = FallbackModel(
-    'openai:gpt-4o',
-    'anthropic:claude-sonnet-4-5',
-    'google-gla:gemini-2.0-flash',
-)
-agent = Agent(fallback_model)
-result = agent.run_sync('什么是 GIL？')
+agent = Agent('openai:gpt-6.1-sol', capabilities=[ModelFallback('anthropic:claude-sonnet-5-5', 'google:gemini-3.8-flash')])
+# 或
+agent = Agent(FallbackModel('openai:gpt-6.1-sol', 'anthropic:claude-sonnet-5-5', 'google:gemini-3.8-flash'))
 ```
 
 触发条件：
 
-- **默认**：第一个模型抛 `ModelAPIError`（4xx/5xx）时切下一个
-- **自定义**：传 `fallback_on=callable`，按业务规则切
+- 默认：请求抛出 `ModelAPIError`（4xx/5xx）时切到下一个；
+- 自定义：`fallback_on=` 可以是异常类型元组、异常处理函数、响应处理函数（拒绝一个成功返回但内容不合格的响应），或者它们组成的列表。
 
 ```python
+from pydantic_ai import ModelAPIError
 from pydantic_ai.messages import ModelResponse
 
-
-def bad_finish_reason(response: ModelResponse) -> bool:
+def truncated(response: ModelResponse) -> bool:      # 首参标注为 ModelResponse → 当作响应处理函数
     return response.finish_reason in ('length', 'content_filter')
 
-
-fallback_model = FallbackModel(
-    'openai:gpt-4o',
-    'anthropic:claude-sonnet-4-5',
-    fallback_on=bad_finish_reason,
+agent = Agent(
+    'openai:gpt-6.1-sol',
+    capabilities=[ModelFallback('anthropic:claude-sonnet-5-5', fallback_on=[ModelAPIError, truncated])],
 )
 ```
 
-如果所有模型都挂了，抛 `FallbackExceptionGroup`，里面装着每个模型的异常。
+只传响应处理函数会替换默认的 `(ModelAPIError,)`，这时 API 错误会直接抛出，不再回退。两者都要的话，像上面这样放进同一个列表。所有模型都失败时抛 `FallbackExceptionGroup`，里面是每个模型各自的异常。还要注意，回退和重试不一样：下一个模型一般用不上前一个已经建好的提示词缓存，答案和价格也可能不同。demo 07 里用 `BoomModel` 抛 `ModelHTTPError(503)` 演示了回退，由备用的 `TestModel` 接手。
 
 ---
 
-## 8. 注意：SDK 自带重试 vs Pydantic AI 重试
+## 8. SDK 自带重试 vs 传输层重试
 
-OpenAI 和 Anthropic 的 SDK 内部都有 `max_retries`（默认 2）。这会**抢在** Pydantic AI 之前重试，导致两个问题：
+OpenAI 和 Anthropic 的 SDK 内部都有 `max_retries`（默认 2，即每个请求最多尝试 3 次）。如果你又装了传输层重试，就是两层叠在一起，带来两个问题：
 
-1. **响应慢**：SDK 等几秒、Pydantic AI 又等几秒，叠加起来很久
-2. **FallbackModel 切换变慢**：SDK 重试完才把异常往外抛，Fallback 才生效
+1. 响应变慢：SDK 等几秒，传输层又等几秒；
+2. 模型回退变慢：SDK 重试完才把异常往外抛，回退这时才生效。
 
-生产里强烈建议：
+V2 里关掉 SDK 重试要通过模型设置，而不是 provider 的构造参数：
 
 ```python
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
-
-model = OpenAIChatModel(
-    'gpt-4o',
-    provider=OpenAIProvider(
-        api_key='sk-...',
-        max_retries=0,  # ← 关掉 SDK 自带重试
-    ),
-)
+agent = Agent(model, model_settings={'max_retries': 0})     # 运行时也可以单次覆盖
 ```
 
-把重试统一交给 `AsyncTenacityTransport` 管，避免双层重试。
+各 provider 的 SDK 默认重试次数、能否降到 1 次都不一样：大多数是 3 次；Google / Mistral / Hugging Face 默认 1 次；Bedrock 是 5 次，走 boto3，不经过传输层。详见官方 *Retries* 页。
 
 ---
 
 ## 9. 重试与流式
 
-**重要**：重试机制和流式 **基本不兼容**。
+重试和流式基本上合不来：
 
-- HTTP 层 transport 重试：流式响应一旦开始读，重试就失去意义（数据已经吐出来一半了）
-- 模型层 `ModelRetry`：要等输出完整收到才能校验，与"边收边返给用户"矛盾
+- HTTP 层的 transport 重试：流式响应一旦开始读，数据已经吐出一半，再重试就没意义了
+- 模型层的 `ModelRetry`：要等输出完整收到才能校验，这和边收边返回给用户是矛盾的
 
-实操建议：
-
-- **要重试 + 要可靠** → 用 `agent.run()`，非流式
-- **要流式 + 接受可能失败** → 用 `agent.run_stream()`，重试只能在外层包一层"整体失败再重新流"
+所以，要重试、要可靠，就用非流式的 `agent.run()`；要流式、能接受偶尔失败，就用 `agent.run_stream()`，重试只能在外层做成整体失败后重新开一次流。
 
 ---
 
-## 10. 重试导致的 token 翻倍计费
+## 10. 重试带来的 token 成本
 
-每次重试都是一次完整的 LLM 调用，token 计费照算。如果你的 schema 复杂、模型经常 retry 3 次，**实际花费可能是预期的 3-4 倍**。
+每次重试都是一次完整的 LLM 调用，token 照样计费。如果 schema 复杂、模型经常重试 3 次，实际花费可能是预期的 3-4 倍。
 
-应对：
+应对办法：
 
-1. 给 schema 写清晰的 `description`，降低首发失败率
+1. 给 schema 写清楚的 `description`，降低第一次就失败的概率
 2. 给字段加 `examples`
-3. 用 `NativeOutput`（OpenAI 严格模式），首发命中率高得多
-4. 监控 `usage_limits`：
+3. 用 `NativeOutput`（OpenAI 严格模式），第一次的命中率高得多
+4. 用 `usage_limits` 设上限：
 
 ```python
 from pydantic_ai.usage import UsageLimits
@@ -364,64 +358,57 @@ agent.run_sync(
 )
 ```
 
-超过限制直接抛错，防止失控。
+超过限制就直接抛错，不会失控。
 
 ---
 
-## 11. 实战配方：生产可用的"全副武装" Agent
+## 11. 实战：一个生产可用的完整配置
 
 ```python
+import httpx2
 import logfire
-from httpx import AsyncClient, HTTPStatusError
 from tenacity import (
     retry_if_exception_type, stop_after_attempt,
     wait_exponential, wait_combine, wait_random,
 )
 
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import ModelFallback
+from pydantic_ai.models import create_async_httpx2_client
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.models.anthropic import AnthropicModel
-from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.providers.openai import OpenAIProvider
-from pydantic_ai.providers.anthropic import AnthropicProvider
-from pydantic_ai.retries import AsyncTenacityTransport, RetryConfig, wait_retry_after
+from pydantic_ai.retries import AsyncHTTPX2TenacityTransport, RetryConfig, wait_retry_after
 from pydantic_ai.usage import UsageLimits
 
 
-def build_retry_client() -> AsyncClient:
-    transport = AsyncTenacityTransport(
+def raise_for_retryable(response):
+    if response.status_code in (429, 502, 503, 504):
+        response.raise_for_status()
+
+
+def build_retry_client():
+    transport = AsyncHTTPX2TenacityTransport(
         config=RetryConfig(
-            retry=retry_if_exception_type((HTTPStatusError, ConnectionError)),
+            retry=retry_if_exception_type((httpx2.HTTPStatusError, httpx2.ConnectError)),
             wait=wait_retry_after(
-                fallback_strategy=wait_combine(
-                    wait_exponential(multiplier=1, max=60),
-                    wait_random(0, 2),
-                ),
+                fallback_strategy=wait_combine(wait_exponential(multiplier=1, max=60), wait_random(0, 2)),
                 max_wait=120,
             ),
             stop=stop_after_attempt(4),
             reraise=True,
         ),
-        validate_response=lambda r: r.raise_for_status(),
+        validate_response=raise_for_retryable,
     )
-    return AsyncClient(transport=transport, timeout=60.0)
+    return create_async_httpx2_client(transport=transport)
 
 
-client = build_retry_client()
-
-primary = OpenAIChatModel(
-    'gpt-4o-mini',
-    provider=OpenAIProvider(http_client=client, max_retries=0),  # SDK 重试关掉
-)
-backup = AnthropicModel(
-    'claude-haiku-4-5',
-    provider=AnthropicProvider(http_client=client, max_retries=0),
-)
+primary = OpenAIChatModel('qwen-flash', provider=OpenAIProvider(http_client=build_retry_client()))
 
 agent = Agent(
-    FallbackModel(primary, backup),
-    retries=2,  # 模型层重试 2 次
-    instrument=True,
+    primary,
+    capabilities=[ModelFallback('anthropic:claude-haiku-5-5')],   # 主模型整体不可用时切备用
+    retries={'tools': 2, 'output': 2},                            # agent 层重试
+    model_settings={'max_retries': 0},                            # SDK 层关掉，传输层是唯一的重试方
 )
 
 logfire.configure()
@@ -433,13 +420,13 @@ result = agent.run_sync(
 )
 ```
 
-这个配方覆盖：
+这份配置包括：
 
-- HTTP 层：尊重 Retry-After + 指数退避 + 抖动 + 最多 4 次
-- 模型层：输出/工具失败重试 2 次
-- 厂商切换：OpenAI 挂了切 Anthropic
-- 用量上限：防止重试失控
-- 可观测：Logfire 全链路 trace
+- 传输层：遵守 Retry-After，指数退避加随机抖动，最多 4 次；
+- agent 层：工具和输出失败各重试 2 次；
+- 模型回退：主模型不可用时切到 Anthropic；
+- 用量上限：防止重试失控；
+- 可观测：Logfire 全链路 trace。
 
 ---
 
@@ -447,44 +434,39 @@ result = agent.run_sync(
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `AsyncTenacityTransport` 报 ImportError | 没装 retries 依赖 | `pip install 'pydantic-ai-slim[retries]'` |
-| 4xx 没触发重试 | 没设 `validate_response=lambda r: r.raise_for_status()` | 加上 |
-| 429 重试反而更快被 ban | 用了 `wait_exponential` 而不是 `wait_retry_after` | 改成 `wait_retry_after` |
-| `agent.run` 偶尔特别慢 | SDK 自带 max_retries=2 + tenacity 又重试一遍 | provider 里设 `max_retries=0` |
-| FallbackModel 不切换 | 第一个模型抛的不是 `ModelAPIError`（如自定义异常） | 用 `fallback_on=callable` 自定义条件 |
-| `ModelRetry` 没生效 | Agent 的 `retries=0` 或工具的 `retries=0` | 至少给 1 |
-| 重试中 token 用爆 | 没设 `UsageLimits` | 加 `total_tokens_limit` |
-| 流式时 `ModelRetry` 不起作用 | 流式与重试基本互斥 | 流式场景下不要依赖 retry，业务层包装 |
-| 长 Prompt 重试时 timeout | tenacity 之外的 httpx timeout 太小 | `AsyncClient(timeout=60.0)` |
-| 所有模型都失败 | 用了 `FallbackExceptionGroup` 没正确解包 | `except* ModelAPIError as eg:` 解 group |
+| `AsyncHTTPX2TenacityTransport` 报 ImportError | 没装 retries 依赖 | `pip install 'pydantic-ai-slim[retries]'`（带 tenacity） |
+| `PydanticAIDeprecationWarning: AsyncTenacityTransport is deprecated` | 用的是旧的 httpx 传输类 | 换成 `AsyncHTTPX2TenacityTransport` + `create_async_httpx2_client` |
+| 4xx 没触发重试 | 没设 `validate_response`（httpx 默认不抛异常） | 对 429/5xx 调 `response.raise_for_status()` |
+| 429 一重试反而更快被封 | 用了 `wait_exponential` 而不是 `wait_retry_after` | 改成 `wait_retry_after` |
+| `agent.run` 偶尔特别慢 | SDK 自带重试，传输层又重试一遍（次数相乘） | `model_settings={'max_retries': 0}` |
+| 回退不触发 | 第一个模型抛的不是 `ModelAPIError`（比如自定义异常）；或者 `fallback_on` 只给了响应处理函数，替换掉了默认值 | 用 `fallback_on=[ModelAPIError, handler]` |
+| `ModelRetry` 没生效 | `retries` 设成了 0 | 至少设 1；或用 `retries={'tools': N, 'output': N}` |
+| 重试过程中 token 用超 | 没设 `UsageLimits` | 加 `total_tokens_limit` |
+| 流式时 `ModelRetry` 不起作用 | 流式和重试基本互斥 | 流式场景别依赖 retry，在业务层包装 |
+| 长 prompt 重试时超时 | tenacity 之外的 HTTP 超时太小 | `create_async_httpx2_client(timeout=..., transport=...)` 调大超时，或用 `model_settings={'timeout': ...}` |
+| 所有模型都失败时异常不好处理 | 没正确解开 `FallbackExceptionGroup` | 用 `except* ModelAPIError as eg:` 解包 |
 
 ---
 
 ## 13. 与 LangChain 对比
 
-LangChain 的重试相对碎片化：
+LangChain 1.x 的重试分散在几个地方：
 
-- `Runnable.with_retry(stop_after_attempt=3)` —— 简单但不够细
-- `RetryOutputParser` —— 仅用于 parser 失败
-- HTTP 层完全依赖 SDK 自带 retry
+- 模型层：`ChatModel(max_retries=...)`，以及 `ModelRetryMiddleware` / `ModelFallbackMiddleware`；
+- 工具层：`ToolRetryMiddleware`、`ToolErrorMiddleware`（工具异常默认中断运行，要反馈给模型得挂上它）；
+- 结构化输出：校验错误可以回传给模型；
+- HTTP 层：完全依赖 SDK 自带的 retry。
 
-Pydantic AI 的优势在于**统一抽象**：
-
-- HTTP 层通过 `AsyncTenacityTransport` 一处声明，所有 Agent 共享
-- 模型层 `ModelRetry` 直接和工具/校验一体化
-- `FallbackModel` 是一等公民
-
-对比一下：
+Pydantic AI 的好处是抽象统一，官方也把七个层面写在了同一页文档里：传输层在一处声明，工具和输出的重试直接和 `ModelRetry` 结合，`ModelFallback` 是一个 capability，重试预算就是构造参数 `retries`。对比一下：
 
 ```python
 # LangChain
-chain.with_retry(stop_after_attempt=3, wait_exponential_jitter=True)
+create_agent(model, tools, middleware=[ModelRetryMiddleware(max_retries=3), ModelFallbackMiddleware("anthropic:claude-sonnet-5-5")])
 
 # Pydantic AI
-Agent(model_with_tenacity_client, retries=3)
+Agent(model, retries={'tools': 3, 'output': 2}, capabilities=[ModelFallback('anthropic:claude-sonnet-5-5')],
+      model_settings={'max_retries': 0})
 ```
-
-LangChain 一行更短，但实际生产你会发现 Pydantic AI 的分层更清晰、可观测性更好。
 
 ---
 
@@ -492,12 +474,12 @@ LangChain 一行更短，但实际生产你会发现 Pydantic AI 的分层更清
 
 完整可运行代码：[`demos/advanced/07_retries_http.py`](../../demos/advanced/07_retries_http.py)
 
-demo 涵盖：
-- ModelRetry 在工具里 raise，让模型自愈
+demo 包括：
+- 在工具里 raise ModelRetry，让模型自己修正
 - output_validator 触发的重试
-- 演示 retry 计数
-- HTTP transport 配置（不真发请求，仅展示构造）
+- 打印重试计数
+- HTTP transport 的配置（只展示构造，不真发请求）
 - FallbackModel 配多个模型
-- 无 key 时用 TestModel 演示重试机制
+- 没有 key 时用 TestModel 演示重试机制
 
-下一篇：[`08-deferred-tools.md`](08-deferred-tools.md) —— Deferred Tools 让 Agent 暂停等"人审批"。
+下一篇：[Pydantic AI 进阶 08：Deferred Tools 与人审批](08-deferred-tools.md)，讲怎么让 Agent 暂停下来等人审批。

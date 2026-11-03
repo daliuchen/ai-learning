@@ -1,16 +1,16 @@
-# PE Technique 01：Zero-shot vs Few-shot —— 什么时候真的需要示例
+# PE Technique 01：Zero-shot 与 Few-shot，什么时候需要示例
 
-> **一句话**：Few-shot 不是"必须用的标配"——它有 token 成本、有"过拟合到示例风格"的副作用。**先 zero-shot，跑不动再加 few-shot；加 few-shot 也要少而精**。本篇讲什么时候必须用、怎么挑示例、几个示例够用。
+> Few-shot 常被当成默认配置，但它要花 token，还会让模型照着示例的风格写。我的做法是先跑 zero-shot，效果不够再加示例，加也只加几个精挑的。这篇讲哪些情况必须给示例、示例怎么挑、给几个合适。
 
 ---
 
 ## 1. 概念
 
-- **Zero-shot**：只给任务描述 + 输入，模型直接做。
+- Zero-shot：只给任务描述和输入，模型直接做。
   ```
   把以下英文翻译成中文：{text}
   ```
-- **Few-shot**：在任务描述里塞 1-N 个"输入 → 输出"示例，让模型 anchor。
+- Few-shot：在任务描述里放 1 到 N 个「输入 → 输出」示例，给模型一个参照。
   ```
   把以下英文翻译成中文：
   
@@ -20,7 +20,7 @@
   现在翻译：{text}
   ```
 
-模型 2018 年还需要大量 few-shot；现代大模型（Claude 4.x / GPT-5 / Gemini 2.0）的 zero-shot 能力已经非常强，多数情况 zero-shot 够用。
+2020 年 GPT-3 那一代模型很依赖示例，few-shot 也是那时流行起来的。现在的大模型（Claude 5.x / GPT-6 / Gemini 3+）zero-shot 已经很强，多数任务不给示例也够用。
 
 ---
 
@@ -28,26 +28,26 @@
 
 | 场景 | 原因 |
 |------|------|
-| 任务模型训练数据见过的（翻译、总结、问答） | 先验强 |
-| 输出格式简单（一句话、一个标签） | 不需要 anchor |
-| 输入输出**风格自由**（不强求特定语气） | 没必要硬限定 |
-| 类别 enum 一目了然（bug / praise / question） | 类别名自解释 |
+| 模型训练时大量见过的任务（翻译、总结、问答） | 先验足够强 |
+| 输出格式简单（一个短句、一个标签） | 不需要参照 |
+| 输入输出风格自由，不要求特定语气 | 没必要硬性限定 |
+| 类别名一看就懂（bug / praise / question） | 类别名本身就是解释 |
 
-**铁律**：先用 zero-shot 跑 v0 看基线（详 [02-process/02](../02-process/02-from-spec-to-v0.md)）。
+先用 zero-shot 跑出 v0 的基线，再决定要不要加示例（见 [从需求到 Prompt v0](../02-process/02-from-spec-to-v0.md)）。
 
 ---
 
-## 3. 什么时候**必须**加 few-shot
+## 3. 什么时候必须加 few-shot
 
 | 场景 | 为什么 |
 |------|--------|
-| 输出格式特殊 / 非通用 | 用文字描述说不清，给个例子 |
-| 任务模型先验弱 | 罕见 niche / 内部 jargon |
-| 风格要稳定 | 比如所有标题都要"主语-动词-数字"句式 |
-| 边界判断微妙 | 比如反讽分类 / 主观评分标准 |
-| 多输出维度有关联 | 让模型看到字段间的协调 |
+| 输出格式特殊、不通用 | 文字描述说不清，不如给个例子 |
+| 模型对任务先验弱 | 冷门领域、内部黑话 |
+| 风格要稳定 | 比如所有标题都要用「主语-动词-数字」句式 |
+| 边界判断微妙 | 反讽分类、主观评分标准 |
+| 多个输出字段互相关联 | 让模型看到字段之间怎么配合 |
 
-举个例子，下面这种"嵌套 + 风格"任务，纯描述很难讲清：
+下面这种既有嵌套结构又有风格要求的任务，光靠描述很难讲清：
 
 ```
 任务：把用户反馈转成结构化 issue。
@@ -65,7 +65,7 @@
 }
 ```
 
-用文字解释 "title 要言简意赅、severity 怎么判、user_frustration 看语气..." 很啰嗦——给一个示例胜过 100 字。
+要是用文字逐条解释 title 怎么写得简洁、severity 怎么判、user_frustration 看什么语气，写一大段也未必说清，一个示例就够了。
 
 ---
 
@@ -74,12 +74,12 @@
 | 数量 | 何时合适 |
 |------|----------|
 | 0 | 大多数现代任务 |
-| 1-2 | 输出格式稍特殊；风格 anchor |
-| 3-5 | 复杂判断 / 多 enum / 边界微妙 |
-| 5-10 | 极复杂；通常意味着任务该拆分 |
-| 10+ | 改用 RAG / 微调，别 stuff prompt |
+| 1-2 | 输出格式稍特殊，或需要定风格 |
+| 3-5 | 复杂判断、类别多、边界微妙 |
+| 5-10 | 很复杂，通常说明任务该拆了 |
+| 10+ | 改用 RAG 或微调，别往 prompt 里硬塞 |
 
-**研究结论**（Min et al. 2022）：3 个示例 vs 10 个示例，准确率差异通常 < 2%——但 token 成本 3 倍。
+示例加到几个之后，收益通常很快饱和，token 成本却随示例数线性增长。Min et al. 2022 还发现，示例里标签的对错影响比想象的小，示例的格式和输入分布更关键，这也说明挑对示例比堆数量重要。
 
 ---
 
@@ -87,10 +87,7 @@
 
 ### 5.1 覆盖性 vs 代表性
 
-- **代表性**（推荐）：示例和真实数据分布一致——大部分是 happy path
-- **覆盖性**：每种边界 / 类别都给一个示例
-
-实战推荐 **代表性 + 1-2 个关键 edge**：
+两种思路：代表性是让示例和真实数据分布一致，大部分是 happy path；覆盖性是每种边界、每个类别都给一个。我推荐以代表性为主，再补 1 到 2 个关键的边界样例：
 
 ```
 - 3 个最常见 happy path 示例
@@ -101,15 +98,15 @@
 
 | 错误 | 后果 |
 |------|------|
-| 示例和任务对应不上 | 模型困惑、效果反而差 |
-| 示例输出风格不一致 | 模型选哪个学？ |
-| 示例和真实输入分布差远 | 在 evalset 上看着好，上线垮 |
-| 示例都来自一个类别 | 模型偏 anchor 到那个类 |
-| 示例输入太短，真实输入很长 | 风格不可迁移 |
+| 示例和任务对应不上 | 模型困惑，效果反而变差 |
+| 示例输出风格不一致 | 模型不知道该学哪个 |
+| 示例和真实输入分布差太远 | 评测集上好看，上线就垮 |
+| 示例都来自同一个类别 | 模型偏向那个类 |
+| 示例输入很短，真实输入很长 | 风格迁移不过去 |
 
-### 5.3 示例的"位置"
+### 5.3 示例放在哪
 
-示例放哪里：
+一般这样排：
 
 ```
 [System / Instruction]
@@ -131,7 +128,7 @@
 实际输入
 ```
 
-把示例放 system 末尾、用 `---` 或 XML 标签明确隔开。Anthropic 推荐 XML：
+示例放在 system 末尾，用 `---` 或 XML 标签和其他内容隔开。Anthropic 推荐用 XML：
 
 ```python
 SYSTEM = """你是分类师。
@@ -182,8 +179,8 @@ SYSTEM = """把反馈分类。类别: bug, feature, complaint, praise.
 """
 
 resp = client.messages.create(
-    model="claude-haiku-4-5-20251001",
-    max_tokens=20,
+    model="claude-haiku-5-5",
+    max_tokens=1024,
     system=SYSTEM,
     messages=[{"role": "user", "content": "客服真差"}],
 )
@@ -191,7 +188,7 @@ resp = client.messages.create(
 
 ### OpenAI
 
-OpenAI 推荐用 **messages 数组**塞 few-shot（多轮对话语义最强）：
+在 Chat Completions 里，常见写法是把 few-shot 写成 messages 数组里的多轮对话：
 
 ```python
 from openai import OpenAI
@@ -207,7 +204,7 @@ EXAMPLES = [
 ]
 
 resp = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
     messages=[
         {"role": "system", "content": "把反馈分类。类别: bug, feature, complaint, praise. 返回类别名一个单词。"},
         *EXAMPLES,
@@ -222,7 +219,7 @@ resp = client.chat.completions.create(
 from google import genai
 client = genai.Client()
 
-# Gemini 用 "Few-shot in single instruction"
+# 示例直接写进 system_instruction
 SYSTEM = """把反馈分类。类别: bug, feature, complaint, praise.
 
 示例：
@@ -234,7 +231,7 @@ SYSTEM = """把反馈分类。类别: bug, feature, complaint, praise.
 """
 
 resp = client.models.generate_content(
-    model="gemini-2.0-flash",
+    model="gemini-3.8-flash",
     contents="客服真差",
     config={"system_instruction": SYSTEM},
 )
@@ -245,7 +242,7 @@ resp = client.models.generate_content(
 ## 7. Few-shot 的副作用
 
 ### 7.1 风格过拟合
-示例用了某种句式 → 模型对**所有**输出都用这种句式。
+示例用了某种句式，模型就会在所有输出里都用这种句式。
 
 ```
 ❌ 示例输出都是"建议 + ?"
@@ -254,21 +251,19 @@ resp = client.models.generate_content(
    →  模型对所有反馈都生成疑问句，即使不该
 ```
 
-对策：示例风格要多样，故意混入不同风格防 anchor。
+对策是让示例风格多样一些，故意混入不同写法。
 
 ### 7.2 长度过拟合
-所有示例输出都是 30 字 → 模型 90% 输出都是 30 字。
-对策：示例长度多样化。
+所有示例输出都是 30 字左右，模型九成的输出也会是 30 字。对策同样是让示例长短不一。
 
 ### 7.3 字段顺序过拟合
-JSON 字段顺序：示例都按 `{a, b, c}` 顺序 → 模型几乎不会出 `{b, a, c}`。
-对策：故意打乱示例字段顺序（如果业务允许）。
+示例里的 JSON 都按 `{a, b, c}` 排，模型几乎不会输出 `{b, a, c}`。业务允许的话，可以故意打乱示例里的字段顺序。
 
 ---
 
 ## 8. Dynamic Few-shot（Few-shot RAG）
 
-任务示例库巨大（几百条）时，用检索动态挑相关示例：
+示例库有几百条时，可以按输入检索，动态挑最相关的几条：
 
 ```python
 def dynamic_few_shot(query: str, top_k: int = 3) -> list[dict]:
@@ -283,12 +278,9 @@ def classify_with_dynamic_examples(user_input: str):
     return call_llm(system, user_input)
 ```
 
-适合：
-- 任务复杂、单一组示例覆盖不全
-- 各分类 / 各业务线 prompt 不同
-- 有现成的人工标注库
+适合这几种情况：任务复杂，一组固定示例覆盖不全；不同分类或业务线需要不同的 prompt；手上已经有人工标注库。
 
-注意：和"prompt caching"有冲突——动态示例每次变，缓存失效。
+代价是和 prompt caching 冲突：示例每次都变，缓存就命中不了。
 
 ---
 
@@ -296,18 +288,17 @@ def classify_with_dynamic_examples(user_input: str):
 
 | 场景 | 不该用 few-shot 的原因 |
 |------|----------------------|
-| Zero-shot 已 ≥ 90% 通过 | 加示例只增成本 |
-| 用了 structured output API | API 强约束输出 schema，比示例更可靠 |
-| 示例数据是敏感数据 | 不要把客户真实数据放 prompt |
-| 任务输出每次都不一样 | 示例 anchor 反而限制多样性 |
-| 推理任务 | CoT 比 few-shot 更有效（详 [02-cot.md](./02-cot.md)） |
+| Zero-shot 通过率已经 ≥ 90% | 加示例只增加成本 |
+| 已经用了 structured output API | API 直接约束输出 schema，比示例可靠 |
+| 示例是敏感数据 | 别把客户真实数据放进 prompt |
+| 每次输出本来就该不一样 | 示例反而限制多样性 |
+| 推理任务 | CoT 比 few-shot 有效（见 [Chain-of-Thought（CoT）](./02-cot.md)） |
 
 ---
 
 ## 10. demo：对比 zero-shot vs few-shot
 
 ```python
-# demos/techniques/01_zero_vs_few_shot.py
 import json
 import anthropic
 
@@ -327,7 +318,7 @@ TEST_CASES = [
     ("客服态度真好", "praise"),
     ("点击搜索就崩溃", "bug"),
     ("能加暗色主题吗", "feature"),
-    ("我再也不会推荐给朋友", "complaint"),    # 反讽难判
+    ("我再也不会推荐给朋友", "complaint"),    # 没有明说哪里不好，隐含抱怨
     ("产品挺棒，但是 logo 太丑了改一下吧", "feature"),  # 多类
 ]
 
@@ -336,14 +327,13 @@ def run(prompt: str, name: str):
     right = 0
     for text, expected in TEST_CASES:
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=50,
-            temperature=0,
+            model="claude-haiku-5-5",
+            max_tokens=1024,
             system=prompt,
             messages=[{"role": "user", "content": text}],
         )
         try:
-            actual = json.loads(resp.content[0].text)["category"]
+            actual = json.loads(resp.content[-1].text)["category"]
         except Exception:
             actual = "_parse_error"
         ok = actual == expected
@@ -357,7 +347,7 @@ if __name__ == "__main__":
     run(FEW_SHOT, "few-shot")
 ```
 
-预期：在反讽 / 多类样本上 few-shot 优势明显。
+预期在隐含抱怨和多类样本上，few-shot 会明显好于 zero-shot。
 
 ---
 
@@ -365,20 +355,20 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **一上来 5 个 few-shot** | 先 zero-shot 起步 |
-| **示例风格不一致** | 模型不知道学哪个 |
-| **示例覆盖某类过多** | anchor 偏向；保持均衡 |
-| **示例数据敏感不脱敏** | 数据合规风险 |
-| **改示例顺便改任务定义** | 评测变量改了，前后不可比 |
-| **示例和真实分布不一致** | 离线表现好，上线垮 |
+| 一上来就放 5 个示例 | 先从 zero-shot 起步 |
+| 示例风格不一致 | 模型不知道学哪个 |
+| 某一类示例过多 | 输出偏向那一类；比例大致贴近真实分布即可，别让一类远超它的真实占比 |
+| 示例数据没脱敏 | 有合规风险 |
+| 改示例时顺手改了任务定义 | 一次改了两个变量，前后结果没法比 |
+| 示例和真实分布不一致 | 离线表现好，上线就垮 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 CoT 思维链 → [02-cot.md](./02-cot.md)
-- 📖 结构化输出（替代 few-shot 描述格式） → [05-structured-output.md](./05-structured-output.md)
-- 📖 好 few-shot 设计 → [06-examples-design.md](./06-examples-design.md)
+- [Chain-of-Thought（CoT）](./02-cot.md)
+- [结构化输出（JSON / XML / Schema）](./05-structured-output.md)：用 schema 约束格式，很多时候比 few-shot 描述格式更可靠
+- [Few-shot 示例怎么设计](./06-examples-design.md)
 
 ## 参考资料
 

@@ -10,6 +10,7 @@ Chat Models 完整演示：
 - 缓存
 """
 import asyncio
+import os
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
@@ -20,6 +21,7 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
 set_llm_cache(InMemoryCache())
 
 
@@ -38,7 +40,7 @@ class Person(BaseModel):
 
 def demo_basic() -> None:
     print("\n========== 1. 基本调用 ==========")
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    model = ChatOpenAI(model=MODEL, temperature=0)
     resp = model.invoke([
         SystemMessage(content="你是简洁的技术作家。"),
         HumanMessage(content="一句话讲清楚什么是 LCEL。"),
@@ -50,8 +52,8 @@ def demo_basic() -> None:
 def demo_retry_fallback() -> None:
     print("\n========== 2. 重试 + 回退 ==========")
     # 故意写错的 base_url 触发回退
-    bad = ChatOpenAI(model="gpt-4o-mini", base_url="https://invalid.example/v1", timeout=3, max_retries=0)
-    good = ChatOpenAI(model="gpt-4o-mini")
+    bad = ChatOpenAI(model=MODEL, base_url="https://invalid.example/v1", timeout=3, max_retries=0)
+    good = ChatOpenAI(model=MODEL)
     robust = bad.with_fallbacks([good])
     resp = robust.invoke("说一句你好")
     print("content:", resp.content)
@@ -59,7 +61,7 @@ def demo_retry_fallback() -> None:
 
 def demo_tool_call() -> None:
     print("\n========== 3. bind_tools ==========")
-    model = ChatOpenAI(model="gpt-4o-mini").bind_tools([get_weather])
+    model = ChatOpenAI(model=MODEL).bind_tools([get_weather])
     resp = model.invoke("北京和上海今天天气怎么样？")
     print("content:", resp.content)
     print("tool_calls:", resp.tool_calls)
@@ -67,7 +69,7 @@ def demo_tool_call() -> None:
 
 def demo_structured() -> None:
     print("\n========== 4. with_structured_output ==========")
-    model = ChatOpenAI(model="gpt-4o-mini").with_structured_output(Person)
+    model = ChatOpenAI(model=MODEL).with_structured_output(Person)
     p = model.invoke("我叫小明，今年 20 岁，喜欢编程和篮球")
     print(p)
     print("type:", type(p).__name__)
@@ -75,7 +77,7 @@ def demo_structured() -> None:
 
 def demo_stream() -> None:
     print("\n========== 5. 流式 ==========")
-    model = ChatOpenAI(model="gpt-4o-mini")
+    model = ChatOpenAI(model=MODEL)
     for chunk in model.stream("用三句话讲讲 Python 的优势"):
         print(chunk.content, end="", flush=True)
     print()
@@ -83,7 +85,7 @@ def demo_stream() -> None:
 
 async def demo_async() -> None:
     print("\n========== 6. 异步 batch ==========")
-    model = ChatOpenAI(model="gpt-4o-mini")
+    model = ChatOpenAI(model=MODEL)
     results = await model.abatch(
         ["北京天气", "上海天气", "广州天气"],
         config={"max_concurrency": 3},
@@ -94,7 +96,7 @@ async def demo_async() -> None:
 
 def demo_cache() -> None:
     print("\n========== 7. 缓存 ==========")
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    model = ChatOpenAI(model=MODEL, temperature=0)
     import time
     for i in range(2):
         t = time.time()

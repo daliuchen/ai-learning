@@ -1,17 +1,22 @@
 """
 08_agent_compare.py
 ===================
-对比老 AgentExecutor 与新 LangGraph create_react_agent
+对比旧的 AgentExecutor（现在在 langchain-classic 里）与新的 langchain.agents.create_agent
+
+运行：
+    python demos/langchain/08_agent_compare.py
 """
+import os
+
 from dotenv import load_dotenv
 
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.agents import create_agent
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
 
 
 @tool
@@ -27,8 +32,11 @@ def calc(expr: str) -> str:
 
 
 def old_way():
-    print("\n========== 旧 AgentExecutor ==========")
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    """旧写法：AgentExecutor 已经搬到 langchain-classic（pip install langchain-classic）。"""
+    from langchain_classic.agents import AgentExecutor, create_tool_calling_agent
+
+    print("\n========== 旧 AgentExecutor（langchain-classic）==========")
+    llm = ChatOpenAI(model=MODEL, temperature=0)
     tools = [get_weather, calc]
     prompt = ChatPromptTemplate.from_messages([
         ("system", "你是一位严谨的助手。"),
@@ -41,16 +49,22 @@ def old_way():
 
 
 def new_way():
-    print("\n========== 新 LangGraph create_react_agent ==========")
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    graph = create_react_agent(llm, [get_weather, calc])
-    out = graph.invoke({"messages": [("human", "查询北京天气，再算 (3+5)*2")]})
+    print("\n========== 新 create_agent ==========")
+    agent = create_agent(
+        ChatOpenAI(model=MODEL, temperature=0),
+        tools=[get_weather, calc],
+        system_prompt="你是一位严谨的助手。",
+    )
+    out = agent.invoke({"messages": [{"role": "user", "content": "查询北京天气，再算 (3+5)*2"}]})
     print("最终：", out["messages"][-1].content)
 
-    # 看每一步
+    # 看每一步：节点叫 model / tools
     print("\n--- 流式 updates ---")
-    for ev in graph.stream({"messages": [("human", "上海天气")]}, stream_mode="updates"):
-        print(ev)
+    for ev in agent.stream(
+        {"messages": [{"role": "user", "content": "上海天气"}]}, stream_mode="updates"
+    ):
+        for node, value in ev.items():
+            print(node, "->", value["messages"][-1].content or value["messages"][-1].tool_calls)
 
 
 if __name__ == "__main__":

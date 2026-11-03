@@ -1,6 +1,6 @@
-# EKB 20：评估脚本——一键跑出记分牌
+# EKB 20：评估脚本
 
-> **一句话**：把测试集和指标缝成一个可一键运行的脚本 `run_eval.py`。它读 `testset.jsonl`、对每条用例跑检索 + 生成、算出所有指标、打印记分牌。这个脚本是整个项目的「回归测试」——以后每次改动后跑一遍就知道有没有变好。
+> 这篇把测试集和指标拼成一个可以一键运行的脚本 `run_eval.py`：读入 `testset.jsonl`，对每条用例跑检索和生成，算出全部指标，打印记分牌。它也是整个项目的回归测试，之后每次改动跑一遍，就知道系统是变好了还是变差了。
 
 ---
 
@@ -8,6 +8,7 @@
 
 ```python
 # eval/run_eval.py
+import asyncio
 import json
 from statistics import mean
 
@@ -22,20 +23,24 @@ async def run_eval():
     cases = load_testset()
     rows = []
     for c in cases:
-        chunks = await retrieve(c["question"], role=c["asker_role"], k=5)
+        chunks = await retrieve(c["question"], roles=[c["asker_role"]], k=5)
         retrieved_docs = [ch["doc_id"] for ch in chunks]
         ans = await generate(c["question"], chunks)
         rows.append(score_one(c, retrieved_docs, ans))
     report(rows)
+    return rows
+
+if __name__ == "__main__":          # 支持 python -m eval.run_eval
+    asyncio.run(run_eval())
 ```
 
-核心就是：**对每条用例，跑一遍真实的检索 + 生成，记录结果，最后聚合。** 因为它调的是真实的 `retrieve` 和 `generate`，所以检索一升级、脚本立刻能测出来。
+逻辑很直接：对每条用例跑一遍真实的检索和生成，记下结果，最后汇总。脚本调用的就是生产代码里的 `retrieve` 和 `generate`，检索一升级，这里马上能测出变化。
 
 ---
 
 ## 2. 单条打分
 
-把第 19 篇的指标函数拼进来：
+把第 19 篇的指标函数接进来：
 
 ```python
 def score_one(case, retrieved_docs, ans):
@@ -48,7 +53,7 @@ def score_one(case, retrieved_docs, ans):
     cite_ok = citation_correct(ans.cited_doc_ids, expected)
     fallback_ok = fallback_correct(ans.found, expected)
     return {
-        "id": case["id"],
+        "id": case["id"], "asker_role": case["asker_role"],
         "recall5": recall5, "recall3": recall3,
         "cite_ok": cite_ok, "fallback_ok": fallback_ok,
         "expected": expected, "retrieved": topk,
@@ -95,42 +100,42 @@ def report(rows):
             print(f"  #{r['id']} expected={r['expected']} got={r['retrieved'][:5]} found={r['found']}")
 ```
 
-关键细节：**打印失败用例**。光看平均分不够，你需要知道**具体哪条挂了**，才能去查是检索没召回还是答歪了。
+这里最有用的是最后那段：把失败用例逐条打印出来。只看平均分不够，得知道具体哪一条挂了，才能去查是检索没召回，还是生成答歪了。
 
 ---
 
-## 4. 怎么用它驱动迭代
+## 4. 用它驱动迭代
 
-固定的工作循环（贯穿 05-10 章）：
+05 到 10 章都按同一个循环推进（下面的数字是示意数据）：
 
 ```bash
 # 1. 跑 baseline，记下数字
-python -m eval.run_eval     # recall@5=0.62 ...
+python -m eval.run_eval     # recall@5=0.66 ...
 
-# 2. 改一处（比如加 rerank）
+# 2. 改一处（比如加 BM25 混合）
 
 # 3. 再跑，对比
-python -m eval.run_eval     # recall@5=0.78 ✅ 涨了，留下
+python -m eval.run_eval     # recall@5=0.79 ✅ 涨了，留下
 ```
 
-**纪律**：一次只改一处再跑（呼应 [04 手册迭代闭环](/docs/04-prompt-engineering/02-process/04-iteration-loop)）。一次改三处，涨跌都归因不了。
+规矩是一次只改一处再跑，和 [04 手册的迭代闭环](/docs/04-prompt-engineering/02-process/04-iteration-loop) 一致。一次改三处，涨了跌了都说不清是哪处的功劳。
 
 ---
 
-## 5. 把它升级成「门禁」
+## 5. 升级成上线门禁
 
-到生产阶段，这个脚本可以变成上线 gate——指标不达标就拒绝发布：
+到了生产阶段，这个脚本可以直接当上线门禁用，指标不达标就拒绝发布：
 
 ```python
 def gate(rows):
     fallback = mean(r["fallback_ok"] for r in rows if not r["expected"])
-    leak = sum(1 for r in rows if leaked(r))   # 越权召回数
+    leak = count_leaks(rows)   # 越权召回数，count_leaks 见第 41 篇
     assert fallback >= 0.95, f"兜底正确率不达标: {fallback}"
     assert leak == 0, f"存在越权召回: {leak}"   # 红线
     print("✅ gate passed")
 ```
 
-把它接进 CI，每次改动自动跑。详见 [10-production/06-launch-checklist](../10-production/06-launch-checklist.md)。
+接进 CI 之后，每次改动都会自动跑。完整的上线检查见 [上线 Checklist](../10-production/06-launch-checklist.md)。
 
 ---
 
@@ -138,16 +143,14 @@ def gate(rows):
 
 | 坑 | 后果 | 正确做法 |
 |----|------|----------|
-| 评估脚本调的不是真实检索 | 测的是假的 | 直接调生产用的 retrieve/generate |
+| 评估脚本调的不是真实检索 | 测到的不是线上行为 | 直接调生产用的 retrieve/generate |
 | 只打印平均分 | 不知道哪条挂了 | 打印失败用例明细 |
-| recall 把答不出用例也算进去 | 拉低分数失真 | 期望为空的跳过 recall |
-| 改多处再跑 | 归因不了 | 一次改一处 |
-| 评估只跑一次 | 退化无法察觉 | 每次改动都跑（回归测试） |
+| recall 把答不出用例也算进去 | 分数被拉低、失真 | 期望为空的用例跳过 recall |
+| 改多处再跑 | 无法归因 | 一次改一处 |
+| 评估只跑一次 | 退化发现不了 | 每次改动都跑，当回归测试 |
 
 ---
 
 ## 下一步
 
-标尺立好了。现在开始往库里灌数据——从 demo 文档准备开始：
-
-→ [05-ingest/01-demo-data](../05-ingest/01-demo-data.md)
+标尺立好了，接下来往库里灌数据，从准备 demo 文档开始：[准备 demo 数据](../05-ingest/01-demo-data.md)

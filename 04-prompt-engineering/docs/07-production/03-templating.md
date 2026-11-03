@@ -1,18 +1,18 @@
-# PE Production 03：Prompt Templating —— Jinja 与框架内置
+# PE Production 03：Prompt Templating（Jinja 与框架内置模板）
 
-> **一句话**：当 prompt 含多个动态变量、需要条件分支、多语言切换时，用 templating 引擎（Jinja2 / 框架内置）比字符串拼接干净。但**别过度模板化**——简单场景 f-string 就够。
+> prompt 里的动态变量一多，再加上条件分支、多语言切换，字符串拼接很快就会变得一团乱，这时用 Jinja2 或框架自带的模板引擎会干净得多。反过来，简单场景别为了模板化而模板化，f-string 就够了。
 
 ---
 
-## 1. 什么时候要 templating
+## 1. 什么时候该用模板
 
-| 触发 | 用 templating |
+| 情况 | 用模板 |
 |------|--------------|
-| Prompt 含 5+ 变量 | ✅ |
-| 有条件分支（含 / 不含某段） | ✅ |
-| 多语言版本（中 / 英 prompt 切换） | ✅ |
-| 复杂 few-shot 拼接 | ✅ |
-| 简单 1-2 变量 | ❌ 用 f-string |
+| prompt 有 5 个以上变量 | 是 |
+| 有条件分支（某段时有时无） | 是 |
+| 多语言版本（中 / 英 prompt 切换） | 是 |
+| few-shot 拼接逻辑复杂 | 是 |
+| 只有 1-2 个变量 | 否，用 f-string |
 
 ---
 
@@ -56,7 +56,7 @@ rendered = t.render(
 
 ---
 
-## 3. 实战模板组织
+## 3. 模板文件怎么组织
 
 ```
 prompts/
@@ -109,7 +109,7 @@ business_context: |
 
 ---
 
-## 4. 框架内置模板
+## 4. 框架自带的模板
 
 ### LangChain ChatPromptTemplate
 
@@ -135,20 +135,20 @@ from llama_index.core import PromptTemplate
 prompt = PromptTemplate("你是 {role}...")
 ```
 
-各家框架都有自己的 templating，本质上是 f-string 或 mustache 风格。
+各个框架都有自己的模板实现，基本都是 f-string 或 mustache 风格。
 
 ---
 
-## 5. 模板的常见坑
+## 5. 写模板时容易踩的坑
 
-### 5.1 Jinja 转义 problem
-prompt 里的 `{` / `}` 会被 Jinja 当变量符号：
+### 5.1 花括号转义
+Jinja 只把 `{{`、`{%`、`{#` 当定界符，单个 `{"key": "value"}` 原样输出，没问题。麻烦出在 JSON 嵌套时连着写出两个左花括号，比如 `{{"a": 1}}` 这种示例，会被当成变量表达式解析报错：
 
 ```jinja
-返回 JSON: {"key": "value"}     ← Jinja 解析 {"key" 报错
+返回 JSON 数组: [{"items": [{{"id": 1}}]}]     ← {{ 被当成变量开始，报错
 ```
 
-对策：
+解决办法：
 ```jinja
 返回 JSON: {{ "{" }}"key": "value"{{ "}" }}
 或
@@ -157,12 +157,12 @@ prompt 里的 `{` / `}` 会被 Jinja 当变量符号：
 {% endraw %}
 ```
 
-### 5.2 不小心改了变量名
+### 5.2 改名时漏改变量
 ```jinja
 {{user_input}}  ← rename 时漏改
 ```
 
-对策：模板用单元测试覆盖关键 case：
+给模板写单元测试，覆盖关键场景：
 
 ```python
 def test_render():
@@ -171,12 +171,12 @@ def test_render():
     assert "任务：y" in rendered
 ```
 
-### 5.3 模板嵌套过深
+### 5.3 嵌套太深
 ```jinja
 {% if a %}{% if b %}{% if c %}...{% endif %}{% endif %}{% endif %}
 ```
 
-5 层嵌套 → 重构成 Python 预处理：
+嵌套到五层就该重构了，把复杂逻辑挪到 Python 里预处理：
 
 ```python
 def build_prompt(vars):
@@ -196,7 +196,7 @@ You are an English assistant. {{en_task}}
 {% endif %}
 ```
 
-或者拆成两个文件：
+也可以拆成两个文件：
 
 ```
 prompts/classifier/
@@ -204,7 +204,7 @@ prompts/classifier/
 └── system.en.j2
 ```
 
-并加路由：
+再按语言路由：
 
 ```python
 def load_for_lang(name, lang):
@@ -213,9 +213,9 @@ def load_for_lang(name, lang):
 
 ---
 
-## 7. 模板 + Prompt caching 组合
+## 7. 模板和 prompt caching 一起用
 
-模板生成 prompt 时**保证 system 部分稳定**：
+用模板生成 prompt 时，要保证渲染出来的 system 部分是稳定的：
 
 ```python
 def render(name, version, user_input):
@@ -231,11 +231,11 @@ system = render("classifier", "v1.0.0", user_input)
 # 再调 API 时 user_input 走 user message
 ```
 
-让 caching 命中率高。
+这样缓存命中率才高得起来。
 
 ---
 
-## 8. 模板 + 版本绑定
+## 8. 模板和版本绑定
 
 ```yaml
 # prompts/classifier/v1.0.0/meta.yml
@@ -245,14 +245,13 @@ schema_version: v2     # 用什么 variables schema
 evalset: v3.1
 ```
 
-template version 和 variables schema version 解耦——template 可以 v1.0.1（小改），但 variables 仍是 schema v2。
+模板版本和变量 schema 版本是分开的。模板可以小改升到 v1.0.1，变量仍然用 schema v2。
 
 ---
 
 ## 9. 完整 demo
 
 ```python
-# demos/production/03_templating.py
 """Jinja 模板 + 多语言 + 缓存友好"""
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
@@ -288,7 +287,7 @@ if __name__ == "__main__":
     print(system)
 ```
 
-对应 `templates/classifier/v1.0.0/system.j2`：
+对应的 `templates/classifier/v1.0.0/system.j2`：
 
 ```jinja
 你是 {{ role }}。
@@ -316,18 +315,18 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **简单 prompt 也上 Jinja** | f-string 就够；按需 |
-| **{ } 没 escape** | Jinja 报错；用 `{% raw %}` |
-| **模板和 variables 不同 version** | 加 meta.yml 标注 |
-| **dynamic content 混进 system** | caching miss |
-| **多语言用 if 嵌套** | 拆文件更干净 |
+| 简单 prompt 也上 Jinja | f-string 就够，按需引入 |
+| 花括号没转义 | Jinja 报错；用 `{% raw %}` |
+| 模板和变量版本对不上 | 在 meta.yml 里标清楚 |
+| 动态内容混进了 system | 缓存命中不了 |
+| 多语言靠 if 嵌套 | 拆成多个文件更清楚 |
 
 ---
 
 ## 11. 下一步
 
-- 📖 A/B 与可观测 → [04-ab-observability.md](./04-ab-observability.md)
-- 📖 团队协作 → [05-team-collab.md](./05-team-collab.md)
+- [A/B 与可观测](./04-ab-observability.md)
+- [Prompt 的团队协作与 Review 流程](./05-team-collab.md)
 
 ## 参考资料
 

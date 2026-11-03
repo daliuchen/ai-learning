@@ -5,12 +5,14 @@ Human-in-the-loop：在工具调用前插入人工审核节点。
 """
 from typing_extensions import Annotated, TypedDict
 
+import os
+
 from dotenv import load_dotenv
 
 from langchain_core.messages import BaseMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -29,7 +31,7 @@ class S(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-model = ChatOpenAI(model="gpt-4o-mini").bind_tools([send_email])
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash")).bind_tools([send_email])
 
 
 def agent(state: S):
@@ -74,7 +76,7 @@ def main():
     g.add_conditional_edges("review", after_review, {"tools": "tools", "agent": "agent"})
     g.add_edge("tools", "agent")
 
-    memory = MemorySaver()
+    memory = InMemorySaver()
     app = g.compile(checkpointer=memory)
     cfg = {"configurable": {"thread_id": "demo"}}
 

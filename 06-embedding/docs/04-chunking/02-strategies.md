@@ -1,6 +1,6 @@
 # 固定 vs 语义 vs 递归切分
 
-> **一句话**：通用文本用 **RecursiveCharacterTextSplitter**（递归按段落→句子→词级别切），重要场景 + 高 budget 上 **semantic chunker**（按语义边界），简单兜底用 **fixed char chunker**。
+> 我的默认选择是：通用文本用 RecursiveCharacterTextSplitter，按段落、句子、词一层层往下切；数据价值高、预算也够的场景再上 semantic chunker，按语义边界切；固定字数切分只拿来兜底。下面逐个看它们的做法和代价。
 
 ---
 
@@ -8,9 +8,9 @@
 
 | 策略 | 怎么切 | 优 | 劣 |
 |------|--------|----|----|
-| **Fixed (char / token)** | 固定字数硬切 | 简单 | 切断语义 |
-| **Recursive** | 按"段落→句子→词" 多层递归 | 通用、保留结构 | 不感知"语义" |
-| **Semantic** | embed 每句，相似度低处切 | 语义边界自然 | 慢、贵 |
+| Fixed (char / token) | 按固定字数硬切 | 简单 | 会切断语义 |
+| Recursive | 按段落 → 句子 → 词逐层递归 | 通用，能保留结构 | 不感知语义 |
+| Semantic | embed 每句，在相似度低的地方切 | 边界落在语义转折处 | 慢、贵 |
 
 ---
 
@@ -30,18 +30,13 @@ def fixed_chunk(text: str, size: int, overlap: int) -> list[str]:
 chunks = fixed_chunk(text, size=500, overlap=50)
 ```
 
-**问题**：
-
-- 切到词中间 ("订阅" 切成 "订" 和 "阅")
-- 切到句中间，语义破碎
-
-只适合：兜底 / 极简场景。
+这种切法会把词切开（"订阅"被切成"订"和"阅"），也会切在句子中间，语义变得零碎。只适合兜底，或者对质量没要求的极简场景。
 
 ---
 
 ## 3. Recursive Character Text Splitter（LangChain 默认）
 
-按优先级递归切：先尝试大粒度分隔符（段落），切到上限再用小粒度（句子 → 词）：
+按优先级递归切：先用大粒度的分隔符（段落），切出来还超过上限，再换小粒度的（句子、词）：
 
 ```python
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -57,7 +52,7 @@ splitter = RecursiveCharacterTextSplitter(
 chunks = splitter.split_text(text)
 ```
 
-工作原理：
+工作过程：
 
 ```
 1. 先用 "\n\n" 切 → 看每段大小
@@ -66,19 +61,17 @@ chunks = splitter.split_text(text)
 4. 直到都 ≤ chunk_size
 ```
 
-**默认分隔符（英文）**：`["\n\n", "\n", " ", ""]`
-
-**中文加这些**：`["。", "！", "？", "，"]`
+英文的默认分隔符是 `["\n\n", "\n", " ", ""]`。处理中文要把 `["。", "！", "？", "，"]` 加进去。
 
 ---
 
 ## 4. Token-aware Recursive
 
-按 token 数而不是字符数（更精确控 LLM context）：
+按 token 数而不是字符数来算，能更精确地控制 LLM 的 context：
 
 ```python
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.text_splitter import TokenTextSplitter
+from langchain_text_splitters import TokenTextSplitter
 import tiktoken
 
 
@@ -104,7 +97,7 @@ splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
 
 ## 5. Semantic Chunking
 
-按 embedding 相似度找"语义边界"：
+思路是用 embedding 相似度找语义边界：
 
 ```
 1. 把文本分成句子
@@ -122,29 +115,20 @@ from langchain_openai import OpenAIEmbeddings
 splitter = SemanticChunker(
     OpenAIEmbeddings(model="text-embedding-3-small"),
     breakpoint_threshold_type="percentile",   # 或 "standard_deviation" / "gradient"
-    breakpoint_threshold_amount=95,            # 95 分位的相似度变化处切
+    breakpoint_threshold_amount=95,            # 相邻句的距离（1 - 相似度）超过 95 分位处切
 )
 
 
 chunks = splitter.split_text(text)
 ```
 
-**优**：切在自然语义边界。
-
-**劣**：
-
-- 慢（每句都要 embed）
-- 贵（embed cost 翻倍）
-- 阈值难调
-
-实战：高价值数据（法律 / 医疗）值得用，普通业务用 recursive 就行。
+好处是切点落在自然的语义边界上。代价有三个：每句都要 embed，所以慢；embed 成本翻倍；阈值也不好调。法律、医疗这类高价值数据值得用，普通业务用 recursive 就够了。
 
 ---
 
 ## 6. 各方法对比 demo
 
 ```python
-# demos/chunking/02_strategies.py
 from langchain_text_splitters import (
     CharacterTextSplitter,
     RecursiveCharacterTextSplitter,
@@ -185,7 +169,7 @@ for i, c in enumerate(recursive.split_text(text)):
     print(f"{i}: {c[:80]}...")
 ```
 
-通常 Recursive 切出来的 chunk 是完整段落 / 句子，Fixed 切出来一坨碎片。
+跑一下就能看出差别：Recursive 切出来的基本是完整的段落或句子，Fixed 切出来是一堆碎片。
 
 ---
 
@@ -204,7 +188,7 @@ splitter = SentenceSplitter(
 nodes = splitter.get_nodes_from_documents(documents)
 ```
 
-LangChain 和 LlamaIndex 都行，原理一样。
+LangChain 和 LlamaIndex 原理一样，用哪个都行。
 
 ---
 
@@ -225,21 +209,13 @@ splitter = RecursiveCharacterTextSplitter(
 )
 ```
 
-中文一字一 token 估算（粗略）：
-
-- 1 char ≈ 1 token（cl100k_base）
-- chunk_size=500 → ~500 tokens
-
-英文：
-
-- 1 token ≈ 0.7 word ≈ 4 chars
-- chunk_size=2000 chars ≈ 500 tokens
+粗略估算的话，中文在 cl100k_base 下大约 1 个字对应 1 个 token，chunk_size=500 约等于 500 tokens。英文大约 1 token ≈ 0.7 个词 ≈ 4 个字符，chunk_size=2000 字符约等于 500 tokens。
 
 ---
 
-## 9. 高级：按"对话单元"切
+## 9. 高级：按对话单元切
 
-聊天 / 客服历史：
+聊天记录、客服历史适合按一问一答切：
 
 ```python
 def chunk_dialog(messages: list[dict]) -> list[str]:
@@ -274,7 +250,7 @@ stats = validate_chunks(my_chunks)
 print(stats)
 ```
 
-如果 `too_short` 或 `too_long` 多 → 调整策略。
+`too_short` 或 `too_long` 偏多，就说明策略需要调整。
 
 ---
 
@@ -294,15 +270,15 @@ print(stats)
 
 | 坑 | 解 |
 |----|----|
-| chunk_size 单位混用（char vs token） | 用 token 计算（tiktoken / hf tokenizer）|
-| 中文用英文 default separator | 加上 ["。", "！", "？", "，"] |
-| overlap 太大 | 浪费 embed cost，10-20% chunk_size 即可 |
-| chunk 没 metadata（doc_id / page） | 加上，方便回溯 |
+| chunk_size 的单位混用（字符 vs token） | 统一按 token 算（tiktoken / hf tokenizer）|
+| 中文沿用英文的默认分隔符 | 加上 ["。", "！", "？", "，"] |
+| overlap 设得太大 | 白白多花 embed 成本，chunk_size 的 10-20% 就够 |
+| chunk 没带 metadata（doc_id / page） | 加上，方便回溯 |
 
 ---
 
 ## 13. 下一步
 
-- 📖 结构感知切分（PDF / MD / HTML / table） → [03-structure-aware.md](./03-structure-aware.md)
-- 📖 多粒度（small-to-big） → [04-small-to-big.md](./04-small-to-big.md)
-- 📖 metadata 设计 → [05-metadata.md](./05-metadata.md)
+- PDF / Markdown / HTML / 表格怎么切：[文档结构感知切分](./03-structure-aware.md)
+- 多粒度切分：[多粒度切分：Small-to-Big / Parent Document](./04-small-to-big.md)
+- metadata 设计：[Chunk Metadata 设计](./05-metadata.md)

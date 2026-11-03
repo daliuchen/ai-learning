@@ -1,6 +1,6 @@
 # Self-Query / Metadata Filter
 
-> **一句话**：Self-Query 让 LLM 把自然语言 query "翻译"成 **检索 query + metadata filter**——用户说"找去年 billing 类别的文档"，系统自动加 `category=billing AND created_at > 2024-01-01`。
+> 用户提问时常常夹带了筛选条件，比如"找去年 billing 类别的文档"。Self-Query 让 LLM 把这类自然语言拆成两部分：一个用于向量检索的 query，加上一组 metadata filter（`category=billing AND created_at >= 2025-01-01`）。这篇讲怎么实现、怎么防止 LLM 写错 filter。
 
 ---
 
@@ -15,7 +15,7 @@
 
 更好：
   Query 部分: "退款"
-  Filter 部分: {lang: en, created_at >= 2024-01-01}
+  Filter 部分: {lang: en, 2025-01-01 <= created_at < 2026-01-01}
 ```
 
 ---
@@ -29,9 +29,11 @@
      "search_query": "退款",
      "filter": {
        "lang": "en",
-       "created_at": {">=": 1704067200}
+       "created_at": {"$gte": 1735689600, "$lt": 1767225600}
      }
    }
+   （1735689600 / 1767225600 是 2025-01-01 / 2026-01-01 的 UTC 时间戳，
+    运行时由代码按当前日期算出来，见下面的实现）
 3. 系统按 filter + search_query 查向量库
 ```
 
@@ -41,14 +43,23 @@
 
 ```python
 import json
+import time
+from datetime import datetime, timezone
 from openai import OpenAI
 
 
 client = OpenAI()
 
+# 相对时间的边界由代码算好再放进 prompt，不让 LLM 自己推算日期
+now = int(time.time())
+this_year = datetime.now(timezone.utc).year
+this_year_start = int(datetime(this_year, 1, 1, tzinfo=timezone.utc).timestamp())
+last_year_start = int(datetime(this_year - 1, 1, 1, tzinfo=timezone.utc).timestamp())
+last_30_days = now - 30 * 86400
+
 
 METADATA_SCHEMA = """文档 metadata 字段：
-- category: enum(billing, support, sales, technical)
+- category: enum(billing, auth, support, sales)
 - lang: enum(zh, en, ja)
 - visibility: enum(public, internal, admin)
 - created_at: int (unix timestamp)
@@ -60,6 +71,8 @@ SELF_QUERY_PROMPT = f"""把用户问题转成检索 query + metadata filter。
 
 {METADATA_SCHEMA}
 
+当前时间（unix）：{now}
+
 输出 JSON：
 {{
   "search_query": "用来做向量搜的语义部分",
@@ -70,13 +83,13 @@ SELF_QUERY_PROMPT = f"""把用户问题转成检索 query + metadata filter。
 用户："找去年关于退款的英文文档"
 输出：{{
   "search_query": "退款",
-  "filter": {{"lang": "en", "created_at": {{"$gte": 1704067200}}}}
+  "filter": {{"lang": "en", "created_at": {{"$gte": {last_year_start}, "$lt": {this_year_start}}}}}
 }}
 
 用户："最新的 billing FAQ"
 输出：{{
   "search_query": "billing FAQ",
-  "filter": {{"category": "billing", "created_at": {{"$gte": 1715000000}}}}
+  "filter": {{"category": "billing", "created_at": {{"$gte": {last_30_days}}}}}
 }}
 
 只输出 JSON，不要解释。
@@ -85,7 +98,7 @@ SELF_QUERY_PROMPT = f"""把用户问题转成检索 query + metadata filter。
 
 def parse_query(user_query: str) -> dict:
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": SELF_QUERY_PROMPT},
             {"role": "user", "content": user_query},
@@ -102,7 +115,7 @@ print(parsed)
 
 ---
 
-## 4. 转向量库 filter 格式
+## 4. 转成向量库的 filter 格式
 
 ```python
 # Pinecone
@@ -118,7 +131,9 @@ def to_qdrant_filter(filter_dict):
         if isinstance(value, dict):
             r = Range()
             if "$gte" in value: r.gte = value["$gte"]
+            if "$gt" in value: r.gt = value["$gt"]
             if "$lte" in value: r.lte = value["$lte"]
+            if "$lt" in value: r.lt = value["$lt"]
             must.append(FieldCondition(key=key, range=r))
         else:
             must.append(FieldCondition(key=key, match=MatchValue(value=value)))
@@ -130,7 +145,6 @@ def to_qdrant_filter(filter_dict):
 ## 5. 完整 demo
 
 ```python
-# demos/retrieval/06_self_query.py
 import json
 import time
 from openai import OpenAI
@@ -191,9 +205,9 @@ qd.upsert(
 SELF_QUERY_PROMPT = """把用户问题转成 search_query + filter。
 
 metadata 字段：
-- category: billing/auth/sales
-- lang: zh/en
-- visibility: public/internal
+- category: billing/auth/support/sales
+- lang: zh/en/ja
+- visibility: public/internal/admin
 - created_at: unix int
 
 输出 JSON：{"search_query": "...", "filter": {...}}
@@ -207,7 +221,7 @@ metadata 字段：
 
 def parse(query):
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": SELF_QUERY_PROMPT.replace("now_minus_7_days", str(now - 7 * 86400))},
             {"role": "user", "content": query},
@@ -227,19 +241,21 @@ def search_with_filter(parsed):
         if isinstance(v, dict):
             r = Range()
             if "$gte" in v: r.gte = v["$gte"]
+            if "$gt" in v: r.gt = v["$gt"]
             if "$lte" in v: r.lte = v["$lte"]
+            if "$lt" in v: r.lt = v["$lt"]
             must.append(FieldCondition(key=k, range=r))
         else:
             must.append(FieldCondition(key=k, match=MatchValue(value=v)))
     
     q_emb = client.embeddings.create(model="text-embedding-3-small", input=[sq]).data[0].embedding
     
-    return qd.search(
+    return qd.query_points(
         collection_name="docs",
-        query_vector=q_emb,
+        query=q_emb,
         query_filter=Filter(must=must) if must else None,
         limit=3,
-    )
+    ).points
 
 
 for q in [
@@ -259,8 +275,9 @@ for q in [
 ## 6. LangChain 集成
 
 ```python
-from langchain.chains.query_constructor.base import AttributeInfo
-from langchain.retrievers.self_query.base import SelfQueryRetriever
+# langchain 1.x 已搬到 langchain-classic
+from langchain_classic.chains.query_constructor.base import AttributeInfo
+from langchain_classic.retrievers.self_query.base import SelfQueryRetriever
 from langchain_openai import ChatOpenAI
 
 
@@ -272,7 +289,7 @@ metadata_info = [
 
 
 retriever = SelfQueryRetriever.from_llm(
-    llm=ChatOpenAI(model="gpt-4o-mini"),
+    llm=ChatOpenAI(model="gpt-6-luna"),
     vectorstore=vectorstore,
     document_contents="公司知识库文档",
     metadata_field_info=metadata_info,
@@ -284,7 +301,7 @@ docs = retriever.invoke("找去年的中文 billing 文档")
 
 ---
 
-## 7. 高级：复合 filter
+## 7. 进阶：复合 filter
 
 ```python
 # OR 条件
@@ -308,18 +325,18 @@ docs = retriever.invoke("找去年的中文 billing 文档")
 }
 ```
 
-prompt 里加例子让 LLM 学会写。
+在 prompt 里放几个例子，LLM 就能学会写这种组合条件。
 
 ---
 
 ## 8. 容错
 
-LLM 可能输出错误 filter（字段名错 / 值不对枚举）：
+LLM 有时会写出错误的 filter，比如字段名不存在、取值不在枚举里：
 
 ```python
 ALLOWED_FIELDS = {"category", "lang", "visibility", "created_at"}
 ALLOWED_VALUES = {
-    "category": {"billing", "support", "sales"},
+    "category": {"billing", "auth", "support", "sales"},
     "lang": {"zh", "en", "ja"},
 }
 
@@ -350,7 +367,7 @@ parsed["filter"] = sanitize_filter(parsed.get("filter", {}))
     "search_query": "退款",
     "filters": [
       {"field": "language", "value": "中文"},
-      {"field": "created", "after": "2024-05-13"},
+      {"field": "created", "after": "2026-10-27"},  # 按请求时的当前日期算
     ],
   },
 }
@@ -363,7 +380,7 @@ parsed["filter"] = sanitize_filter(parsed.get("filter", {}))
 理解为：搜"退款"，限定 中文 + 最近 7 天
 ```
 
-用户能纠正你 LLM 的误解。
+用户看到之后，如果 LLM 理解错了可以自己改。
 
 ---
 
@@ -387,15 +404,15 @@ schema 没 metadata：
 | 坑 | 解 |
 |----|----|
 | LLM 编造 metadata 字段 | sanitize + ALLOWED_FIELDS |
-| 时间表达"昨天"被忽略 | prompt 给 examples |
-| 用户描述跟 schema 名不一样 | LLM 学 description |
-| 多语言用户 | prompt 多语言示例 |
+| "昨天"这类时间表达被忽略 | prompt 里给 examples |
+| 用户的说法和 schema 字段名对不上 | 给字段写 description，让 LLM 照着映射 |
+| 用户来自多种语言 | prompt 里放多语言示例 |
 
 ---
 
 ## 12. 05-retrieval 章节小结
 
-完整 RAG 检索 pipeline：
+把这一章的手段串起来，完整的检索 pipeline 是这样：
 
 ```
 [Query]
@@ -414,6 +431,6 @@ schema 没 metadata：
 
 ## 13. 下一步
 
-- 📖 评测 retrieval → [06-evaluation/01-metrics.md](../06-evaluation/01-metrics.md)
-- 📖 完整 RAG 实战 → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
-- 📖 监控 + 持续改进 → [07-production/05-monitoring.md](../07-production/05-monitoring.md)
+- 检索怎么评测：[检索评测指标：Recall@k / MRR / nDCG](../06-evaluation/01-metrics.md)
+- [完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)
+- 上线后的监控和持续改进：[监控：召回率 / Latency / Cost](../07-production/05-monitoring.md)

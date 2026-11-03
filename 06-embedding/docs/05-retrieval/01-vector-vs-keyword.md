@@ -1,25 +1,25 @@
 # 纯向量 vs 关键词 vs 混合
 
-> **一句话**：纯向量擅长语义相似（"取消订阅" ≈ "停止续费"），关键词擅长精确匹配（产品名、错误码、人名）——**生产上几乎一定是混合**。
+> 向量检索擅长找意思相近的内容（"取消订阅"能匹配到"停止续费"），关键词检索擅长精确匹配产品名、错误码、人名。两种能力各有盲区，所以生产环境几乎都用混合检索。这篇用几个具体例子说明各自在哪里翻车。
 
 ---
 
-## 1. 三种检索的本质
+## 1. 三种检索对比
 
 | | 纯向量 (Dense) | 关键词 (Sparse / BM25) | 混合 |
 |---|---|---|---|
-| 匹配啥 | 语义 | 词面 | 两者 |
-| 同义词 | ✅ 强 | ❌ 弱 | ✅ |
-| 拼写错 | ⚠️ 一般 | ❌ 完全错 | ⚠️ |
-| 专有名词 | ❌ 弱 | ✅ 强（精确）| ✅ |
-| 错误码 / ID | ❌ 完全错 | ✅ 强 | ✅ |
-| 长文档检索 | ✅ | ⚠️ 容易 noise | ✅ |
-| 短 query 检索短文档 | ✅ | ✅ | ✅ |
+| 匹配什么 | 语义 | 词面 | 两者 |
+| 同义词 | 强 | 弱 | 强 |
+| 拼写错 | 一般 | 完全匹配不上 | 一般 |
+| 专有名词 | 弱 | 强（精确）| 强 |
+| 错误码 / ID | 基本匹配不上 | 强 | 强 |
+| 长文档检索 | 好 | 容易混进噪声 | 好 |
+| 短 query 检索短文档 | 好 | 好 | 好 |
 | 实现成本 | 中（要 embed + 向量库） | 低（Lucene / Elastic） | 中-高 |
 
 ---
 
-## 2. 啥时候纯向量翻车
+## 2. 什么时候纯向量翻车
 
 ### 例 1：错误码
 
@@ -61,9 +61,11 @@ Query: "怎么用 kubectl exec 进入 pod"
 BM25：精准命中 kubectl exec
 ```
 
+三个例子的共同点是 query 里有一个必须原样出现的字符串，向量模型会把它当成一段普通语义来理解，精确性就丢了。
+
 ---
 
-## 3. 啥时候 BM25 翻车
+## 3. 什么时候 BM25 翻车
 
 ### 例 1：同义改写
 
@@ -91,21 +93,17 @@ BM25：无法跨语言
 
 ---
 
-## 4. BM25 是啥
+## 4. BM25 是什么
 
 > Best Matching 25
 
-经典关键词检索算法：
+经典的关键词检索算法：
 
 ```
 score(D, Q) = Σ IDF(qi) × (f(qi,D) × (k1 + 1)) / (f(qi,D) + k1 × (1 - b + b × |D|/avgdl))
 ```
 
-直觉：
-
-- 包含 query 词的文档得分高
-- 罕见词权重大（IDF）
-- 文档越长越难得高分（normalize）
+公式看着复杂，直觉上就三点：文档里出现 query 词就加分；越罕见的词权重越大（IDF）；文档越长越难拿高分（按平均长度做归一化）。
 
 Elasticsearch / OpenSearch / Lucene / Tantivy 都内置 BM25。
 
@@ -148,10 +146,9 @@ for doc, score in sorted(zip(corpus, scores), key=lambda x: -x[1])[:3]:
 
 ---
 
-## 6. 直接两路对比 demo
+## 6. 两路对比 demo
 
 ```python
-# demos/retrieval/01_vector_vs_bm25.py
 import numpy as np
 from openai import OpenAI
 from rank_bm25 import BM25Okapi
@@ -212,11 +209,11 @@ for q in [
         print(f"  {s:.4f}  {doc}")
 ```
 
-跑一下能直观看到两种检索的强弱场景。
+跑一遍，四个 query 分别落在哪一边强，结果一眼就能看出来。
 
 ---
 
-## 7. 评测：单独算 Recall
+## 7. 评测：分别算 Recall
 
 ```python
 def recall_at_k(retriever_fn, evalset, k=5):
@@ -237,7 +234,7 @@ print(f"Vector Recall@5: {vec_recall:.3f}")
 print(f"BM25   Recall@5: {bm25_recall:.3f}")
 ```
 
-典型实测（客服 KB 200 条 evalset）：
+一组示意数字（设定为客服知识库、200 条 evalset，没有固定到某个模型，只说明三者的大致差距；和[重排 Pipeline](05-rerank-pipeline.md)第 11 节的示意表口径一致）：
 
 - 纯向量：~85%
 - 纯 BM25：~75%
@@ -245,7 +242,7 @@ print(f"BM25   Recall@5: {bm25_recall:.3f}")
 
 ---
 
-## 8. 啥时候用什么
+## 8. 什么时候用什么
 
 ```
 你的 query 包含 ID / 代码 / 错误码 / 型号？
@@ -267,19 +264,19 @@ print(f"BM25   Recall@5: {bm25_recall:.3f}")
   → BM25 没用
 ```
 
-**几乎所有生产 RAG**都该用混合。详见 [02-bm25-fusion.md](./02-bm25-fusion.md)。
+几乎所有生产 RAG 都该用混合检索。融合方法见 [BM25 + Dense 融合：RRF / Weighted](./02-bm25-fusion.md)。
 
 ---
 
 ## 9. 混合的两种实现
 
-1. **向量库内置 sparse**（Pinecone / Qdrant / Weaviate）
+1. 用向量库内置的 sparse 能力（Pinecone / Qdrant / Weaviate）：
 
    ```python
    index.query(vector=dense, sparse_vector=sparse, top_k=5)
    ```
 
-2. **外部 BM25 + 向量召回 → 融合**
+2. 外部 BM25 和向量各召回一次，再融合：
 
    ```python
    vec_hits = vector_db.search(query)
@@ -287,7 +284,7 @@ print(f"BM25   Recall@5: {bm25_recall:.3f}")
    merged = rrf_fusion(vec_hits, bm25_hits)
    ```
 
-详见 [02-bm25-fusion.md](./02-bm25-fusion.md)。
+具体做法见 [BM25 + Dense 融合：RRF / Weighted](./02-bm25-fusion.md)。
 
 ---
 
@@ -306,14 +303,14 @@ print(f"BM25   Recall@5: {bm25_recall:.3f}")
 | 坑 | 解 |
 |----|----|
 | 中文 BM25 不分词 | 用 jieba / pkuseg / hanlp |
-| 直接 raw score 加权 | 尺度不同（vec 0-1, BM25 任意），用 RRF |
-| 全靠向量找错误码 | 必加 BM25 |
-| BM25 没去停用词 | 英文加 stopwords，中文 jieba 自带 |
+| 直接拿 raw score 加权 | 两边尺度不同（vec 0-1，BM25 没有上限），用 RRF |
+| 全靠向量找错误码 | 一定要加 BM25 |
+| BM25 没去停用词 | 英文用现成的 stopwords 表；jieba 分词本身不去停用词，中文要自己准备停用词表过滤（标点和空格也一起去掉） |
 
 ---
 
 ## 12. 下一步
 
-- 📖 BM25 + Dense 怎么融合 → [02-bm25-fusion.md](./02-bm25-fusion.md)
-- 📖 HyDE：用 LLM 生成假设答案 → [03-hyde.md](./03-hyde.md)
-- 📖 Multi-query / Sub-query → [04-multi-query.md](./04-multi-query.md)
+- BM25 和 Dense 怎么融合：[BM25 + Dense 融合：RRF / Weighted](./02-bm25-fusion.md)
+- 用 LLM 生成假设答案再检索：[HyDE：用 LLM 生成假设答案](./03-hyde.md)
+- 把一个 query 拆成多个：[Multi-query / Sub-query 拆解](./04-multi-query.md)

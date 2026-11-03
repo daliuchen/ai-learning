@@ -1,44 +1,37 @@
-# Pinecone：托管向量库代表
+# Pinecone：托管向量库
 
-> **一句话**：Pinecone 是行业最知名的托管向量库——零运维、按量计费、`pip install pinecone` 就能跑生产，适合不想自建集群的团队。
+> Pinecone 是知名度最高的托管向量库：不用运维，按量计费，`pip install pinecone` 之后就能接生产。不想自己搭集群的团队，可以先看它。
+
+版本：以 `pinecone 10.x`（2026 年 11 月）为准，`create_index` / `Index` / `ServerlessSpec` 用法不变；运行需要 Pinecone 账号。
 
 ---
 
-## 1. 注册 + 拿 key
+## 1. 注册并拿到 key
 
-去 https://www.pinecone.io/ 注册（免费 tier 够开发用），拿到：
+去 https://www.pinecone.io/ 注册（免费档开发够用），拿到：
 
 - `PINECONE_API_KEY`
 
 ```bash
-pip install pinecone
+pip install pinecone      # 包名是 pinecone；老包 pinecone-client 已改名停更，不要再装
 ```
 
 ---
 
 ## 2. Serverless vs Pod
 
-**Serverless**（推荐起步）：
+Serverless 是起步时的推荐选项：按 query 和存储计费，自动伸缩，冷启动延迟稍高，适合流量不稳定的中小项目。
 
-- 按 query / storage 计费
-- 自动伸缩
-- 冷启动延迟稍高
-- 适合：流量不稳 / 中小项目
-
-**Pod-based**：
-
-- 包月固定 pod
-- 延迟稳定
-- 适合：流量稳 / 大项目
+Pod-based 已经是 legacy：包月固定 pod，延迟稳定。官方文档写明，2025-08-18 起新注册的 Standard / Enterprise 客户不能再创建 pod 索引；对齐 API 版本 2026-07 的 SDK 也不再支持创建 pod 索引（SDK 里 `PodSpec` 类还在，是为了管理存量）。新项目直接用 serverless。
 
 ```python
-from pinecone import Pinecone, ServerlessSpec, PodSpec
+from pinecone import Pinecone, ServerlessSpec
 
 
 pc = Pinecone(api_key="...")
 
 
-# Serverless
+# Serverless（唯一推荐）
 pc.create_index(
     name="my-index",
     dimension=1536,
@@ -47,13 +40,6 @@ pc.create_index(
 )
 
 
-# Pod-based
-pc.create_index(
-    name="my-index-pod",
-    dimension=1536,
-    metric="cosine",
-    spec=PodSpec(environment="us-east-1-aws", pod_type="s1.x1"),
-)
 ```
 
 ---
@@ -71,7 +57,7 @@ index.upsert(vectors=[
         "metadata": {
             "category": "billing",
             "lang": "zh",
-            "created_at": 1715817600,
+            "created_at": 1778889600,         # 2026-05-16 的 unix 时间戳
             "tags": ["refund", "subscription"],
         },
     },
@@ -79,10 +65,9 @@ index.upsert(vectors=[
 ])
 ```
 
-- ID 是字符串，最长 512 字符
-- Metadata 任意 JSON（但有大小限制 40KB）
+ID 是字符串，最长 512 字符；metadata 可以是任意 JSON，但上限 40KB。
 
-批量：
+批量写入：
 
 ```python
 def chunked(lst, n):
@@ -94,7 +79,7 @@ for batch in chunked(my_vectors, 100):
     index.upsert(vectors=batch)
 ```
 
-**推荐 batch 100-200**（太大 timeout，太小慢）。
+batch 建议 100-200 条，太大容易超时，太小又慢。
 
 ---
 
@@ -124,20 +109,20 @@ results = index.query(
     filter={
         "category": "billing",                          # equal
         "lang": {"$in": ["zh", "en"]},                  # in
-        "created_at": {"$gte": 1715000000},             # range
+        "created_at": {"$gte": 1777593600},             # range：2026-05-01 之后
     },
     include_metadata=True,
 )
 ```
 
-支持操作符：
+支持的操作符：
 
 - `$eq` / `$ne`
 - `$gt` / `$gte` / `$lt` / `$lte`
 - `$in` / `$nin`
 - `$and` / `$or`
 
-类似 MongoDB。
+写法和 MongoDB 差不多。
 
 ---
 
@@ -156,11 +141,7 @@ results = index.query(
 )
 ```
 
-**用法**：
-
-- 多租户应用：每个用户 / 团队一个 namespace
-- 多版本数据：v1 / v2
-- 多领域：billing / support / sales
+namespace 常见的用法有三种：多租户应用里每个用户或团队一个；区分数据版本，比如 v1 / v2；按领域分开，比如 billing / support / sales。
 
 ---
 
@@ -170,7 +151,8 @@ results = index.query(
 index.delete(ids=["doc_1", "doc_2"])
 index.delete(delete_all=True, namespace="user_42")  # 清空 namespace
 
-# 按 filter 删除（仅 Pod-based）
+# 按 metadata filter 删除：早期只有 pod 索引支持，serverless 是否支持请查当前官方文档；
+# 不支持时先按 filter 查出 ID 再按 ID 删
 index.delete(filter={"category": "deleted"})
 ```
 
@@ -178,7 +160,7 @@ index.delete(filter={"category": "deleted"})
 
 ## 8. Sparse + Dense（混合检索）
 
-Pinecone 支持稀疏向量（BM25-like）：
+Pinecone 支持稀疏向量（类似 BM25）：
 
 ```python
 results = index.query(
@@ -191,11 +173,11 @@ results = index.query(
 )
 ```
 
-详见 [05-retrieval/02-bm25-fusion.md](../05-retrieval/02-bm25-fusion.md)。
+详见 [BM25 + Dense 融合：RRF / Weighted](../05-retrieval/02-bm25-fusion.md)。
 
 ---
 
-## 9. 拿 stats
+## 9. 查看索引统计
 
 ```python
 stats = index.describe_index_stats()
@@ -204,13 +186,13 @@ print(stats.dimension)
 print(stats.namespaces)  # 各 namespace 的 vector 数
 ```
 
-监控用得到。
+做监控时会用到。
 
 ---
 
-## 10. Pinecone Inference（hosted embedding）
+## 10. Pinecone Inference（托管 embedding）
 
-Pinecone 2024 起也提供托管 embedding：
+Pinecone 也提供托管 embedding（integrated embedding，用 `pc.create_index_for_model(...)` 建索引）。官方文档现在把这套 Records API 叫作 legacy integrated index，又推出了新的 document index（声明带 `embed` 的 string 字段，配合 Documents API）。细节还在变，下面只演示 records 写法的思路：
 
 ```python
 # 直接用 Pinecone 的 hosted model embed + 索引
@@ -226,30 +208,19 @@ index.upsert_records(
 )
 ```
 
-跟 OpenAI Embeddings 没本质区别，但少一个 API hop。
+流程上相当于把"先调 embedding API 再写入"合成一步，少一次 API 往返；检索质量取决于你选的托管模型，要和自己现有的 embedding 在 evalset 上比一下。
 
 ---
 
 ## 11. 性能 / 限流
 
-| Tier | 单实例 QPS | Storage |
-|------|------------|---------|
-| Starter (free) | ~10 | ~100K vec |
-| Standard | ~100s | 任意 |
-| Enterprise | 自定义 | 任意 |
-
-**实战**：
-
-- Free tier 学习够，生产至少 Standard
-- 高 QPS 用 Pod-based（latency 稳）
-- 异常 → Pinecone status page
+免费的 Starter 档有存储容量和每月读写单元的配额，用来学习够了；生产至少要 Standard 档，按存储和读写单元计费，各档的配额和限流数字以官方定价页和 limits 文档为准。高 QPS 场景先在 serverless 上压测，评估后再看官方的专用读节点等选项（以官方文档为准）。遇到异常，先去看 Pinecone 的 status page。
 
 ---
 
-## 12. 完整 demo
+## 12. 完整示例
 
 ```python
-# demos/vector_db/02_pinecone.py
 import os
 import time
 from pinecone import Pinecone, ServerlessSpec
@@ -321,15 +292,15 @@ for m in results.matches:
 
 | 坑 | 解 |
 |----|----|
-| Serverless 冷启动 latency 高 | 预热（定期 query） / Pod-based |
-| Metadata 超 40KB | 不要在 metadata 里塞全文，只放 ID + 关键字段 |
-| 频繁 update 同 id | upsert 替换整个 vec + metadata |
-| 跨 region | latency 高，部署在用户近的 region |
+| Serverless 冷启动 latency 高 | 定期发 query 预热；pod 索引已是 legacy，不推荐 |
+| Metadata 超 40KB | 别把全文塞进 metadata，只放 ID 和关键字段 |
+| 频繁 update 同一个 id | upsert 会整体替换 vector 和 metadata |
+| 跨 region 访问 | 延迟高，把索引部署在离用户近的 region |
 
 ---
 
 ## 14. 下一步
 
-- 📖 Qdrant 自托管 → [03-qdrant.md](./03-qdrant.md)
-- 📖 pgvector → [04-pgvector.md](./04-pgvector.md)
-- 📖 索引原理 → [06-index-algorithms.md](./06-index-algorithms.md)
+- 自托管方案：[Qdrant：自托管向量库](./03-qdrant.md)
+- [pgvector：在 Postgres 里做向量检索](./04-pgvector.md)
+- 索引原理：[HNSW / IVF / PQ 索引原理](./06-index-algorithms.md)

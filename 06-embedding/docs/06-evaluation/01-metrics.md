@@ -1,6 +1,6 @@
 # 检索评测指标：Recall@k / MRR / nDCG
 
-> **一句话**：评测检索好坏的三大主指标是 **Recall@k**（召回率）/ **MRR**（首个正确答案的位置）/ **nDCG**（考虑排序）——不评测就不知道改 prompt / 换模型 / 加 rerank 是好是坏。
+> 评测检索质量最常用的是三个指标：Recall@k（正确文档有没有进 top-k）、MRR（第一个正确答案排在第几）、nDCG（把整体排序和相关程度都算进去）。改 prompt、换模型、加 rerank 之后效果是变好还是变差，只有跑一遍这些指标才说得清。
 
 ---
 
@@ -14,12 +14,7 @@
 {"query_id": "q3", "query": "ERR_500", "relevant_docs": ["d5", "d6", "d7"]}
 ```
 
-每条：
-
-- 一个 query
-- 一组"正确"的文档 ID
-
-详见 [02-build-evalset.md](./02-build-evalset.md) 怎么造 evalset。
+每条记录包含一个 query，以及一组"正确"文档的 ID。evalset 怎么造，见 [建评测集：Query → Expected Docs](./02-build-evalset.md)。
 
 ---
 
@@ -41,7 +36,9 @@ retriever 返回 top-5: [d1, d2, d5, d7, d9]
 → Recall@5 = 1/2 = 0.5
 ```
 
-实战上常用 **Recall@1 / 5 / 10**。
+实际项目里最常看 Recall@1 / 5 / 10。
+
+另一种常见口径是 Hit Rate@k：只要有一个相关文档进了 top-k 就记 1，否则记 0。query 只有一个相关文档时两者相同；有多个时 Hit Rate 更宽松。本手册有些示例代码（比如[MTEB 怎么看 + 选型决策树](../02-models/06-mteb-selection.md)第 10 节）为了简单用的是 Hit Rate，报数字时要写清楚是哪种口径。
 
 ```python
 def recall_at_k(retrieved: list[str], relevant: list[str], k: int) -> float:
@@ -64,8 +61,7 @@ Precision@k = (检索到的相关文档数) / k
 top-5 里有 2 个相关 → Precision@5 = 2/5 = 0.4
 ```
 
-**RAG 场景 Recall 比 Precision 重要**——只要"答案文档在 top-k 里"就行。
-但**搜索场景** Precision 重要（用户希望前几条都准）。
+RAG 场景下 Recall 比 Precision 重要，因为只要答案文档进了 top-k，LLM 就能用上。搜索场景则相反，用户希望前几条都是准的，Precision 更重要。
 
 ```python
 def precision_at_k(retrieved: list[str], relevant: list[str], k: int) -> float:
@@ -104,24 +100,20 @@ def mrr(retrieved: list[str], relevant: list[str]) -> float:
     return 0.0
 ```
 
-适合"我只要一个最对的答案"的场景（QA / FAQ）。
+适合只需要一个最对答案的场景，比如 QA、FAQ。
 
 ---
 
 ## 5. nDCG (normalized Discounted Cumulative Gain)
 
-考虑排序质量 + 多级相关性（0/1/2/3 分级）：
+nDCG 同时考虑排序质量和多级相关性（0/1/2/3 分级）：
 
 ```
 DCG@k = Σ (2^rel_i - 1) / log2(i + 1)
 nDCG@k = DCG@k / IDCG@k   (ideal DCG)
 ```
 
-直觉：
-
-- 越早出现高相关，得分越高
-- 用 log 折减（位置越后影响越小）
-- normalize 到 0-1
+它的计算逻辑是：高相关的文档出现得越早，得分越高；位置靠后的贡献按 log 折减；最后归一化到 0-1。
 
 ```python
 import math
@@ -142,7 +134,7 @@ def ndcg_at_k(retrieved: list[str], relevance_dict: dict[str, int], k: int) -> f
     return dcg / idcg if idcg > 0 else 0
 ```
 
-**relevance_dict** 例：
+`relevance_dict` 的例子：
 
 ```python
 {
@@ -159,19 +151,18 @@ def ndcg_at_k(retrieved: list[str], relevance_dict: dict[str, int], k: int) -> f
 
 | 场景 | 主指标 |
 |------|--------|
-| RAG（找文档给 LLM） | **Recall@5 / 10** |
-| 搜索引擎 | **Precision@10 + nDCG** |
-| QA（找一个答案）| **MRR + Recall@1** |
-| 推荐系统 | **nDCG + MRR** |
+| RAG（找文档给 LLM） | Recall@5 / 10 |
+| 搜索引擎 | Precision@10 + nDCG |
+| QA（找一个答案）| MRR + Recall@1 |
+| 推荐系统 | nDCG + MRR |
 
-实战 RAG **必看 Recall@5**，能跑就跑 nDCG 看排序好不好。
+做 RAG 的话 Recall@5 一定要看，条件允许再跑 nDCG，看看排序好不好。
 
 ---
 
 ## 7. 完整 demo
 
 ```python
-# demos/evaluation/01_metrics.py
 import math
 import numpy as np
 from openai import OpenAI
@@ -245,19 +236,19 @@ print(f"MRR 平均:      {np.mean(mrrs):.3f}")
 
 ## 8. 多级相关性
 
-如果 evalset 标了多级（0=无关, 1=部分, 2=相关, 3=完美）：
+如果 evalset 标了多级相关性（0=无关，1=部分相关，2=相关，3=完美）：
 
 ```jsonl
 {"query": "...", "relevance": {"d1": 3, "d2": 2, "d5": 1}}
 ```
 
-用 nDCG 评测，比单 0/1 更精细。
+这时用 nDCG 评测，比只有 0/1 的指标更细。
 
 ---
 
 ## 9. 跨方法对比
 
-跑一份 evalset，对比 N 个方法：
+同一份 evalset，同时跑 N 个方法：
 
 ```python
 methods = {
@@ -278,17 +269,17 @@ for name, search_fn in methods.items():
     print(f"{name:<30}  Recall@5 = {np.mean(recalls):.3f}")
 ```
 
-输出对比表：
+输出形如下表（示意数字，和[重排 Pipeline](../05-retrieval/05-rerank-pipeline.md)第 11 节的示意表同一口径）：
 
 ```
 Vector only (3-small)         Recall@5 = 0.85
 Vector only (3-large)         Recall@5 = 0.88
 BM25 only                     Recall@5 = 0.75
 Hybrid RRF                    Recall@5 = 0.92
-Hybrid + Rerank               Recall@5 = 0.96
+Hybrid + Rerank               Recall@5 = 0.97
 ```
 
-数据驱动选型。
+选型就按这张表来，不靠感觉。
 
 ---
 
@@ -318,10 +309,13 @@ run = Run({
 
 metrics = evaluate(qrels, run, metrics=["recall@5", "mrr", "ndcg@5"])
 print(metrics)
-# {"recall@5": 1.0, "mrr": 1.0, "ndcg@5": 1.0}
+# {"recall@5": 1.0, "mrr": 1.0, "ndcg@5": 0.96}
+# q1 的 d2 排在第 3 位：nDCG@5 = (1 + 1/log2(4)) / (1 + 1/log2(3)) ≈ 0.92，q2 是 1.0，平均约 0.96
 ```
 
-`ranx` 支持几十种 IR 指标，工业级。
+`ranx` 支持几十种 IR 指标，还内置了多个 run 的对比和显著性检验（`ranx.compare`）。
+
+以 `ranx 0.3.21` 为准，返回值是 `numpy.float64`，打印出来会带 `np.float64(...)`。这个库更新不频繁，遇到兼容问题可以换 `ir-measures` 或 `pytrec_eval`，也可以照本篇前面几节用二十来行代码自己实现 Recall@k / MRR / nDCG。BEIR 主要用来跑公开数据集，评测自己的 evalset 用不上。
 
 ---
 
@@ -334,22 +328,24 @@ Recall@10：宽松
 Recall@20：召回上限
 ```
 
-实战：**主要看 Recall@5，辅助看 Recall@10**。
+我一般以 Recall@5 为主，Recall@10 作参考。
 
 ---
 
 ## 12. 评测不能告诉你什么
 
-- **答案对不对** —— 这是端到端 RAG 评测，详见 [03-end-to-end.md](./03-end-to-end.md)
-- **延迟 / 成本** —— 跟检索质量是 trade-off
-- **真实用户感受** —— evalset 不一定 cover 所有场景
+检索指标回答不了下面三个问题：
 
-但**检索评测是基础**——检索拉跨，后续都救不回来。
+- 答案对不对：这属于端到端 RAG 评测，见 [端到端 RAG 评测（含 LLM 答案）](./03-end-to-end.md)
+- 延迟和成本：它们和检索质量之间要做取舍
+- 真实用户的感受：evalset 不一定覆盖了所有场景
+
+不过检索评测是基础，检索这一步做差了，后面的环节都补救不回来。
 
 ---
 
 ## 13. 下一步
 
-- 📖 怎么造 evalset → [02-build-evalset.md](./02-build-evalset.md)
-- 📖 端到端 RAG 评测 → [03-end-to-end.md](./03-end-to-end.md)
-- 📖 持续评测 + 回归 → [04-continuous.md](./04-continuous.md)
+- [建评测集：Query → Expected Docs](./02-build-evalset.md)
+- [端到端 RAG 评测（含 LLM 答案）](./03-end-to-end.md)
+- [持续评测 + 回归测试](./04-continuous.md)

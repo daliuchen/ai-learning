@@ -28,6 +28,9 @@ from pydantic_ai import ModelRequest, ToolDefinition
 from pydantic_ai.direct import model_request, model_request_stream, model_request_sync
 from pydantic_ai.messages import (
     ModelResponse,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPartDelta,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
@@ -44,7 +47,7 @@ load_dotenv()
 # 没 OpenAI key 时回退到 TestModel，保证 demo 一定能跑
 def pick_model():
     if os.getenv('OPENAI_API_KEY'):
-        return 'openai:gpt-4o-mini'
+        return 'openai-chat:qwen-flash'
     print('[INFO] OPENAI_API_KEY 未设置，使用 TestModel 演示')
     return TestModel(custom_output_text='这是 TestModel 的伪造回答')
 
@@ -108,8 +111,12 @@ async def demo_stream():
         model,
         [ModelRequest.user_text_prompt('用三句话解释 asyncio')],
     ) as stream:
-        async for chunk in stream.stream_text():
-            print(chunk, end='', flush=True)
+        # 流本身是「模型事件」的异步迭代器：文本增量在 PartStartEvent / PartDeltaEvent 里
+        async for event in stream:
+            if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                print(event.part.content, end='', flush=True)
+            elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                print(event.delta.content_delta, end='', flush=True)
         print()
         full = stream.get()
         print('usage:', full.usage)

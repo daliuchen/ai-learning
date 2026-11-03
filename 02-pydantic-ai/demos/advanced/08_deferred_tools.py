@@ -28,9 +28,27 @@ from pydantic_ai import (
     ToolDenied,
 )
 from pydantic_ai.messages import ModelMessagesTypeAdapter
-from pydantic_ai.models.test import TestModel
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 load_dotenv()
+
+ITEMS = [
+    {'sku': 'A1', 'name': 'iPhone 17', 'price': 7999, 'qty': 1},
+    {'sku': 'B2', 'name': 'AirPods', 'price': 999, 'qty': 2},
+]
+
+
+def scripted(*turns: list[tuple[str, dict]]) -> FunctionModel:
+    """没 key 时用脚本化模型：每一轮按剧本并行发出若干工具调用，剧本演完后回一句话。"""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        n = sum(isinstance(m, ModelResponse) for m in messages)
+        if n < len(turns):
+            return ModelResponse(parts=[ToolCallPart(name, args) for name, args in turns[n]])
+        return ModelResponse(parts=[TextPart('已处理完毕')])
+
+    return FunctionModel(fn)
 
 
 def has_key() -> bool:
@@ -48,13 +66,19 @@ class Order(BaseModel):
 # ============================================================
 # 构造电商 Agent
 # ============================================================
-def build_agent() -> Agent:
+def build_agent(refund_too: bool = False) -> Agent:
     if has_key():
-        model = 'openai:gpt-4o-mini'
+        model = 'openai-chat:qwen-flash'
     else:
-        # TestModel 默认会调每一个工具，恰好能演示"敏感工具触发审批"
-        print('[INFO] OPENAI_API_KEY 未设置，使用 TestModel')
-        model = TestModel()
+        print('[INFO] OPENAI_API_KEY 未设置，使用脚本化 FunctionModel')
+        last = [('submit_order', {'items': ITEMS, 'total': 9997})]
+        if refund_too:
+            last.append(('refund', {'order_id': 'ORD-001', 'amount': 999}))
+        model = scripted(
+            [('get_cart_items', {})],
+            [('calculate_total', {'items': ITEMS})],
+            last,
+        )
 
     agent = Agent(
         model,
@@ -149,7 +173,7 @@ def demo_approval_no():
 # ============================================================
 def demo_multi_round_loop():
     print('\n===== 3) 多轮 deferred 循环 =====')
-    agent = build_agent()
+    agent = build_agent(refund_too=True)
 
     result = agent.run_sync('结算并把 ORD-001 退款 999')
     messages = result.all_messages()

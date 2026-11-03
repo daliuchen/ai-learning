@@ -6,6 +6,8 @@ Send API 演示：并行总结多个段落，最后整合
 from operator import add
 from typing_extensions import Annotated, TypedDict
 
+import os
+
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
@@ -25,7 +27,7 @@ class WorkerState(TypedDict):
     paragraph: str
 
 
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash"), temperature=0)
 
 
 def worker(s: WorkerState):

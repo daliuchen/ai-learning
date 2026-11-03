@@ -3,19 +3,21 @@
 =================
 Supervisor 模式多 Agent：researcher + writer + supervisor
 """
+import os
 from typing import Literal
 from typing_extensions import Annotated, TypedDict
 
 from dotenv import load_dotenv
 
+from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import create_react_agent
 
 load_dotenv()
+QWEN = os.environ.get("QWEN_MODEL", "qwen-flash")
 
 
 @tool
@@ -24,15 +26,15 @@ def web_search(q: str) -> str:
     return f"[搜到] {q} 是一个状态机型 Agent 编排框架，由 LangChain 团队开发"
 
 
-researcher = create_react_agent(
-    ChatOpenAI(model="gpt-4o-mini", temperature=0),
+researcher = create_agent(
+    ChatOpenAI(model=QWEN, temperature=0),
     [web_search],
-    state_modifier="你是研究员，只搜资料并复述结果，不要进行写作。",
+    system_prompt="你是研究员，只搜资料并复述结果，不要进行写作。",
 )
-writer = create_react_agent(
-    ChatOpenAI(model="gpt-4o-mini", temperature=0.4),
+writer = create_agent(
+    ChatOpenAI(model=QWEN, temperature=0.4),
     [],
-    state_modifier="你是文案专家，根据 messages 中的资料写一篇 200 字介绍。",
+    system_prompt="你是文案专家，根据 messages 中的资料写一篇 200 字介绍。",
 )
 
 
@@ -48,7 +50,7 @@ def supervisor(state: State):
         " 有研究但没 [writer 输出] → writer; "
         " 已有 writer 输出 → FINISH"
     )
-    decision = ChatOpenAI(model="gpt-4o-mini", temperature=0).invoke(
+    decision = ChatOpenAI(model=QWEN, temperature=0).invoke(
         [("system", sys), *state["messages"]],
     )
     return {"next": decision.content.strip().upper()}

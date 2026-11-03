@@ -50,8 +50,8 @@ def demo_inspect_profile():
 
     if has_key('OPENAI_API_KEY'):
         from pydantic_ai.models.openai import OpenAIChatModel
-        print('-- OpenAI gpt-4o-mini --')
-        dump_profile(OpenAIChatModel('gpt-4o-mini'))
+        print('-- OpenAI qwen-flash --')
+        dump_profile(OpenAIChatModel('qwen-flash'))
     else:
         print('[SKIP] 无 OPENAI_API_KEY，跳过 OpenAI profile')
 
@@ -66,13 +66,13 @@ def demo_inspect_profile():
 def dump_profile(model: Model):
     p = model.profile
     print(f'  model_name = {model.model_name}')
-    print(f'  supports_tools = {p.supports_tools}')
-    print(f'  supports_json_schema_output = {p.supports_json_schema_output}')
-    print(f'  supports_json_object_output = {p.supports_json_object_output}')
-    print(f'  default_structured_output_mode = {p.default_structured_output_mode}')
-    print(f'  supports_thinking = {p.supports_thinking}')
-    print(f'  thinking_always_enabled = {p.thinking_always_enabled}')
-    print(f'  supported_native_tools = {p.supported_native_tools}')
+    print(f'  supports_tools = {p.get("supports_tools")}')
+    print(f'  supports_json_schema_output = {p.get("supports_json_schema_output")}')
+    print(f'  supports_json_object_output = {p.get("supports_json_object_output")}')
+    print(f'  default_structured_output_mode = {p.get("default_structured_output_mode")}')
+    print(f'  supports_thinking = {p.get("supports_thinking")}')
+    print(f'  thinking_always_enabled = {p.get("thinking_always_enabled")}')
+    print(f'  supported_native_tools = {p.get("supported_native_tools")}')
 
 
 # ============================================================
@@ -91,9 +91,9 @@ def demo_output_modes():
         }
     else:
         models = {
-            'tool': 'openai:gpt-4o-mini',
-            'native': 'openai:gpt-4o-mini',
-            'prompted': 'openai:gpt-4o-mini',
+            'tool': 'openai-chat:qwen-flash',
+            'native': 'openai-chat:qwen-flash',
+            'prompted': 'openai-chat:qwen-flash',
         }
 
     prompt = '登录页 500 报错，需要尽快修复'
@@ -101,6 +101,11 @@ def demo_output_modes():
     # tool 模式（默认）
     agent_tool = Agent(models['tool'], output_type=ToolOutput(Issue))
     print('[tool]    ', agent_tool.run_sync(prompt).output)
+
+    if not has_key('OPENAI_API_KEY'):
+        # TestModel 的 profile 不支持 native / prompted，直接跳过（会抛 UserError）
+        print('[native] / [prompted] 需要真实模型，已跳过')
+        return
 
     # native 模式：走 JSON Schema 严格输出
     agent_native = Agent(models['native'], output_type=NativeOutput(Issue))
@@ -125,9 +130,9 @@ def demo_custom_profile():
         default_structured_output_mode='tool',
     )
     print('DeepSeek 风格 profile:')
-    print(f'  supports_tools = {deepseek_profile.supports_tools}')
-    print(f'  supports_json_schema_output = {deepseek_profile.supports_json_schema_output}')
-    print(f'  default_mode = {deepseek_profile.default_structured_output_mode}')
+    print(f'  supports_tools = {deepseek_profile.get('supports_tools')}')
+    print(f'  supports_json_schema_output = {deepseek_profile.get('supports_json_schema_output')}')
+    print(f'  default_mode = {deepseek_profile['default_structured_output_mode']}')
 
     # 真要跑：把 profile 传给 OpenAIChatModel，base_url 指向 DeepSeek
     # （这里不真跑，避免误用 key）
@@ -150,9 +155,9 @@ def make_agent(model: Model | str, schema=Issue) -> Agent:
 
     profile = model_obj.profile
 
-    if profile.supports_json_schema_output:
+    if profile.get('supports_json_schema_output'):
         output, mode = NativeOutput(schema), 'native'
-    elif profile.supports_tools:
+    elif profile.get('supports_tools'):
         output, mode = ToolOutput(schema), 'tool'
     else:
         output, mode = PromptedOutput(schema), 'prompted'
@@ -170,7 +175,7 @@ def demo_factory():
 
     # b) 真实 OpenAI 模型
     if has_key('OPENAI_API_KEY'):
-        agent2 = make_agent('openai:gpt-4o-mini')
+        agent2 = make_agent('openai-chat:qwen-flash')
         print('OpenAI 输出:', agent2.run_sync('登录 bug').output)
 
     # c) 模拟"完全不支持 tools 的小模型"——直接构造一个 profile
@@ -182,8 +187,7 @@ def demo_factory():
         supports_tools=False,
         supports_json_schema_output=False,
     )
-    agent3 = make_agent(no_tool_model)
-    print('无 tools 模型输出:', agent3.run_sync('登录 bug').output)
+    make_agent(no_tool_model)  # 只演示模式选择（→ prompted）；TestModel 本身不会走 prompted 输出，所以不运行
 
 
 def main():

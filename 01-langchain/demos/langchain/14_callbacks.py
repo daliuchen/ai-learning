@@ -3,6 +3,7 @@
 ===============
 自定义 CallbackHandler：审计、token、费用
 """
+import os
 from dotenv import load_dotenv
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -12,6 +13,7 @@ from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
 
 
 class Auditor(BaseCallbackHandler):
@@ -20,11 +22,13 @@ class Auditor(BaseCallbackHandler):
         self.out_tok = 0
         self.events: list[tuple[str, dict]] = []
 
-    def _push(self, name, **kw):
-        self.events.append((name, kw))
+    def _push(self, event, **kw):
+        self.events.append((event, kw))
 
+    # 注意：serialized 在新版里经常是 None（LangChain 不再序列化对象），
+    # 组件名从 kwargs["name"] 取
     def on_chain_start(self, serialized, inputs, **kw):
-        self._push("chain_start", name=serialized.get("name"), inputs_keys=list(inputs.keys()) if isinstance(inputs, dict) else None)
+        self._push("chain_start", name=kw.get("name"), inputs_keys=list(inputs.keys()) if isinstance(inputs, dict) else None)
 
     def on_chain_end(self, outputs, **kw):
         self._push("chain_end", preview=str(outputs)[:80])
@@ -44,7 +48,7 @@ class Auditor(BaseCallbackHandler):
             self._push("model_end", usage=None)
 
     def on_tool_start(self, serialized, input_str, **kw):
-        self._push("tool_start", name=serialized.get("name"), input=input_str)
+        self._push("tool_start", name=kw.get("name"), input=input_str)
 
     def on_tool_end(self, output, **kw):
         self._push("tool_end", output=str(output)[:80])
@@ -61,7 +65,7 @@ def main():
         ("system", "你是会用工具的助手"),
         ("human", "{q}"),
     ])
-    model = ChatOpenAI(model="gpt-4o-mini").bind_tools([add])
+    model = ChatOpenAI(model=MODEL).bind_tools([add])
     chain = prompt | model | StrOutputParser()
 
     auditor = Auditor()

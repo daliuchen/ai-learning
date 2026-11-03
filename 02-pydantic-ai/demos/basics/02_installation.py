@@ -23,7 +23,7 @@ load_dotenv()
 def print_versions() -> None:
     print("===== 版本信息 =====")
     print(f"Python      : {sys.version.split()[0]}")
-    assert sys.version_info >= (3, 10), "Pydantic AI 需要 Python 3.10+"
+    assert sys.version_info >= (3, 10), "Pydantic AI 需要 Python 3.10+（当前 V2 推荐 3.11+）"
 
     try:
         import pydantic
@@ -42,13 +42,13 @@ def print_versions() -> None:
         sys.exit(1)
 
     # 可选包
-    for opt in ("pydantic_evals", "pydantic_graph", "logfire"):
+    from importlib.metadata import PackageNotFoundError, version
+
+    for opt in ("pydantic-evals", "pydantic-graph", "pydantic-ai-harness", "logfire"):
         try:
-            mod = __import__(opt)
-            ver = getattr(mod, "__version__", "unknown")
-            print(f"{opt:<12}: {ver}")
-        except ImportError:
-            print(f"{opt:<12}: 未安装（可选）")
+            print(f"{opt:<20}: {version(opt)}")  # 用发行包元数据读版本，比 __version__ 可靠
+        except PackageNotFoundError:
+            print(f"{opt:<20}: 未安装（可选）")
     print()
 
 
@@ -58,10 +58,10 @@ def ping_test_model() -> None:
     from pydantic_ai import Agent
     from pydantic_ai.models.test import TestModel
 
-    agent = Agent(TestModel(), system_prompt="你是一位助手")
+    agent = Agent(TestModel(), instructions="你是一位助手")
     result = agent.run_sync("hello")
     print(f"reply: {result.output!r}")
-    print(f"usage: {result.usage()}")
+    print(f"usage: {result.usage}")
     print()
 
 
@@ -70,19 +70,19 @@ def ping_real_model() -> None:
     from pydantic_ai import Agent
 
     if os.getenv("OPENAI_API_KEY"):
-        model = "openai:gpt-4o-mini"
+        model = "openai-chat:qwen-flash"
     elif os.getenv("ANTHROPIC_API_KEY"):
-        model = "anthropic:claude-3-5-haiku-latest"
+        model = "anthropic:claude-haiku-4-5"
     else:
         print("未检测到任何 API key，跳过真实请求。")
         print("（在 .env 里设置 OPENAI_API_KEY 或 ANTHROPIC_API_KEY 即可启用）")
         return
 
     print(f"使用模型：{model}")
-    agent = Agent(model, system_prompt="一句话回答。")
+    agent = Agent(model, instructions="一句话回答。")
     result = agent.run_sync("说出本月份的英文")
     print(f"reply: {result.output}")
-    print(f"usage: {result.usage()}")
+    print(f"usage: {result.usage}")
     print()
 
 

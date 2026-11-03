@@ -30,9 +30,9 @@ load_dotenv()
 
 def pick_model():
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-5-haiku-latest"
+        return "anthropic:claude-haiku-4-5"
     print("[warn] 未检测到 API key，使用 TestModel\n")
     return TestModel()
 
@@ -49,7 +49,7 @@ class WeatherDeps:
 
 def demo_basic() -> None:
     print("===== 1) 最小依赖注入 =====")
-    agent = Agent(MODEL, deps_type=WeatherDeps, system_prompt="你是一位天气助手。")
+    agent = Agent(MODEL, deps_type=WeatherDeps, instructions="你是一位天气助手。")
 
     @agent.tool
     def get_weather(ctx: RunContext[WeatherDeps], city: str) -> str:
@@ -74,9 +74,9 @@ class CustomerDeps:
 
 def demo_dynamic_prompt() -> None:
     print("===== 2) 动态系统提示用 deps =====")
-    agent = Agent(MODEL, deps_type=CustomerDeps, system_prompt="你是一位电商客服。")
+    agent = Agent(MODEL, deps_type=CustomerDeps, instructions="你是一位电商客服。")
 
-    @agent.system_prompt
+    @agent.instructions
     def add_user(ctx: RunContext[CustomerDeps]) -> str:
         user = ctx.deps.db["users"].get(ctx.deps.user_id, {})
         return f"当前用户：{user.get('name', '未知')}，VIP 等级：{user.get('vip', 0)}"
@@ -111,7 +111,7 @@ class RequestCtx:
 
 def demo_composite_deps() -> None:
     print("===== 3) 复合依赖 =====")
-    agent = Agent(MODEL, deps_type=RequestCtx, system_prompt="你是一位助手。")
+    agent = Agent(MODEL, deps_type=RequestCtx, instructions="你是一位助手。")
 
     @agent.tool
     def get_balance(ctx: RunContext[RequestCtx]) -> str:
@@ -139,7 +139,7 @@ class AppDeps:
     db: dict
 
 
-app_agent = Agent(MODEL, deps_type=AppDeps, system_prompt="你是一位查询助手。")
+app_agent = Agent(MODEL, deps_type=AppDeps, instructions="你是一位查询助手。")
 
 
 @app_agent.tool
@@ -183,7 +183,7 @@ def demo_validator() -> None:
         MODEL,
         deps_type=ModerationDeps,
         output_type=Answer,
-        system_prompt="生成一段对产品的友好评价。",
+        instructions="生成一段对产品的友好评价。",
         retries=2,
     )
 
@@ -199,16 +199,13 @@ def demo_validator() -> None:
     print()
 
 
-async def main_async() -> None:
+def main() -> None:
+    # run_sync 不能在已运行的事件循环里调用：同步 demo 放在 asyncio.run 之外
     demo_basic()
     demo_dynamic_prompt()
     demo_composite_deps()
-    await demo_override()
+    asyncio.run(demo_override())
     demo_validator()
-
-
-def main() -> None:
-    asyncio.run(main_async())
 
 
 if __name__ == "__main__":

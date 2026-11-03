@@ -1,6 +1,6 @@
 # LangChain 14：Callbacks 回调系统
 
-> **一句话**：Callbacks 是 LangChain 在 chain 执行各个生命周期点上的钩子机制，用于日志、监控、流式、Token 统计、错误捕获。`astream_events` 是现代版的"Callbacks"，但部分场景还是 Callbacks 更合适。
+> Callbacks 是 LangChain 在执行过程中各个生命周期节点上留的钩子，日志、监控、Token 统计、错误上报都靠它。`astream_events` 可以看作它的新一代替代品，但写日志、接监控这类不关心流式数据的需求，用 Callbacks 仍然更顺手。
 
 ---
 
@@ -9,13 +9,13 @@
 | 需求 | 推荐 |
 |------|------|
 | 实时流式 UI | `astream_events` |
-| 写日志 / 接 OpenTelemetry / Datadog | **Callbacks** |
-| 上传 LangSmith trace | 默认已自动 |
-| 在每个 LLM 调用前后做计费记录 | **Callbacks** |
-| 抓异常上报 | **Callbacks** |
+| 写日志 / 接 OpenTelemetry / Datadog | Callbacks |
+| 上传 LangSmith trace | 默认自动完成 |
+| 在每个 LLM 调用前后做计费记录 | Callbacks |
+| 抓异常上报 | Callbacks |
 | 多 Agent 不同 Agent 分别记录 | Callbacks（按 run_id） |
 
-Callbacks 是"侧切面"，不影响主链；events 是流式数据。
+两者的区别在于：Callbacks 挂在主链旁边，只观察不改变主链的输出；events 本身就是主链吐出来的流式数据。
 
 ---
 
@@ -49,12 +49,14 @@ class MyHandler(BaseCallbackHandler):
     def on_retriever_end(self, documents, **kwargs): ...
     def on_retriever_error(self, error, **kwargs): ...
 
-    # Agent
+    # Agent（仅旧 AgentExecutor 会触发；create_agent 是 LangGraph 图，走 chain/tool/llm 回调）
     def on_agent_action(self, action, **kwargs): ...
     def on_agent_finish(self, finish, **kwargs): ...
 ```
 
-异步版本是 `AsyncCallbackHandler`，方法名加 `async`：
+> 1.x 里有个容易踩的坑：回调里的 `serialized` 参数现在**经常是 `None`**（LangChain 不再序列化组件），所以别写 `serialized.get("name")`。这会抛 `AttributeError`，而回调里的异常默认只是写进日志，很难发现。组件名从 `kwargs["name"]` 取，标签/元数据在 `kwargs["tags"]` / `kwargs["metadata"]`。
+
+异步版本是 `AsyncCallbackHandler`，方法改成 `async def`：
 
 ```python
 class MyAsync(AsyncCallbackHandler):
@@ -63,12 +65,12 @@ class MyAsync(AsyncCallbackHandler):
 
 ---
 
-## 3. 传入 Callback 的三种姿势
+## 3. 传入 Callback 的三种方式
 
 ### 3.1 构造模型时
 
 ```python
-model = ChatOpenAI(model="gpt-4o-mini", callbacks=[MyHandler()])
+model = ChatOpenAI(model="gpt-6-luna", callbacks=[MyHandler()])
 ```
 
 ### 3.2 调用时
@@ -86,7 +88,7 @@ from langchain_core.tracers.context import register_configure_hook
 from langchain_core.callbacks.manager import CallbackManager
 ```
 
-但全局不推荐，灵活性差。
+全局注册不太推荐，所有调用都会被挂上，想按场景区分就麻烦了。
 
 ---
 
@@ -96,7 +98,7 @@ from langchain_core.callbacks.manager import CallbackManager
 from langchain_core.callbacks import BaseCallbackHandler
 
 class CostHandler(BaseCallbackHandler):
-    PRICE = {  # gpt-4o-mini 美元/1M token
+    PRICE = {  # 示意单价（美元/1M token），按实际所用模型的价格表改
         "input": 0.15, "output": 0.60,
     }
     def __init__(self):
@@ -116,7 +118,7 @@ chain.invoke(x, config={"callbacks": [ch]})
 print(f"in={ch.in_tok} out={ch.out_tok} cost=${ch.cost_usd:.6f}")
 ```
 
-LangChain 还内置 `get_openai_callback()` context manager：
+LangChain 还提供了 `get_openai_callback()` 这个 context manager，它在 community 包里，而且只认 OpenAI 官方模型的价格表：
 
 ```python
 from langchain_community.callbacks.manager import get_openai_callback
@@ -126,7 +128,7 @@ with get_openai_callback() as cb:
     print(cb.total_tokens, cb.total_cost)
 ```
 
-仅支持 OpenAI 系列。
+换了别的供应商它就不管用了。1.x 有个更通用的 `UsageMetadataCallbackHandler`（`from langchain_core.callbacks import UsageMetadataCallbackHandler`），按模型名汇总 `usage_metadata`，单价自己乘就行。
 
 ---
 
@@ -138,14 +140,14 @@ log = logging.getLogger(__name__)
 
 class LogHandler(BaseCallbackHandler):
     def on_chain_start(self, serialized, inputs, **kw):
-        log.info(f"chain start: {serialized.get('name')} inputs={inputs}")
+        log.info(f"chain start: {kw.get('name')} inputs={inputs}")
     def on_chain_end(self, outputs, **kw):
         log.info(f"chain end: {str(outputs)[:200]}")
     def on_chain_error(self, error, **kw):
         log.exception(f"chain error: {error}")
 ```
 
-接入业务日志系统，比 print 强 100 倍。
+接进业务日志系统后，能按级别过滤、能检索，排查问题比到处 print 方便得多。
 
 ---
 
@@ -166,7 +168,7 @@ class WSHandler(AsyncCallbackHandler):
         await self.q.put({"event": "end"})
 ```
 
-注意 `on_llm_new_token` 只在 `streaming=True` 时触发。
+`on_llm_new_token` 只在流式调用时触发：模型设了 `streaming=True`，或者调用方用的是 `.stream()` / `.astream()` / `astream_events`。
 
 ---
 
@@ -184,7 +186,7 @@ class SentryHandler(BaseCallbackHandler):
         sentry_sdk.capture_exception(error)
 ```
 
-接入后 LangChain 任何错误都自动上报 Sentry。
+挂上之后，模型、工具、链上的错误都会自动报到 Sentry。
 
 ---
 
@@ -198,19 +200,19 @@ chain.invoke(x, config={
 })
 ```
 
-在 callback 方法里 `kwargs["tags"]` / `kwargs["metadata"]` 可读，做按 tag 分流上报。
+callback 方法里能从 `kwargs["tags"]` / `kwargs["metadata"]` 读到这些值，可以按 tag 分流上报。
 
 ---
 
 ## 9. LangSmith 是基于 Callbacks 的
 
-`LANGSMITH_TRACING=true` 时 LangChain 默认挂一个 `LangChainTracer` callback，把所有 chain/llm/tool 事件发到 LangSmith。
-
-你自己加的 callback 和 LangSmith 互不影响，可以并存。
+`LANGSMITH_TRACING=true` 时，LangChain 会默认挂一个 `LangChainTracer` callback，把所有 chain、llm、tool 事件发到 LangSmith。自己加的 callback 和它互不影响，可以同时存在。
 
 ---
 
 ## 10. 一个综合 demo
+
+完整代码：[`demos/langchain/14_callbacks.py`](../../demos/langchain/14_callbacks.py)
 
 ```python
 # demos/langchain/14_callbacks.py
@@ -226,16 +228,16 @@ load_dotenv()
 class Auditor(BaseCallbackHandler):
     def __init__(self):
         self.events = []
-    def _log(self, name, **kw):
-        self.events.append((name, kw))
-    def on_chain_start(self, s, i, **kw): self._log("chain_start", inputs=i, name=s.get("name"))
+    def _log(self, event, **kw):        # 形参别叫 name：下面会传 name=... 关键字
+        self.events.append((event, kw))
+    def on_chain_start(self, s, i, **kw): self._log("chain_start", inputs=i, name=kw.get("name"))
     def on_chain_end(self, o, **kw): self._log("chain_end", outputs_preview=str(o)[:80])
     def on_chat_model_start(self, s, m, **kw): self._log("model_start", messages=len(m[0]))
     def on_llm_end(self, r, **kw):
         m = getattr(r.generations[0][0], "message", None)
         usage = getattr(m, "usage_metadata", None) if m else None
         self._log("model_end", usage=usage)
-    def on_tool_start(self, s, i, **kw): self._log("tool_start", name=s.get("name"), input=i)
+    def on_tool_start(self, s, i, **kw): self._log("tool_start", name=kw.get("name"), input=i)
     def on_tool_end(self, o, **kw): self._log("tool_end", output=str(o)[:80])
 
 @tool
@@ -247,8 +249,8 @@ prompt = ChatPromptTemplate.from_messages([
     ("system", "你是会用工具的助手"),
     ("human", "{q}"),
 ])
-model = ChatOpenAI(model="gpt-4o-mini").bind_tools([add])
-chain = prompt | model | StrOutputParser()
+model = ChatOpenAI(model="gpt-6-luna").bind_tools([add])
+chain = prompt | model | StrOutputParser()      # 注意：模型决定调工具时 content 为空，所以最终输出可能是空串
 
 auditor = Auditor()
 chain.invoke({"q": "请帮我算 12 加 30"}, config={"callbacks": [auditor]})
@@ -266,16 +268,14 @@ for ev, data in auditor.events:
 | `on_llm_new_token` 不触发 | model 没开 streaming | `ChatOpenAI(streaming=True)` 或调用 `.stream()` |
 | 异步链同步 callback 拿不到 | 同步/异步混用 | 用 `AsyncCallbackHandler` |
 | 多 chain 嵌套 callback 调用很多次 | LangChain 把 callback 透传到子 Runnable | 用 `metadata`/`tags` 过滤 |
-| Token 统计为 0 | 流式没开 `stream_usage=True` | `ChatOpenAI(stream_usage=True)` |
-| Handler 抛异常导致 chain 失败 | callback 错误也会传播 | try/except 包内部逻辑 |
+| 流式调用时 Token 统计为 0 | 接兼容接口（设了 `base_url`）时 `stream_usage` 默认关闭 | `ChatOpenAI(stream_usage=True)` |
+| Handler 里抛了异常却没人发现 | 回调异常默认只写日志，handler 设了 `raise_error = True` 才会让整条链失败 | 内部逻辑自己 try/except，出错时主动上报 |
+| 回调里 `serialized.get(...)` 报 AttributeError（日志里一行 `Error in ... callback`） | 1.x 里 `serialized` 常为 None | 用 `kwargs["name"]` |
+| `_push(name, **kw)` 之类自定义方法报 `multiple values for argument 'name'` | 回调 kwargs 里本来就带 `name` | 自定义辅助方法的形参别叫 `name` |
 
 ---
 
-## 12. 本章 demo
+LangChain 部分到这里就结束了。接下来可以看：
 
-[`demos/langchain/14_callbacks.py`](../../demos/langchain/14_callbacks.py)
-
-至此 LangChain 主体 14 篇全部完成。接下来：
-
-- [LangSmith 01](../02-langsmith/01-overview.md)
-- [LangGraph 01](../03-langgraph/01-introduction.md)
+- [LangSmith 01：总览与第一条 Trace](../02-langsmith/01-overview.md)
+- [LangGraph 01：介绍、定位与其他框架的对比](../03-langgraph/01-introduction.md)

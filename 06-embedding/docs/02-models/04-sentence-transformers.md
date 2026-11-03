@@ -1,16 +1,16 @@
 # sentence-transformers 工具链
 
-> **一句话**：`sentence-transformers` 是 Python embedding 生态的瑞士军刀——加载几乎所有开源 embedding 模型、做 encode / fine-tune / 评测都靠它。
+> 在 Python 里用开源 embedding 模型，绕不开 `sentence-transformers`：加载模型、encode、fine-tune、评测都靠它。这篇按实际用到的顺序过一遍，从安装、编码一直到导出 ONNX 和接 TEI。
 
 ---
 
-## 1. 装一下
+## 1. 安装
 
 ```bash
 pip install sentence-transformers
 ```
 
-依赖 PyTorch / transformers。需要 GPU 加 `--index-url https://download.pytorch.org/whl/cu121`。
+它依赖 PyTorch 和 transformers。要用 GPU，先按 PyTorch 官网给的命令装对应 CUDA 版本的 torch（形如 `pip install torch --index-url https://download.pytorch.org/whl/cu128`），再装 sentence-transformers。
 
 ---
 
@@ -51,15 +51,15 @@ embeddings = model.encode(
 print(embeddings.shape)  # (3, 768) np.ndarray
 ```
 
-**关键参数**：
+几个参数要留意：
 
-- `normalize_embeddings=True`：必加（让 cosine = dot product）
-- `batch_size`：32-128（CPU 16-32，GPU 64-256）
-- `convert_to_tensor`：写库时 False，做 reranker 直接用时 True
+- `normalize_embeddings=True`：建议总是打开，归一化后 cosine 和 dot product 等价
+- `batch_size`：一般 32-128，CPU 用 16-32，GPU 用 64-256
+- `convert_to_tensor`：要写进向量库就用 False；结果直接交给 reranker 之类的 torch 代码时用 True
 
 ---
 
-## 4. 跑相似度
+## 4. 算相似度
 
 ```python
 from sentence_transformers import util
@@ -73,7 +73,7 @@ query_vec = model.encode(query, normalize_embeddings=True)
 doc_vecs = model.encode(docs, normalize_embeddings=True)
 
 scores = util.cos_sim(query_vec, doc_vecs)
-print(scores)  # tensor([[0.85, 0.32, 0.41]])
+print(scores)  # 形如 tensor([[0.85, 0.32, 0.41]])，数值示意
 
 
 # 找 top-k
@@ -108,7 +108,7 @@ def embed_batch_to_disk(texts, out_path, batch_size=128):
 embed_batch_to_disk(my_million_docs, "embeddings.npy")
 ```
 
-100 万文档 GPU 上几十分钟。
+100 万条文档在单张 GPU 上从几分钟到几十分钟不等，主要看文本长度和 batch size。
 
 ---
 
@@ -116,59 +116,57 @@ embed_batch_to_disk(my_million_docs, "embeddings.npy")
 
 ### 6.1 准备数据
 
+从 v3 开始，训练改用 `datasets.Dataset` 加 `SentenceTransformerTrainer`。以前的 `InputExample + DataLoader + model.fit()` 在官方文档里归到了 Deprecated Training，新代码别再用了。要注意数据集的**列顺序必须和损失函数对上**（列名无所谓，只有叫 `label` 或 `score` 的列会被当成标签）：
+
 ```python
-from sentence_transformers import InputExample
+from datasets import Dataset
 
-
-train_examples = [
-    InputExample(texts=["如何取消订阅", "停止自动续费的方法"], label=1.0),
-    InputExample(texts=["如何取消订阅", "今天天气如何"], label=0.0),
+# MultipleNegativesRankingLoss：(anchor, positive) 两列即可，负例自动取 batch 内其它样本
+train_ds = Dataset.from_dict({
+    "anchor":   ["如何取消订阅", "怎么改密码"],
+    "positive": ["停止自动续费的方法", "重置密码教程"],
     # 数千到数万对
-]
+})
 ```
 
-### 6.2 训
+### 6.2 训练
 
 ```python
-from sentence_transformers import losses
-from torch.utils.data import DataLoader
-
-
-train_dl = DataLoader(train_examples, batch_size=16, shuffle=True)
-train_loss = losses.CosineSimilarityLoss(model)
-
-
-model.fit(
-    train_objectives=[(train_dl, train_loss)],
-    epochs=3,
-    warmup_steps=100,
-    output_path="./my-bge-finetuned",
-    show_progress_bar=True,
+# 需要 torch；sentence-transformers 3.0 起的 Trainer 接口
+from sentence_transformers import (
+    SentenceTransformer,
+    SentenceTransformerTrainer,
+    SentenceTransformerTrainingArguments,
+    losses,
 )
+
+model = SentenceTransformer("BAAI/bge-base-zh-v1.5")
+loss = losses.MultipleNegativesRankingLoss(model)
+
+args = SentenceTransformerTrainingArguments(
+    output_dir="./my-bge-finetuned",
+    num_train_epochs=3,
+    per_device_train_batch_size=16,   # MNRL：batch 越大负例越多、效果通常越好
+    warmup_ratio=0.1,
+)
+
+trainer = SentenceTransformerTrainer(model=model, args=args, train_dataset=train_ds, loss=loss)
+trainer.train()
+model.save_pretrained("./my-bge-finetuned/final")
 ```
 
-几小时后得到一个 fine-tuned 模型。
+几万对数据在单卡上通常几十分钟到几小时就能训完。
 
 ### 6.3 各种 Loss
 
-| Loss | 用于 |
-|------|------|
-| `CosineSimilarityLoss` | 给定相似度分数（0-1） |
-| `MultipleNegativesRankingLoss` | 只有正例对，in-batch negative |
-| `TripletLoss` | (anchor, positive, negative) 三元组 |
-| `ContrastiveLoss` | 二分类正负例 |
+| Loss | 用于 | 数据列 |
+|------|------|--------|
+| `CosineSimilarityLoss` | 给定相似度分数（0-1） | sentence1, sentence2, score |
+| `MultipleNegativesRankingLoss` | 只有正例对，in-batch negative | anchor, positive |
+| `TripletLoss` | (anchor, positive, negative) 三元组 | anchor, positive, negative |
+| `ContrastiveLoss` | 二分类正负例 | sentence1, sentence2, label |
 
-最实用：**MultipleNegativesRankingLoss**——只需要正例对，负例自动从 batch 里取。
-
-```python
-train_examples = [
-    InputExample(texts=["query1", "positive_doc_1"]),
-    InputExample(texts=["query2", "positive_doc_2"]),
-    # ...
-]
-
-train_loss = losses.MultipleNegativesRankingLoss(model)
-```
+最常用的是 MultipleNegativesRankingLoss：只要准备正例对，负例从同一个 batch 里自动取。显存不够时，可以换成 `CachedMultipleNegativesRankingLoss` 放大有效 batch。训练 API 的迁移细节看官方 [Training Overview](https://sbert.net/docs/sentence_transformer/training_overview.html) 和迁移指南，比如 transformers 4.46 起 Trainer 的 `tokenizer` 参数改名成了 `processing_class`。
 
 ---
 
@@ -182,22 +180,24 @@ import mteb
 
 
 tasks = mteb.get_tasks(
-    languages=["zho_Hans"],
+    languages=["zho"],           # 语言用 ISO 639-3 三字母码；也可按名字选任务
     task_types=["Retrieval"],
 )
 
+# mteb 2.x：用 mteb.get_model 载入模型（没有内置实现时回退到 SentenceTransformer）
+model = mteb.get_model("BAAI/bge-base-zh-v1.5")
 
-# 在 BGE 上跑
-evaluation = mteb.MTEB(tasks=tasks)
-results = evaluation.run(model, output_folder="./mteb_results/bge")
-
+# 旧的 mteb.MTEB(tasks=...).run(model) 已被 mteb.evaluate 取代
+results = mteb.evaluate(model, tasks=tasks)
 
 # 自己 finetune 后再跑
-ft_model = SentenceTransformer("./my-bge-finetuned")
-ft_results = evaluation.run(ft_model, output_folder="./mteb_results/bge-ft")
+ft_model = mteb.get_model("./my-bge-finetuned/final")
+ft_results = mteb.evaluate(ft_model, tasks=tasks)
 ```
 
-对比看你的 fine-tune 有没有真的提升（防过拟合自己数据）。
+运行这段时 mteb 会下载体积不小的评测数据集和模型；写法按 mteb 2.x 的官方 README。
+
+把 fine-tune 前后的结果放在一起比，确认模型真的变好了，而不是只是过拟合了你自己的数据。
 
 ---
 
@@ -246,18 +246,18 @@ def embed_onnx(texts):
     return embeddings.numpy()
 ```
 
-ONNX 比纯 PyTorch 快 2-4 倍 CPU、20% GPU。
+上面是手动用 optimum 导出的写法，要自己处理 pooling 和归一化。sentence-transformers 3.2 起可以直接 `SentenceTransformer(model_id, backend="onnx")`，pooling 照旧由它处理，写法见[开源模型：Qwen3-Embedding / BGE / Jina / Nomic](./03-open-source.md)第 8 节。和纯 PyTorch 比，ONNX 在 CPU 上通常有明显提速，GPU 上收益小一些，具体幅度以自己的压测为准。
 
 ---
 
 ## 9. 跟 TEI 配合
 
-`text-embeddings-inference`（HuggingFace 官方推理服务）能直接加载 sentence-transformers 模型：
+`text-embeddings-inference`（HuggingFace 官方推理服务）可以直接加载 sentence-transformers 模型：
 
 ```bash
 docker run -p 8080:80 --gpus all \
   -v ~/.cache/huggingface:/data \
-  ghcr.io/huggingface/text-embeddings-inference:1.2 \
+  ghcr.io/huggingface/text-embeddings-inference:1.8 \
   --model-id BAAI/bge-large-zh-v1.5 \
   --max-batch-tokens 32768
 ```
@@ -274,15 +274,15 @@ resp = httpx.post("http://localhost:8080/embed", json={
 vec = resp.json()[0]
 ```
 
-生产部署推荐 TEI（dynamic batching、GPU 跑满）。
+生产环境我推荐 TEI，它有 dynamic batching，能把 GPU 跑满。
 
 ---
 
 ## 10. 跟 LangChain / LlamaIndex 集成
 
 ```python
-# LangChain
-from langchain_community.embeddings import HuggingFaceEmbeddings
+# LangChain（pip install langchain-huggingface）
+from langchain_huggingface import HuggingFaceEmbeddings
 
 embeddings = HuggingFaceEmbeddings(
     model_name="BAAI/bge-large-zh-v1.5",
@@ -296,37 +296,35 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-large-zh-v1.5")
 ```
 
-两边都直接复用 sentence-transformers 模型。
+两边底层都是直接加载 sentence-transformers 模型。
 
 ---
 
-## 11. 性能 tips
+## 11. 提速技巧
 
 ```python
 # 1. 半精度（fp16）
 model.half().to("cuda")
-# 内存 / 时间 × 0.5，召回基本不变
+# 显存约减半、速度更快，召回基本不变
 
-# 2. torch.compile（PyTorch 2.0+）
-import torch
-model = torch.compile(model)
-# 提速 20-50%
+# 2. CPU 上换 ONNX / OpenVINO 后端（sentence-transformers ≥ 3.2）
+model = SentenceTransformer("BAAI/bge-base-zh-v1.5", backend="onnx")
 
 # 3. 大 batch
 model.encode(texts, batch_size=256)
 # GPU 利用率上来
 
-# 4. truncation
-model.encode(texts, max_seq_length=256)
+# 4. 截断长度
+model.max_seq_length = 256   # encode() 本身没有这个参数，要设在模型上
+model.encode(texts)
 # 短点更快，但太短丢信息
 ```
 
 ---
 
-## 12. 完整 demo
+## 12. 完整示例
 
 ```python
-# demos/models/04_sentence_transformers.py
 import numpy as np
 from sentence_transformers import SentenceTransformer, util
 
@@ -359,6 +357,6 @@ for h in hits[0]:
 
 ## 13. 下一步
 
-- 📖 rerank 模型 → [05-rerank.md](./05-rerank.md)
-- 📖 MTEB 怎么看 → [06-mteb-selection.md](./06-mteb-selection.md)
-- 📖 部署生产 → [07-production/04-deployment.md](../07-production/04-deployment.md)
+- 用 rerank 做精排：[Rerank 模型：召回之后的精排](./05-rerank.md)
+- 榜单怎么读：[MTEB 怎么看 + 选型决策树](./06-mteb-selection.md)
+- 部署到生产：[部署形态选型](../07-production/04-deployment.md)

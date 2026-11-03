@@ -1,16 +1,18 @@
 # 实战 3：语音助手（Realtime API）
 
-> **一句话**：用 `RealtimeAgent` + 麦克风 / 扬声器流，做一个能听能说能调 tool 的助手——可用作智能家居控制台、车机助手、客服电话。
+> 这个实战用 `RealtimeAgent` 加上麦克风和扬声器的音频流，做一个能听、能说、能调工具的助手，智能家居控制台、车机助手、电话客服都是类似的结构。
+>
+> 真实的语音对话要用 OpenAI API key 连 Realtime 服务。工具调用和事件流不连服务也能验证，第 7、10 节用 `ScriptedRealtimeModel` 测试替身顶替 OpenAI 那一端。代码按 0.24 的写法：音色不再写在 `RealtimeAgent(voice=...)` 上，事件也不再是 `response.text.delta` 这类原始名字。
 
 ---
 
 ## 1. 需求
 
 - 用户对着麦克风说话
-- 助手实时回应（语音播放）
-- 能调天气 / 日历 / 闹钟工具
-- 多种语言（中英）
-- 可打断（用户开口模型停说）
+- 助手实时用语音回应
+- 能调天气、日历、闹钟工具
+- 支持中英文
+- 可打断：用户一开口，模型就停下
 
 ---
 
@@ -21,7 +23,7 @@
    ↓ PCM 流
 [RealtimeSession]
    ↓
-[RealtimeAgent: gpt-4o-realtime-preview]
+[RealtimeAgent（会话模型 gpt-realtime-2.1）]
    ├─ Tool: get_weather
    ├─ Tool: get_calendar
    └─ Tool: set_alarm
@@ -59,10 +61,12 @@ def set_alarm(time_str: str, label: str = "") -> str:
 
 ---
 
-## 4. Agent
+## 4. Agent 与会话配置
+
+模型、音色、转写、打断策略都配置在 `RealtimeRunner(config=...)` 上，`RealtimeAgent` 本身不管这些：
 
 ```python
-from agents.realtime import RealtimeAgent
+from agents.realtime import RealtimeAgent, RealtimeRunner
 
 
 assistant = RealtimeAgent(
@@ -77,13 +81,29 @@ assistant = RealtimeAgent(
 
 工具用法：
 - 用户问天气 → get_weather
-- 用户问安排 → get_calendar  
+- 用户问安排 → get_calendar
 - 用户要设闹钟 → set_alarm
 
 回应自然，像跟朋友聊天。
 """,
     tools=[get_weather, get_calendar, set_alarm],
-    voice="alloy",  # 也可以 nova / shimmer / echo
+)
+
+runner = RealtimeRunner(
+    starting_agent=assistant,
+    config={
+        "model_settings": {
+            "model_name": "gpt-realtime-2.1",
+            "audio": {
+                "input": {
+                    "format": "pcm16",
+                    "transcription": {"model": "gpt-4o-mini-transcribe"},
+                    "turn_detection": {"type": "semantic_vad", "interrupt_response": True},   # 用户开口自动打断
+                },
+                "output": {"format": "pcm16", "voice": "ash"},     # 音色：会话里一旦说过话就不能再改
+            },
+        }
+    },
 )
 ```
 
@@ -128,23 +148,23 @@ class AudioIO:
 
     def play(self, pcm_bytes: bytes):
         data = np.frombuffer(pcm_bytes, dtype=DTYPE).astype(np.float32) / 32767
-        sd.play(data, samplerate=SAMPLE_RATE)
+        sd.play(data, samplerate=SAMPLE_RATE)     # 演示用；每个音频块都 sd.play 会截断上一块，真实代码请用 sd.OutputStream 连续 write
+
+    def stop_playback(self):
+        sd.stop()                                 # 用户打断时清掉正在播的音频
 ```
 
 ---
 
-## 6. 主循环
+## 6. 主循环（需要 OpenAI key 和声卡）
 
 ```python
-from agents.realtime import RealtimeRunner
-
-
 async def main():
-    runner = RealtimeRunner(starting_agent=assistant)
     audio = AudioIO()
+    session = await runner.run()                 # 返回 RealtimeSession
 
-    async with await runner.run() as session:
-        loop = asyncio.get_event_loop()
+    async with session:                          # 进入时才建立 WebSocket 连接
+        loop = asyncio.get_running_loop()
         audio.start_mic(loop)
         print("🎙️ 说话吧（Ctrl+C 退出）...")
 
@@ -156,17 +176,21 @@ async def main():
 
         mic_task = asyncio.create_task(mic_to_session())
 
-        # 任务 B：从 session 读 event，处理音频 / 文本
+        # 任务 B：从 session 读事件，处理音频 / 工具 / 历史
         try:
             async for event in session:
                 if event.type == "audio":
-                    audio.play(event.audio)
-                elif event.type == "response.text.delta":
-                    print(event.delta, end="", flush=True)
-                elif event.type == "tool_call":
-                    print(f"\n[Tool] {event.tool_name}({event.args})")
-                elif event.type == "response.done":
-                    print()
+                    audio.play(event.audio.data)               # PCM 字节
+                elif event.type == "audio_interrupted":
+                    audio.stop_playback()                      # 用户打断：清空播放缓冲（自己实现）
+                elif event.type == "tool_start":
+                    print(f"\n[Tool] {event.tool.name}({event.arguments})")
+                elif event.type == "tool_end":
+                    print(f"[Tool result] {event.output}")
+                elif event.type == "history_added":
+                    print(event.item)                          # 含转写后的用户话和助手回复
+                elif event.type == "error":
+                    print("error:", event.error)
         finally:
             mic_task.cancel()
             audio.stop_mic()
@@ -176,92 +200,100 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-⚠️ 真实代码中需要：
-
-- VAD / 打断处理
-- 错误重连
-- 网络断了的优雅降级
+真实项目里还要补几件事。打断时要清空播放缓冲；电话或远程播放的场景，用 `RealtimePlaybackTracker` 告诉服务端用户实际听到了多少，服务端才能把被打断的回复截在正确的位置。网络断了要能重连或优雅降级。用量也要监控，数据在 `raw_model_event` 里的 `RealtimeModelUsageEvent`。
 
 ---
 
-## 7. 简化版（不带麦克风，只演示）
+## 7. 简化版（不带麦克风）：用测试替身跑通
+
+没有真实连接，也能验证工具编排和事件流。做法是用 `ScriptedRealtimeModel` 顶替 OpenAI 那一端：它「说」要调工具，SDK 就真的去执行工具：
 
 ```python
-# demos/practice/03_voice_simple.py
 import asyncio
-from agents.realtime import RealtimeAgent, RealtimeRunner
-from agents import function_tool
+from agents.decorators import tool
+from agents.realtime import (RealtimeAgent, RealtimeModelSendToolOutput, RealtimeModelToolCallEvent, RealtimeRunner)
+from agents.realtime.testing import RealtimeStep, ScriptedRealtimeModel
 
 
-@function_tool
+@tool
 def get_weather(city: str) -> str:
-    return f"{city} 今天 22 度 晴天"
+    """查天气"""
+    return f"{city}: 22°C"
 
 
-assistant = RealtimeAgent(
-    name="VoiceAssistant",
-    instructions="语音助手，中文回答，简短。",
-    tools=[get_weather],
-    voice="alloy",
-)
+assistant = RealtimeAgent(name="VoiceAssistant", instructions="语音助手，中文回答，简短。", tools=[get_weather])
 
 
 async def main():
-    runner = RealtimeRunner(starting_agent=assistant)
+    call = RealtimeModelToolCallEvent(name="get_weather", call_id="call_1", arguments='{"city":"北京"}')
+    model = ScriptedRealtimeModel(
+        [RealtimeStep(expect=lambda ev: isinstance(ev, RealtimeModelSendToolOutput))],   # 期望 SDK 把工具结果回送给模型
+        connect_events=[call],
+    )
+    runner = RealtimeRunner(assistant, model=model, config={"async_tool_calls": False, "tracing_disabled": True})
 
     async with await runner.run() as session:
-        # 用文本模拟输入
-        await session.send_message("北京天气怎么样")
-
         async for event in session:
-            if event.type == "response.text.delta":
-                print(event.delta, end="", flush=True)
-            elif event.type == "response.done":
-                print()
+            print(event.type, getattr(event, "tool", ""), getattr(event, "output", ""))
+            if event.type == "tool_end":
                 break
+    model.assert_complete()
 
 
 asyncio.run(main())
 ```
 
+运行输出：
+
+```
+raw_model_event
+tool_start <agent tool object> ...
+tool_end ... 北京: 22°C
+```
+
+换成真实的 OpenAI 连接时，去掉 `model=model`，按第 4 节配置 `model_settings`，然后 `await session.send_message("北京天气怎么样")`。
+
 ---
 
 ## 8. 跟 Voice Pipeline 切换
 
-如果不需要打断、要省钱 → 切 Pipeline：
+如果用不着打断，又想省钱，可以换成 Voice Pipeline：
 
 ```python
 from agents import Agent
-from agents.voice import VoicePipeline
+from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
 
 
-# 普通 Agent 即可
+# 普通 Agent 即可（模型可以是任意：OpenAI / 千问 / …）
 assistant = Agent(
     name="VoiceAssistant",
     instructions="...",
     tools=[get_weather, get_calendar, set_alarm],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
-pipeline = VoicePipeline(workflow=assistant)
+pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(assistant))     # workflow 必须是 VoiceWorkflowBase，不能直接传 Agent
 ```
 
-详见 [05-advanced/06-voice-pipeline.md](../05-advanced/06-voice-pipeline.md)。
+详见 [Voice Pipeline：STT + LLM + TTS](../05-advanced/06-voice-pipeline.md)。
 
 ---
 
-## 9. 部署：WebRTC + 浏览器
+## 9. 部署：浏览器怎么接
 
-前端用 WebRTC 收麦克风音频，转 PCM 推给后端 WebSocket。
+官方明确说了，Python SDK 没有浏览器 WebRTC 传输，Python 这边只有服务端 WebSocket 和 SIP。常见的接法有三种。
+
+第一种是浏览器经过你的服务器转发：前端用 Web Audio / AudioWorklet 采集 24kHz 的 PCM，推给后端的 WebSocket；后端用 `session.send_audio(...)` 转给 OpenAI，再把 `audio` 事件推回前端：
 
 ```python
 @app.websocket("/voice")
 async def voice_ws(ws: WebSocket):
     await ws.accept()
-    runner = RealtimeRunner(starting_agent=assistant)
+    runner = RealtimeRunner(starting_agent=assistant, config=CONFIG)
+    session = await runner.run()
 
-    async with await runner.run() as session:
+    async with session:
         async def ws_to_session():
             while True:
                 pcm = await ws.receive_bytes()
@@ -270,79 +302,66 @@ async def voice_ws(ws: WebSocket):
         async def session_to_ws():
             async for event in session:
                 if event.type == "audio":
-                    await ws.send_bytes(event.audio)
-                elif event.type == "response.text.delta":
-                    await ws.send_json({"type": "text", "delta": event.delta})
+                    await ws.send_bytes(event.audio.data)
+                elif event.type == "audio_interrupted":
+                    await ws.send_json({"type": "interrupted"})          # 通知前端清播放队列
+                elif event.type == "history_added":
+                    await ws.send_json({"type": "history", "item": str(event.item)})
+                elif event.type == "tool_approval_required":
+                    await ws.send_json({"type": "approval", "call_id": event.call_id})   # 前端点同意后调 session.approve_tool_call(call_id)
 
         await asyncio.gather(ws_to_session(), session_to_ws())
 ```
 
+第二种是让浏览器直连 OpenAI，延迟更低：用 JS SDK 的 WebRTC，Python 只负责签发临时 key 和提供服务端工具。
+
+第三种是电话：用 SIP attach（`model_config={"call_id": ...}`，参考官方 `examples/realtime/twilio_sip`）；Twilio 这类走 WebSocket 的场景要配 `RealtimePlaybackTracker`。
+
 ---
 
-## 10. 评测：测听得懂 / 调对工具
+## 10. 评测：测调对工具 / 事件处理
+
+要测「听不听得懂」，得用真音频加真模型，花钱而且结果不稳定。能零成本测的是编排层：假设模型已经发出了某个工具调用，检查 agent 有没有执行对的工具，参数校验、审批、事件转发是否正确。这部分用 `ScriptedRealtimeModel` 就行（见第 7 节）：
 
 ```python
-test_cases = [
-    {
-        "audio_file": "test_audio/beijing_weather.wav",
-        "expected_tool": "get_weather",
-        "expected_args": {"city": "北京"},
-    },
-    {
-        "audio_file": "test_audio/set_alarm.wav",
-        "expected_tool": "set_alarm",
-    },
-]
-
-
-for case in test_cases:
-    runner = RealtimeRunner(starting_agent=assistant)
+async def run_case(tool_name: str, arguments: str) -> list[str]:
+    call = RealtimeModelToolCallEvent(name=tool_name, call_id="c1", arguments=arguments)
+    model = ScriptedRealtimeModel(
+        [RealtimeStep(expect=lambda ev: isinstance(ev, RealtimeModelSendToolOutput))], connect_events=[call],
+    )
+    runner = RealtimeRunner(assistant, model=model, config={"async_tool_calls": False, "tracing_disabled": True})
+    seen = []
     async with await runner.run() as session:
-        # 喂音频
-        with open(case["audio_file"], "rb") as f:
-            await session.send_audio(f.read())
-
-        # 收集 tool calls
-        tool_calls = []
         async for event in session:
-            if event.type == "tool_call":
-                tool_calls.append({"name": event.tool_name, "args": event.args})
-            if event.type == "response.done":
+            seen.append(event.type)
+            if event.type == "tool_end":
                 break
-
-        # 检查
-        passed = any(
-            tc["name"] == case["expected_tool"]
-            for tc in tool_calls
-        )
-        print(f"{'✅' if passed else '❌'} {case['audio_file']}")
+    model.assert_complete()
+    return seen
 ```
+
+要评估模型是不是真听对了、选对了工具，就得开真实的 Realtime 会话：用 `session.send_audio(pcm, commit=True)` 喂预先录好的音频（关掉自动轮次检测时需要 `commit=True`），收集 `tool_start` 事件里的 `event.tool.name` / `event.arguments`，和期望值对比。这类评测成本不低，抽样跑就好。
 
 ---
 
 ## 11. 成本
 
-Realtime API 按音频时长计费，大致：
-
-- $0.06 / 分钟（输入）
-- $0.24 / 分钟（输出）
-
-10 分钟对话约 $3。生产里**必须**有用量监控、超限熔断。
+Realtime API 按音频计费（token 或时长），具体价格以 OpenAI 当前的价格页为准，模型换代时单价变化很大，这里不列数字。总体来说，它比纯文本和 Voice Pipeline 贵得多。**上生产必须有用量监控和超限熔断**，用量来自 `RealtimeModelUsageEvent`，累计值在 `event.info.context.usage`。
 
 ---
 
 ## 12. 注意事项
 
-- **网络要稳**：Realtime 是 WebSocket，断了体验差
-- **延迟**：本地音频 buffer 大小影响，调 100-200ms 一帧
-- **隐私**：音频流过 OpenAI，敏感场景考虑 Voice Pipeline + 本地 STT
-- **错误恢复**：session 断了自动重连
-- **多人语音**：Realtime 不擅长，考虑分音轨
+- 网络：Realtime 走 WebSocket，断线体验很差，网络要稳
+- 延迟：受本地音频 buffer 大小影响，buffer 越大延迟越高，按设备尽量调小
+- 隐私：音频会经过 OpenAI，敏感场景考虑 Voice Pipeline + 本地 STT
+- 错误恢复：session 断了要自动重连
+- 多人语音：Realtime 不擅长，考虑分音轨
 
 ---
 
 ## 13. 下一步
 
-- 📖 Computer Use Agent → [04-computer-use.md](./04-computer-use.md)
-- 📖 横向对比 → [05-vs-others.md](./05-vs-others.md)
-- 📖 Voice Pipeline → [05-advanced/06-voice-pipeline.md](../05-advanced/06-voice-pipeline.md)
+- Computer Use Agent → [实战 4：Computer Use Agent（操作浏览器）](./04-computer-use.md)
+- 横向对比 → [横向对比：OpenAI Agents SDK vs Pydantic AI vs LangGraph](./05-vs-others.md)
+- Voice Pipeline → [Voice Pipeline：STT + LLM + TTS](../05-advanced/06-voice-pipeline.md)

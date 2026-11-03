@@ -10,6 +10,7 @@ LCEL 全部基础原语演示：
 - with_config
 - configurable_fields
 """
+import os
 from dotenv import load_dotenv
 
 from langchain_core.output_parsers import StrOutputParser
@@ -24,7 +25,8 @@ from langchain_core.runnables import (
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
+model = ChatOpenAI(model=MODEL, temperature=0)
 
 
 def demo_parallel():
@@ -78,7 +80,7 @@ def demo_branch():
 
 def demo_configurable():
     print("\n=== configurable_fields ===")
-    cfg_model = ChatOpenAI(model="gpt-4o-mini", temperature=0).configurable_fields(
+    cfg_model = ChatOpenAI(model=MODEL, temperature=0).configurable_fields(
         temperature=ConfigurableField(id="temp"),
     )
     chain = ChatPromptTemplate.from_template("一句话讲讲 {x}") | cfg_model | StrOutputParser()

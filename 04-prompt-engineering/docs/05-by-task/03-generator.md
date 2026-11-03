@@ -1,15 +1,15 @@
 # PE By-Task 03：文本生成（Generator）
 
-> **一句话**：生成任务（营销文案、邮件、代码、产品描述）的关键不是"让模型写得好"，而是**约束多样性 + 锚定风格**。本篇给文案、邮件、代码三类典型模板。
+> 营销文案、邮件、代码、产品描述都属于生成任务。这类任务难的不是让模型写得好，模型本来就写得不差；难的是把它的发挥收住：限制多样性，把风格钉在一个点上。这篇给出文案、邮件、代码三类常用模板。
 
 ---
 
 ## 1. 任务特征
 
-- 输入：通常是"主题 / 元数据 / 输入数据"
+- 输入：一般是主题、元数据或一份输入数据
 - 输出：自由文本（200-5000 字）
-- 评测：LLM-as-judge + 人工抽查（主观）
-- 关键挑战：风格不稳定、长度漂移、和品牌 voice 不符
+- 评测：LLM-as-judge 加人工抽查，偏主观
+- 难点：风格不稳、长度漂移、和品牌调性对不上
 
 ---
 
@@ -35,7 +35,7 @@
 - 语言: <中 / 英 / 跟随输入>
 ```
 
-关键是 **role 锚定具体风格 + 反例清单**——参考 [03-techniques/03-role-prompting.md](../03-techniques/03-role-prompting.md)。
+写好这个模板靠两样东西：把角色落到具体的风格描述上，再配一份"不要这样写"的反例清单。角色怎么写可以参考 [Role Prompting 与角色边界](../03-techniques/03-role-prompting.md)。
 
 ---
 
@@ -65,7 +65,7 @@ SYSTEM = """你是品牌"小红"的资深文案，5 年经验。
 """
 ```
 
-加 2-3 个 few-shot 示例固定风格（参考 [03-techniques/06-examples-design.md](../03-techniques/06-examples-design.md)）。
+再加 2-3 个 few-shot 示例把风格固定下来，示例怎么挑见 [Few-shot 示例怎么设计](../03-techniques/06-examples-design.md)。
 
 ---
 
@@ -120,10 +120,11 @@ SYSTEM = """你是资深 Python 工程师。
 """
 ```
 
-代码生成特殊：
-- 严格控制 imports（不要冒出 import 全文件）
-- 让模型自己 explain 关键决策
-- 对接 review 工具（lint / type check）做后处理
+代码生成有几处和文案不一样：
+
+- 严格控制 import，别让模型把用不到的库全导一遍
+- 让模型对关键决策简短说明理由
+- 输出后接 lint、类型检查这类工具做后处理
 
 ---
 
@@ -135,13 +136,13 @@ SYSTEM = """你是资深 Python 工程师。
 "恰好 3 个 bullet，每个不超过 30 字"  ← 严格
 ```
 
-越精确越稳。但太严格会牺牲质量——找平衡。
+描述越精确，长度越稳。但卡得太死会伤质量，需要在两者之间找个平衡。
 
 ---
 
-## 7. 控制语气 / Voice
+## 7. 控制语气
 
-让 voice 一致最有效的方法：**给品牌 voice guide + 3 个真实样本**：
+想让语气保持一致，比较有效的办法是给一份品牌 voice guide，再附 3 个真实样本：
 
 ```
 [品牌 voice guide]
@@ -160,7 +161,7 @@ SYSTEM = """你是资深 Python 工程师。
 现在按此 voice 写：{topic}
 ```
 
-3 个真实样本 + voice guide 远比 "请用友好语气" 管用。
+这比一句"请用友好的语气"管用得多。
 
 ---
 
@@ -168,15 +169,17 @@ SYSTEM = """你是资深 Python 工程师。
 
 | 场景 | 要 |
 |------|-----|
-| Brand voice | 一致性 → temperature=0.3 |
-| 多角度 brainstorming | 多样性 → temperature=0.8 + 要求"3 个不同角度" |
-| A/B 测试 variants | 多样性 → 同 prompt 跑 N 次 temperature=0.7 |
+| 品牌调性 | 一致性：3 个真实样本 + voice guide（能设 temperature 的模型可用 0.3） |
+| 多角度头脑风暴 | 多样性：要求"给 3 个不同角度"（能设 temperature 的模型再调到 0.8） |
+| A/B 测试的变体 | 多样性：同一个 prompt 跑 N 次 |
+
+> Claude 新模型（4.7+）已不接受 temperature，多样性和一致性主要靠 prompt 设计来控制；Gemini 3+ 也建议保持默认值。
 
 ---
 
 ## 9. 生成 + critique 闭环
 
-参考 [03-techniques/08-self-critique.md](../03-techniques/08-self-critique.md)：
+做法见 [Self-Critique（自我反思）](../03-techniques/08-self-critique.md)：
 
 ```python
 draft = generate(...)
@@ -187,14 +190,13 @@ else:
     final = draft
 ```
 
-对高质量需求（推送给客户 / 上线营销）必加。
+要直接推给客户、或者要上线投放的内容，这一步不能省。
 
 ---
 
 ## 10. 完整 demo
 
 ```python
-# demos/by_task/03_generator_marketing.py
 from pydantic import BaseModel
 from openai import OpenAI
 
@@ -231,9 +233,9 @@ def generate_ad(product: str, audience: str, hook: str) -> Ad:
     user = f"""产品: {product}
 目标人群: {audience}
 卖点: {hook}"""
-    resp = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
-        temperature=0.5,
+    resp = client.chat.completions.parse(
+        model="gpt-6-luna",
+        temperature=0.5,   # GPT-6 是否接受自定义 temperature 以模型页为准；不接受就删掉这行
         response_format=Ad,
         messages=[
             {"role": "system", "content": SYSTEM},
@@ -257,18 +259,18 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **role 太抽象** | "友好" → "用 you / 短句 / 比喻" |
-| **没反例** | 加"避免"清单 |
-| **temperature=0** | 输出 robot；调到 0.3-0.7 |
-| **长度只说"短"** | 给精确字数范围 |
-| **没 few-shot** | 风格漂；加 2-3 个真实样本 |
-| **生成完不 review** | 高价值任务加 critique |
-| **同一 prompt 跑多次差异大** | 多样性 vs 一致性没设计 |
+| 角色描述太抽象 | 把"友好"拆成"用 you、短句、多用比喻" |
+| 没有反例 | 加一份"避免"清单 |
+| 一味追求确定性 | 输出像机器写的；在 prompt 里要求"换个说法"，能调 temperature 的模型调到 0.3-0.7 |
+| 长度只说"短" | 给出精确的字数范围 |
+| 没有 few-shot | 风格会漂；加 2-3 个真实样本 |
+| 生成完不检查 | 高价值任务加一轮 critique |
+| 同一 prompt 多次输出差异大 | 多样性和一致性没有事先想清楚要哪个 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 总结 → [04-summarizer.md](./04-summarizer.md)
-- 📖 LLM-as-judge → [05-judge.md](./05-judge.md)
-- 📖 self-critique → [03-techniques/08-self-critique.md](../03-techniques/08-self-critique.md)
+- [总结（Summarizer）](./04-summarizer.md)
+- [LLM-as-Judge](./05-judge.md)
+- [Self-Critique（自我反思）](../03-techniques/08-self-critique.md)

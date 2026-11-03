@@ -1,26 +1,26 @@
-# PE Technique 06：Examples 设计 —— 好 Few-shot 长什么样
+# PE Technique 06：Few-shot 示例怎么设计
 
-> **一句话**：Few-shot 的关键不是"数量"是"质量"——3 个精心挑的例子 > 10 个随便凑的。本篇给一套**示例设计 checklist**，让你的示例真正帮模型而不是干扰它。
+> Few-shot 效果好不好，看的是示例质量，不是数量：3 个精挑的例子胜过 10 个随手凑的。这篇整理了一份示例设计清单，帮你确认示例是在帮模型，而不是在干扰它。
 
 ---
 
-## 1. 示例的 4 个作用
+## 1. 示例起什么作用
 
-把 few-shot 想清楚：示例是给模型看的"how to"。它在做这些事：
+示例是写给模型看的操作说明，主要起四种作用：
 
 | 作用 | 举例 |
 |------|------|
-| **格式 anchor** | "输出应该长这样" |
-| **风格 anchor** | "语气这么写" |
-| **边界示范** | "这种 edge case 你应该这样处理" |
-| **类别 anchor** | "这种输入归这个类" |
+| 定格式 | "输出应该长这样" |
+| 定风格 | "语气这么写" |
+| 示范边界 | "这种 edge case 你应该这样处理" |
+| 定类别 | "这种输入归这个类" |
 
 ---
 
-## 2. 一个好示例的 5 条标准
+## 2. 好示例的五条标准
 
-### 2.1 代表性 > 覆盖性
-示例分布应该接近真实数据分布。
+### 2.1 代表性优先于覆盖性
+示例的分布应该接近真实数据。
 
 ```
 真实分布: 70% bug, 15% feature, 10% complaint, 5% other
@@ -30,8 +30,8 @@
 ✅ 7 个示例: 5 bug, 1 feature, 1 complaint  
 ```
 
-### 2.2 涵盖关键 edge case
-保留 1-2 个"最容易错"的 edge：
+### 2.2 包含关键的边界情况
+留 1 到 2 个最容易出错的样例：
 
 ```
 ✅ 反讽分类（容易判错）
@@ -39,8 +39,8 @@
 ✅ 多类同时含（要选主类）
 ```
 
-### 2.3 格式 100% 一致
-所有示例输出格式严格一致。哪怕字段顺序、缩进、引号都要统一。
+### 2.3 格式完全一致
+所有示例的输出格式必须严格一致，字段顺序、缩进、引号都要统一。
 
 ```
 ❌ 示例 1: {"name": "A", "age": 30}
@@ -50,7 +50,7 @@
 ✅ 全部 {"name": "...", "age": ...}
 ```
 
-### 2.4 风格匹配真实场景
+### 2.4 风格贴近真实场景
 示例的语气、长度、复杂度要和真实输入一致。
 
 ```
@@ -58,8 +58,8 @@
 ✅ 示例和真实分布一致
 ```
 
-### 2.5 没有冗余信息
-示例只给最关键内容；不要写解释 / 旁注。
+### 2.5 不带多余信息
+示例只放最关键的内容，不要写解释或旁注。
 
 ```
 ❌ "示例 1: 用户写了 'App 闪退'，这是一个 bug 报告，因为它表达了软件问题。
@@ -70,9 +70,9 @@
 
 ---
 
-## 3. 示例的"反例"
+## 3. 反例要不要给
 
-故意给一个反例，让模型知道**不该**怎么做：
+可以故意给一个反例，告诉模型不该怎么做：
 
 ```
 约束：JSON 输出严格符合 schema。
@@ -86,13 +86,13 @@
 输出: {"name": "Alice", "age": "30 岁"}   ← age 不应该是字符串
 ```
 
-反例**慎用**——示例本身是强 anchor，反例可能反而让模型困惑。仅在反例和正例形成"显著对比"时用。
+不过**反例要慎用**。示例对模型的牵引力很强，反例可能反而让它困惑。只有当反例和正例对比非常鲜明时才值得用。
 
 ---
 
 ## 4. 示例放在哪里
 
-### 在 system message
+### 放在 system message
 ```
 SYSTEM = """任务...
 约束...
@@ -103,9 +103,9 @@ SYSTEM = """任务...
 """
 ```
 
-适合：示例固定、不随每次输入变。
+适合示例固定、不随输入变化的情况。
 
-### 在 messages 数组（多轮形式）
+### 放在 messages 数组（多轮形式）
 ```python
 messages = [
     {"role": "system", "content": "任务..."},
@@ -117,9 +117,9 @@ messages = [
 ]
 ```
 
-OpenAI 文档推荐这种——更"对话语义化"。
+在 OpenAI 的 Chat Completions 里常见这种写法，它更贴近对话的语义。
 
-### 在 XML 容器（Claude 友好）
+### 放在 XML 容器里（适合 Claude）
 ```
 <examples>
 <example>
@@ -133,7 +133,7 @@ OpenAI 文档推荐这种——更"对话语义化"。
 
 ## 5. 动态 Few-shot（检索式）
 
-示例库巨大时，根据输入检索最相关的 K 个：
+示例库很大时，按输入检索最相关的 K 个：
 
 ```python
 def get_relevant_examples(user_input: str, k: int = 3) -> list[dict]:
@@ -142,51 +142,44 @@ def get_relevant_examples(user_input: str, k: int = 3) -> list[dict]:
     return example_store.search(embedding, k=k)
 ```
 
-适合：
-- 各业务线 / 各 customer 的示例不同
-- 静态 few-shot 覆盖不够
-- 有几百+条标注样本
+适合不同业务线、不同客户需要不同示例，静态示例覆盖不全，并且手上有几百条以上标注样本的情况。
 
-注意：和 **prompt caching** 矛盾（每次示例变，cache miss）。要 trade-off。
+它和 prompt caching 冲突：示例每次都变，缓存就命中不了，需要自己权衡。
 
 ---
 
-## 6. 示例怎么从生产数据来
+## 6. 示例从生产数据里来
 
-**别**手编示例——从真实数据来：
+别手编示例，从真实数据里挑：
 
-1. 找 100-500 条线上数据
+1. 找 100 到 500 条线上数据
 2. 人工标注期望输出
-3. 按代表性 + 关键 edge 挑 5-10 条
-4. 加进 prompt
+3. 按代表性加关键边界，挑出 5 到 10 条
+4. 放进 prompt
 
-好处：
-
-- 风格自动匹配真实输入
-- 暴露真实分布问题
-- 边界 case 来自真实而非想象
+这样示例的风格天然贴近真实输入，真实分布里的问题也会暴露出来，边界情况来自真实数据而不是想象。
 
 ---
 
-## 7. 示例迭代规则
+## 7. 示例的迭代规则
 
-每次改 prompt 触发的示例调整：
+改 prompt 时，示例按下面的情况调整：
 
 | 触发 | 调整 |
 |------|------|
-| 发现新失败模式 | 补 1 个该模式的正确示例 |
-| 示例和真实分布偏差 | 重采样 |
-| 模型过 anchor 到某风格 | 多样化示例 |
-| 示例长度都偏短，真实长 | 用真实长样本替换 |
-| 类别更新 / 业务规则改 | 用新规则下的示例 |
+| 发现新的失败模式 | 补 1 个针对该模式的正确示例 |
+| 示例和真实分布有偏差 | 重新采样 |
+| 模型被某种风格带偏 | 让示例更多样 |
+| 示例偏短，真实输入偏长 | 换成真实的长样本 |
+| 类别或业务规则更新了 | 换成新规则下的示例 |
 
-**铁律**：示例改了要重新跑 evalset。
+示例只要改了，就要重新跑一遍评测集。
 
 ---
 
-## 8. 检测 "示例过拟合"
+## 8. 检测示例过拟合
 
-模型可能学了示例风格但失去通用性。检测：
+模型可能学会了示例的风格，却丢了泛化能力。检测办法是在评测集里专门放一些和示例风格差别很大的样本，按风格分组统计：
 
 ```python
 # evalset 里特意放一些"和示例风格差异大"的样本
@@ -203,14 +196,13 @@ def detect_example_overfitting(evalset, prompt_v):
         print(f"{style}: {stats['pass']}/{stats['total']}")
 ```
 
-如果 "示例风格匹配的" 都 95%、"风格不匹配的" 都 50% → 过拟合，要多样化示例。
+如果风格和示例接近的样本通过率 95%，风格差别大的只有 50%，就是过拟合了，示例需要更多样。
 
 ---
 
 ## 9. demo：示例的影响
 
 ```python
-# demos/techniques/06_examples_impact.py
 import anthropic
 client = anthropic.Anthropic()
 
@@ -248,20 +240,19 @@ for sys, name in [(SYS_NO_EX, "no examples"), (SYS_WITH_EX, "with examples")]:
     expected = ["complaint", "feature", "bug", "praise", "complaint"]
     for text, exp in zip(TESTS, expected):
         resp = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=30,
-            temperature=0,
+            model="claude-haiku-5-5",
+            max_tokens=1024,
             system=sys,
             messages=[{"role": "user", "content": text}],
         )
-        actual = resp.content[0].text.strip().lower()
+        actual = resp.content[-1].text.strip().lower()
         ok = actual == exp
         right += ok
         print(f"  {'✅' if ok else '❌'} {exp:12s} → {actual:12s} | {text}")
     print(f"  通过 {right}/{len(TESTS)}")
 ```
 
-预期：反讽 case 上加示例后明显改善。
+预期加了示例之后，反讽样本的判断会明显改善。
 
 ---
 
@@ -269,21 +260,21 @@ for sys, name in [(SYS_NO_EX, "no examples"), (SYS_WITH_EX, "with examples")]:
 
 | 坑 | 排查 |
 |----|------|
-| **示例数量 > 10** | 通常拆任务或换 RAG |
-| **示例格式不一致** | 严格统一 |
-| **示例都来自训练数据集** | 模型可能"记得"，泛化差 |
-| **示例 leak 测试集** | evalset 里的样本不能进 prompt |
-| **手编 vs 真实数据** | 用真实数据 |
-| **示例输出含解释 / 旁注** | 模型也会学，输出冗余 |
-| **改示例顺便改任务** | 评测变量乱 |
+| 示例超过 10 个 | 通常该拆任务或改用 RAG |
+| 示例格式不一致 | 严格统一 |
+| 示例取自公开训练数据集 | 模型可能背过，泛化差 |
+| 评测集样本混进了 prompt | 评测集里的样本不能当示例 |
+| 示例是手编的 | 换成真实数据 |
+| 示例输出里带解释或旁注 | 模型也会学，输出变啰嗦 |
+| 改示例时顺手改了任务 | 变量混在一起，评测结果没法比 |
 
 ---
 
 ## 11. 下一步
 
-- 📖 边界 / 拒绝 → [07-boundaries-refusal.md](./07-boundaries-refusal.md)
-- 📖 self-critique → [08-self-critique.md](./08-self-critique.md)
-- 📖 dynamic few-shot（RAG-based） → [04-advanced/03-rag-prompting.md](../04-advanced/03-rag-prompting.md)
+- [边界条件与 Refusal 行为塑造](./07-boundaries-refusal.md)
+- [Self-Critique（自我反思）](./08-self-critique.md)
+- [RAG Prompting 与引用约束](../04-advanced/03-rag-prompting.md)：检索式动态 few-shot 的延伸
 
 ## 参考资料
 

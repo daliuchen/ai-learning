@@ -1,29 +1,33 @@
-# Embedding API
-openai>=1.50.0
-cohere>=5.10.0
-voyageai>=0.2.0
+# 版本基线：2026-11（以下为 PyPI 当时的最新主版本，用 >= 锁下限）
+# Embedding API（千问 text-embedding-v4 走 OpenAI 兼容接口，只需 openai）
+openai>=3.0
+cohere>=7.0.0        # 可选：ClientV2，embed-v5.0 / rerank-v5.0
+voyageai>=0.5.0      # 可选：voyage-4 系列
 
-# 开源 embedding
-sentence-transformers>=3.0.0
+# 开源 embedding（可选，体积大：torch + 模型权重）
+sentence-transformers>=6.0.0
 torch>=2.2.0
 transformers>=4.40.0
-FlagEmbedding>=1.2.0
+FlagEmbedding>=1.4.0
 
 # 向量数据库
-qdrant-client>=1.10.0
-pinecone-client>=5.0.0
-chromadb>=0.5.0
-lancedb>=0.13.0
-pgvector>=0.3.0
+qdrant-client>=1.20.0      # client.search 已移除，用 query_points
+pinecone>=10.0.0           # 旧包 pinecone-client 已改名停更
+chromadb>=1.5.0
+lancedb>=0.41.0
+pgvector>=0.5.0
 psycopg[binary]>=3.2.0
 
 # 检索 / 评测
-rank-bm25>=0.2.2
-ranx>=0.3.20
-beir>=2.0.0
+rank-bm25>=0.2.2     # 2022 年后无更新，仍可用
+jieba>=0.42.1        # 中文分词（BM25 demo 用）
+ranx>=0.3.21
+beir>=2.2.0
+mteb>=2.0.0          # mteb.evaluate 新接口
 
 # Chunking
-langchain-text-splitters>=0.3.0
+langchain-text-splitters>=1.0.0
+langchain-classic>=1.0.0   # 旧版 ParentDocumentRetriever / HyDE 等
 unstructured>=0.15.0
 pypdf>=4.3.0
 

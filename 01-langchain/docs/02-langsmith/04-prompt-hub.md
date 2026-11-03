@@ -1,20 +1,16 @@
 # LangSmith 04：Prompt Hub 与 Playground
 
-> **一句话**：Prompt Hub 让 prompt 像代码一样有版本、有 owner、能在 UI 调试、能 A/B、能从代码里 `hub.pull("name")` 一键获取。这是把 prompt 从"散落在代码字符串"升级到"可治理资产"的核心工具。
+> Prompt Hub 让 prompt 像代码一样有版本、有 owner，能在界面里调试、做 A/B，代码里用 `client.pull_prompt("name")` 就能取到。prompt 不再是散落在各处的字符串，改它也不用每次都发版。
+
+版本：以 `langsmith 0.14.x` 为准。LangChain 1.x 里已经没有 `langchain.hub`，改用 `langsmith.Client().pull_prompt / push_prompt`；`push_prompt` 需要 LangSmith 账号。
 
 ---
 
-## 1. 痛点
+## 1. 为什么要把 prompt 拿出代码
 
-代码里 prompt 字符串的烦恼：
+prompt 写在代码里，时间一长就会遇到这些麻烦：长 prompt 混在代码 diff 里很难评审；改一处要全局搜索替换；想做 A/B 得自己写开关；产品或运营想改个措辞，也得等工程师发版；团队里新人想找写得好的 prompt 参考，也没有统一的地方可查。
 
-- 写得长 → 难评审
-- 改了一次 → 全代码搜替换
-- A/B 两个版本 → 自己手动开关
-- 非工程师改 → 必须发版
-- 不会写 prompt → 没有"中心仓库"找参考
-
-Prompt Hub 把这一切搬到 UI + 版本控制。
+Prompt Hub 把 prompt 放到带版本控制的界面里管理，这些问题大多就解决了。
 
 ---
 
@@ -22,41 +18,41 @@ Prompt Hub 把这一切搬到 UI + 版本控制。
 
 | 用法 | 适用 |
 |------|------|
-| **Public Hub** | 全球工程师分享 prompt，搜索复用 |
-| **私有 Hub（个人 / 组织）** | 你自己的 prompt 资产 |
-| **Playground** | UI 即开即用调试，不一定要存 |
+| Public Hub | 公开分享的 prompt，可以搜索复用 |
+| 私有 Hub（个人 / 组织） | 存放自己或团队的 prompt |
+| Playground | 在界面里直接调试，不一定要保存 |
 
 ---
 
 ## 3. 拉取公开 Prompt
 
 ```python
-from langchain import hub
+from langsmith import Client
 
-prompt = hub.pull("rlm/rag-prompt")
-print(prompt)
+client = Client()
+prompt = client.pull_prompt("rlm/rag-prompt", dangerously_pull_public_prompt=True)
+print(prompt.input_variables)     # ['context', 'question']
 ```
 
-返回的就是一个 `ChatPromptTemplate`，可以直接接到 chain：
+有两点要注意：
+
+- 拉别人公开的 prompt，必须显式加 `dangerously_pull_public_prompt=True`。Hub 里存的是序列化的 LangChain 对象，陌生人上传的内容不一定可信，所以 SDK 默认拒绝，并报 `ValueError: Pulling a public prompt by owner/name is disabled by default...`。拉自己账号或组织下的 prompt 不需要这个参数。
+- 拉公开 prompt 不需要 API Key，push 和拉私有 prompt 才需要。
+
+返回的是 `ChatPromptTemplate`，可以直接接进 chain：
 
 ```python
 from langchain_openai import ChatOpenAI
-chain = prompt | ChatOpenAI(model="gpt-4o-mini")
+chain = prompt | ChatOpenAI(model="gpt-6-luna")
 ```
 
-常用公开 prompt（搜 https://smith.langchain.com/hub）：
-
-- `rlm/rag-prompt` — RAG 通用
-- `hwchase17/openai-tools-agent` — OpenAI tools agent
-- `hwchase17/react-chat` — ReAct + 聊天历史
-- `langchain-ai/openai-functions-template` — function call 模板
+公开 prompt 可以在 https://smith.langchain.com/hub 搜索，例如通用的 RAG prompt `rlm/rag-prompt`。以前常用的 `hwchase17/openai-tools-agent`、`hwchase17/react-chat` 是给旧的 `AgentExecutor`（已搬进 `langchain-classic`）用的，新项目不需要，直接写 `system_prompt`。
 
 ---
 
 ## 4. 推送私有 Prompt
 
 ```python
-from langchain import hub
 from langchain_core.prompts import ChatPromptTemplate
 
 prompt = ChatPromptTemplate.from_messages([
@@ -64,49 +60,51 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{q}"),
 ])
 
-# 第一次推送
-hub.push("my-handle/role-qa", prompt)
+# 第一次推送；不写 owner 前缀就推到当前账号 / 组织下
+url = client.push_prompt("role-qa", object=prompt)
 
 # 后续更新自动 commit 新版本
 prompt2 = ChatPromptTemplate.from_messages([
     ("system", "你是 {role}，遵守规则：1. 简洁 2. 中文"),
     ("human", "{q}"),
 ])
-hub.push("my-handle/role-qa", prompt2)
+client.push_prompt("role-qa", object=prompt2)
 ```
 
-每次 push 产生一个新 commit，Hub UI 能看到 diff。
+每次 push 都会产生一个新 commit，在 Hub 界面里能看到前后 diff。
 
 ---
 
 ## 5. 按版本拉取
 
-默认拉 latest：
+默认拉最新版本：
 
 ```python
-prompt = hub.pull("my-handle/role-qa")
+prompt = client.pull_prompt("my-handle/role-qa")
 ```
 
-指定 commit：
+指定 commit 或 tag：
 
 ```python
-prompt = hub.pull("my-handle/role-qa:abc123")  # commit hash
-prompt = hub.pull("my-handle/role-qa:production")  # tag
+prompt = client.pull_prompt("my-handle/role-qa:abc12345")      # commit hash
+prompt = client.pull_prompt("my-handle/role-qa:production")    # commit tag
 ```
 
-可以给某个 commit 打 tag（如 `production`），代码引用 tag，运维 UI 切换 tag 指向不同 commit，实现"不发版改 prompt"。
+可以给某个 commit 打 tag（比如 `production`），代码里只引用 tag。之后在界面里把 tag 指向别的 commit，线上用的 prompt 就换了，不需要发版。
 
 ---
 
 ## 6. 私有 prompt 元数据
 
 ```python
-hub.push(
-    "my-handle/role-qa",
-    prompt,
-    new_repo_description="角色扮演问答 prompt",
-    new_repo_is_public=False,
-    tags=["v3-stable", "qa"],
+client.push_prompt(
+    "role-qa",
+    object=prompt,
+    description="角色扮演问答 prompt",
+    is_public=False,
+    tags=["qa"],                  # 仓库标签
+    commit_tags=["v3-stable"],    # 给这次 commit 打的 tag
+    commit_description="收紧输出规则",
 )
 ```
 
@@ -114,75 +112,71 @@ hub.push(
 
 ## 7. Playground
 
-UI 入口：左侧菜单 **Playground**。能做的事：
+入口在左侧菜单的 Playground，可以做这些事：
 
-- 任意模型 / 任意 prompt 调试
+- 用任意模型、任意 prompt 调试
 - 变量插值
-- 一键对比两个模型 / 两个 prompt
-- 把 trace 一键打开到 Playground 重跑（找到 bad case → 改 prompt 试）
+- 并排对比两个模型或两个 prompt
+- 从 trace 直接打开到 Playground 重跑，发现 bad case 后马上改 prompt 试
 - 保存为 Hub prompt
 
-Playground 是 LangSmith 提效最直接的功能之一，**不写代码也能调 prompt**。
+Playground 最大的好处是不写代码也能调 prompt，非工程师也能上手。
 
 ---
 
-## 8. Prompt 版本化最佳实践
+## 8. 怎么组织 prompt 的命名和版本
 
 ```
 my-org/
-├── chat/qa             - 主问答
-├── chat/qa-v2          - 试验版（按 tag 灰度）
-├── rag/answer
-├── rag/rewrite-query
-├── agent/system
-└── agent/router
+├── chat-qa             - 主问答
+├── chat-qa-v2          - 试验版（按 tag 灰度）
+├── rag-answer
+├── rag-rewrite-query
+├── agent-system
+└── agent-router
 ```
+
+prompt 的标识是 `owner/name[:commit 或 tag]`，名字里不能再带 `/`，分组只能靠前缀约定。
 
 代码里写：
 
 ```python
-prompt = hub.pull(f"my-org/chat/qa:{settings.PROMPT_TAG}")
+prompt = client.pull_prompt(f"my-org/chat-qa:{settings.PROMPT_TAG}")
 ```
 
-`PROMPT_TAG` 走配置中心（apollo / Nacos），prompt 更新无需发版。
+`PROMPT_TAG` 放在配置中心（Apollo / Nacos）里，更新 prompt 就不用发版。
 
 ---
 
 ## 9. Prompt 与 Eval 联动
 
-每次改完 prompt，先在 Playground 跑几条手测，再切换"Compare" tab 一键跑数据集 evaluation，看分数是否提升。**Prompt + Dataset + Evaluator** 是 LangSmith 设计的核心闭环。
+每次改完 prompt，先在 Playground 手动跑几条，再切到 Compare 标签页，在数据集上跑一遍 evaluation，看分数有没有提升。改 prompt、在数据集上评估、看分数决定是否上线，LangSmith 整套功能就是围绕这个循环设计的。
 
 ---
 
-## 10. demo
+## 10. 本章 demo
+
+完整代码：[`demos/langsmith/04_prompt_hub.py`](../../demos/langsmith/04_prompt_hub.py)
 
 ```python
-# demos/langsmith/04_prompt_hub.py
+# demos/langsmith/04_prompt_hub.py（节选）
 import os
-from dotenv import load_dotenv
-from langchain import hub
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from langsmith import Client
 
-load_dotenv()
-assert os.getenv("LANGSMITH_API_KEY")
+client = Client()
+MODEL = os.environ.get("QWEN_MODEL", "gpt-6-luna")
 
-# 1) 拉公开 prompt
-rag_prompt = hub.pull("rlm/rag-prompt")
+# 1) 拉公开 prompt（不需要 LangSmith key）
+rag_prompt = client.pull_prompt("rlm/rag-prompt", dangerously_pull_public_prompt=True)
 print("RAG prompt 变量：", rag_prompt.input_variables)
 
-# 2) 推私有 prompt（注释默认关闭，避免污染你的账号）
-"""
-my_prompt = ChatPromptTemplate.from_messages([
-    ("system", "你是 {role}，使用 {language} 回答"),
-    ("human", "{q}"),
-])
-hub.push("you/role-qa", my_prompt)
-"""
-
-# 3) 用拉到的 prompt 构造 chain
-chain = rag_prompt | ChatOpenAI(model="gpt-4o-mini")
+# 2) 用拉到的 prompt 构造 chain
+chain = rag_prompt | ChatOpenAI(model=MODEL)
 print(chain.invoke({"context": "LCEL = LangChain Expression Language", "question": "LCEL 是什么？"}).content)
+
+# 3) 推私有 prompt 需要 LANGSMITH_API_KEY，默认关闭，避免污染你的账号
+#    client.push_prompt("role-qa", object=my_prompt)
 ```
 
 ---
@@ -191,15 +185,13 @@ print(chain.invoke({"context": "LCEL = LangChain Expression Language", "question
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `hub.pull` 404 | handle 错或私有未授权 | 检查命名 / API Key 权限 |
-| push 报"already exists" | 已存在仓库 | 直接 push（自动新版本） |
-| 拉的 prompt 是 `PromptTemplate` 不是 `ChatPromptTemplate` | 旧版 prompt | 重新 push 时用 Chat 版 |
-| 没看到 commit 历史 | UI 没切到 Versions 标签 | UI 右侧 Commits |
+| `ModuleNotFoundError: langchain.hub` | 1.x 已移除 | 改用 `langsmith.Client().pull_prompt` |
+| `pull_prompt` 报 "Pulling a public prompt ... disabled by default" | 拉他人公开 prompt 的安全开关 | 确认可信后加 `dangerously_pull_public_prompt=True` |
+| `pull_prompt` 404 | handle 写错，或者是没有权限的私有 prompt | 检查命名和 API Key 权限 |
+| push 后没有变化 | 内容和最新 commit 相同 | 正常现象，不会产生新 commit |
+| 拉的 prompt 是 `PromptTemplate` 不是 `ChatPromptTemplate` | 这个 prompt 当初按非 Chat 模板保存 | 重新 push 时用 Chat 版 |
+| 没看到 commit 历史 | 界面没切到 Versions 标签 | 看界面右侧的 Commits |
 
 ---
 
-## 12. 本章 demo
-
-[`demos/langsmith/04_prompt_hub.py`](../../demos/langsmith/04_prompt_hub.py)
-
-下一篇：[05-monitoring.md](05-monitoring.md)
+下一篇：[LangSmith 05：Monitoring 监控 / Dashboards / Alerts / Online Eval](05-monitoring.md)

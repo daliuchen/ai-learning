@@ -1,6 +1,6 @@
 # 监控：召回率 / Latency / Cost
 
-> **一句话**：生产 RAG 必须监控 **检索质量（召回率 / hit rate）+ 延迟（P50/P95/P99）+ 成本（每天 cost）+ 异常（错误率 / 限流）**——出问题 5 分钟告警比客户投诉早。
+> 生产环境的 RAG 至少要盯四类指标：检索质量（召回率、命中率）、延迟（P50/P95/P99）、成本（每天花了多少）和异常（错误率、限流）。出了问题 5 分钟内收到告警，总比等客户来投诉好。
 
 ---
 
@@ -8,15 +8,15 @@
 
 | 维度 | 指标 | 告警阈值（示例） |
 |------|------|----------------|
-| **质量** | 用户 thumbs up rate | < 70% |
-| **质量** | LLM-as-judge faithfulness（抽样） | < 0.85 |
-| **召回** | 离线 evalset Recall@5 | < 0.85 |
-| **延迟** | embedding service P95 | > 100ms |
-| **延迟** | 端到端 RAG P95 | > 3s |
-| **成本** | 日 embedding cost | > 预算 1.5x |
-| **错误** | embed API 错误率 | > 1% |
-| **限流** | rate limit hit | > 0 |
-| **缓存** | hit rate | < 50% |
+| 质量 | 用户 thumbs up rate | < 70% |
+| 质量 | LLM-as-judge faithfulness（抽样） | < 0.85 |
+| 召回 | 离线 evalset Recall@5 | < 0.85 |
+| 延迟 | embedding service P95 | > 100ms |
+| 延迟 | 端到端 RAG P95 | > 3s |
+| 成本 | 日 embedding cost | > 预算 1.5x |
+| 错误 | embed API 错误率 | > 1% |
+| 限流 | rate limit hit | > 0 |
+| 缓存 | hit rate | < 50% |
 
 ---
 
@@ -94,7 +94,7 @@ async def rag_search(query):
     return answer
 ```
 
-Logfire 自动建 dashboard，看 trace、延迟、错误。
+数据发到 Logfire 平台后，trace、延迟、错误都能直接看，不用自己搭 dashboard。Logfire 的 SDK 是开源的，托管平台是商业服务（自托管属于企业版）。
 
 ---
 
@@ -129,26 +129,26 @@ async def rag_search(query, user_id):
     return answer
 ```
 
-落到 ELK / Datadog / ClickHouse。
+日志可以落到 ELK、Datadog 或 ClickHouse。
 
 ---
 
 ## 5. Dashboard 必备图
 
-1. **QPS** 时间序列
-2. **延迟 P50/P95/P99** 时间序列
-3. **错误率** 时间序列
-4. **每日 cost** 累积图
-5. **缓存 hit rate** 时间序列
-6. **召回率 Recall@5** （定期跑 evalset 后上报）
-7. **Top 慢查询** 表
-8. **Top 高成本 user / tenant** 表
+1. QPS 时间序列
+2. 延迟 P50/P95/P99 时间序列
+3. 错误率时间序列
+4. 每日 cost 累积图
+5. 缓存 hit rate 时间序列
+6. 召回率 Recall@5（定期跑 evalset 后上报）
+7. Top 慢查询表
+8. Top 高成本 user / tenant 表
 
 ---
 
-## 6. 在线"健康检查"
+## 6. 在线健康检查
 
-定期跑一组小 evalset 看系统活着：
+定期跑一组小 evalset，确认系统还在正常工作：
 
 ```python
 HEALTH_CHECK_QUERIES = [
@@ -178,9 +178,8 @@ async def health_check():
 ## 7. 异常告警
 
 ```python
-# 1. embed API 限流
-if embed_errors.labels(provider="openai", type="RateLimitError")._value > 10:
-    alert("OpenAI embed 频繁限流")
+# 1. embed API 限流：在 Prometheus / Grafana 里配告警规则，不要在代码里读 Counter 的内部值
+# increase(embed_errors_total{provider="openai", type="RateLimitError"}[5m]) > 10
 
 
 # 2. 延迟突然变高
@@ -212,7 +211,7 @@ async def feedback(req):
     
     # 实时算 thumbs up rate
     recent = await db.query("SELECT rating FROM rag_feedback WHERE created_at > NOW() - INTERVAL '1 hour'")
-    rate = sum(1 for r in recent if r == 1) / len(recent) if recent else 0
+    rate = sum(1 for r in recent if r["rating"] == 1) / len(recent) if recent else 0
     
     user_satisfaction.set(rate)
     
@@ -229,10 +228,9 @@ async def feedback(req):
 COST_RATES = {
     "openai_embed_3small": 0.02 / 1_000_000,    # per token
     "openai_embed_3large": 0.13 / 1_000_000,
-    "cohere_embed_v3": 0.10 / 1_000_000,
-    "cohere_rerank_v3": 2 / 1000,                # per call
-    "openai_gpt4o_mini_in": 0.15 / 1_000_000,
-    "openai_gpt4o_mini_out": 0.6 / 1_000_000,
+    "openai_gpt-6-luna_in": 0.10 / 1_000_000,
+    "openai_gpt-6-luna_out": 0.50 / 1_000_000,
+    # Cohere / Voyage 的 embed 与 rerank 单价以各自定价页为准；rerank 一般按搜索次数计费
 }
 
 
@@ -241,18 +239,13 @@ def log_cost(operation, model, tokens):
     daily_cost.labels(model=model, operation=operation).inc(cost)
 ```
 
-Grafana 看：
-
-- 按 model 拆的成本
-- 按操作（embed / rerank / generate）的成本
-- 按 tenant / user 的成本（找烧钱大户）
+在 Grafana 里按三个维度拆成本：按模型，按操作（embed / rerank / generate），按 tenant 或 user（找出花钱最多的那几个）。
 
 ---
 
-## 10. 完整 demo: 监控装备
+## 10. 完整 demo：监控配置
 
 ```python
-# demos/production/05_monitoring.py
 import time
 import asyncio
 from prometheus_client import Counter, Histogram, Gauge, start_http_server
@@ -304,9 +297,9 @@ asyncio.run(main())
 
 ## 11. 警报渠道
 
-- **Slack / 飞书 / 钉钉**：日常 alert
-- **PagerDuty / Opsgenie**：on-call 紧急
-- **Email**：日报 / 周报
+- Slack / 飞书 / 钉钉：日常告警
+- PagerDuty / Opsgenie：on-call 紧急告警
+- Email：日报、周报
 
 ---
 
@@ -314,10 +307,10 @@ asyncio.run(main())
 
 | 坑 | 解 |
 |----|----|
-| 只看 avg 不看 P95 | P99 才反映真实坏 case |
-| 没记 trace_id | debug 时找不到具体一次 call |
-| 没拆 tenant 看 | 一个 tenant 烧钱拖垮全站 |
-| Health check 太轻 | 多覆盖几种 query 类型 |
+| 只看平均值，不看 P95 | 坏 case 要看 P99 才看得出来 |
+| 没记 trace_id | 排查时找不到具体是哪一次调用 |
+| 没按 tenant 拆开看 | 一个 tenant 狂刷费用，拖垮整个站点 |
+| 健康检查太简单 | 多覆盖几种 query 类型 |
 
 ---
 
@@ -335,6 +328,6 @@ asyncio.run(main())
 
 ## 14. 下一步
 
-- 📖 完整 RAG 项目 → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
-- 📖 多模态搜索 → [08-applications/03-multimodal.md](../08-applications/03-multimodal.md)
-- 📖 推荐系统 → [08-applications/04-recommendation.md](../08-applications/04-recommendation.md)
+- [完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)
+- [多模态：图搜图 / 文搜图 / 图搜文](../08-applications/03-multimodal.md)
+- [用 Embedding 做推荐系统](../08-applications/04-recommendation.md)

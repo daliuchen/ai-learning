@@ -38,13 +38,13 @@ def demo_two_ways() -> None:
         return
 
     # 字符串
-    a = Agent("openai:gpt-4o-mini", system_prompt="一句话回答。")
+    a = Agent("openai-chat:qwen-flash", instructions="一句话回答。")
     print("string :", a.run_sync("Python 是什么？").output)
 
     # Model 对象
     from pydantic_ai.models.openai import OpenAIChatModel
 
-    b = Agent(OpenAIChatModel("gpt-4o-mini"), system_prompt="一句话回答。")
+    b = Agent(OpenAIChatModel("qwen-flash"), instructions="一句话回答。")
     print("object :", b.run_sync("Python 是什么？").output)
     print()
 
@@ -53,11 +53,11 @@ def demo_two_ways() -> None:
 def demo_settings() -> None:
     print("===== 2) ModelSettings =====")
 
-    model = "openai:gpt-4o-mini" if os.getenv("OPENAI_API_KEY") else TestModel()
+    model = "openai-chat:qwen-flash" if os.getenv("OPENAI_API_KEY") else TestModel()
     agent = Agent(
         model,
         model_settings=ModelSettings(temperature=0.0, max_tokens=100),
-        system_prompt="用 1 句话回答。",
+        instructions="用 1 句话回答。",
     )
     print(agent.run_sync("中国首都是哪里？").output)
     print()
@@ -74,7 +74,7 @@ def demo_fallback() -> None:
         from pydantic_ai.providers.openai import OpenAIProvider
 
         bad_primary = OpenAIChatModel(
-            "gpt-4o-mini",
+            "qwen-flash",
             provider=OpenAIProvider(api_key="sk-invalid-on-purpose"),
         )
     except Exception:
@@ -137,7 +137,7 @@ def demo_custom_baseurl() -> None:
     provider = OpenAIProvider(base_url=f"{ollama_url}/v1", api_key="ollama")
     model = OpenAIChatModel("qwen2.5:7b", provider=provider)
     try:
-        agent = Agent(model, system_prompt="一句话回答。")
+        agent = Agent(model, instructions="一句话回答。")
         print(agent.run_sync("地球围着谁转？").output)
     except Exception as e:
         print(f"Ollama 调用失败：{type(e).__name__}: {e}")
@@ -149,12 +149,12 @@ def demo_multi_provider() -> None:
     print("===== 6) 同一段代码切多个模型 =====")
     candidates: list[object] = [TestModel(custom_output_text="（TestModel 输出）")]
     if os.getenv("OPENAI_API_KEY"):
-        candidates.append("openai:gpt-4o-mini")
+        candidates.append("openai-chat:qwen-flash")
     if os.getenv("ANTHROPIC_API_KEY"):
-        candidates.append("anthropic:claude-3-5-haiku-latest")
+        candidates.append("anthropic:claude-haiku-4-5")
 
     for m in candidates:
-        agent = Agent(m, system_prompt="只回答一句话。")
+        agent = Agent(m, instructions="只回答一句话。")
         try:
             out = agent.run_sync("Python 的发明者是谁？").output
         except Exception as e:

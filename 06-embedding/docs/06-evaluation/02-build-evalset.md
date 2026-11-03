@@ -1,10 +1,10 @@
 # 建评测集：Query → Expected Docs
 
-> **一句话**：好的 evalset 100-300 条覆盖各种 query 模式，**早点投入造 evalset = 早点能数据驱动迭代**——这是从 demo 到生产的关键一步。
+> 一份能用的 evalset 有 100-300 条，覆盖各种提问方式。它是从 demo 走向生产的分水岭：有了它，每次改动都能用数字判断好坏；没有它，只能靠手感。所以 evalset 越早做越好，这篇讲数据从哪来、怎么分层、怎么维护。
 
 ---
 
-## 1. evalset 长啥样
+## 1. evalset 长什么样
 
 ```jsonl
 {
@@ -16,16 +16,13 @@
 }
 ```
 
-每条至少有：
-
-- `query`：用户提问
-- `relevant_docs`：哪些文档是"答案所在"
+每条至少有两个字段：`query` 是用户的提问，`relevant_docs` 是答案所在的文档。
 
 ---
 
 ## 2. 来源 1：手动构造（精准）
 
-最实在：找 10-20 条用户实际可能问的 query，自己标注答案文档：
+最踏实的办法：找 10-20 条用户实际可能问的 query，自己标注答案文档。
 
 ```python
 evalset = [
@@ -37,17 +34,17 @@ evalset = [
 ]
 ```
 
-**关键技巧**：
+构造时有几个技巧：
 
-- 同一问题用 3-5 种说法（用户表达多样）
-- 包括 typo / 口语 / 缩写
-- 覆盖各种长度（短 query / 长 query）
+- 同一个问题写 3-5 种说法，因为用户的表达五花八门
+- 加入错别字、口语和缩写
+- 长短 query 都要有
 
 ---
 
 ## 3. 来源 2：日志挖掘
 
-如果已有产品（或 v1）：
+如果已经有产品（或者上过 v1）：
 
 ```python
 # 从 1 个月的真实 query 日志里抽
@@ -65,18 +62,18 @@ for q in sample:
     evalset.append({"query": q, "relevant_docs": relevant})
 ```
 
-**真实分布远比想象的奇怪**——直接从日志学才能 cover 边界。
+真实的 query 分布比你想象的奇怪得多，边界情况只有从日志里才挖得全。
 
 ---
 
 ## 4. 来源 3：LLM 生成
 
-最高效（但要质检）：
+效率最高，但一定要质检：
 
 ```python
 def generate_queries_from_doc(doc_text, n=5):
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": f"""根据下面文档，生成 {n} 个用户可能问的查询。
 
@@ -97,13 +94,11 @@ for doc in all_docs:
         evalset.append({"query": q.strip(), "relevant_docs": [doc["id"]]})
 ```
 
-**质检必做**：抽 10% 让人看，剔除 LLM 生成的太"模板化"或"答案直接在 query 里"的。
+**质检这一步不能省**：抽 10% 人工过一遍，把太模板化的、答案直接写在 query 里的剔掉。
 
 ---
 
-## 5. 多种标注难度
-
-按难度分层：
+## 5. 按难度分层
 
 ```
 Tier 1 (Easy) - 关键词匹配
@@ -119,7 +114,7 @@ Tier 4 (Multi-hop) - 多步推理
   "如果取消订阅会影响我已购买的内容吗" →  KB "取消订阅" + KB "已购内容保留政策"
 ```
 
-evalset 按比例覆盖（如 40% T1 / 30% T2 / 20% T3 / 10% T4）。
+evalset 按一定比例覆盖各层，比如 40% T1 / 30% T2 / 20% T3 / 10% T4。
 
 ---
 
@@ -131,7 +126,7 @@ evalset 按比例覆盖（如 40% T1 / 30% T2 / 20% T3 / 10% T4）。
 {"query": "...", "relevant_docs": [...], "tags": ["pii_test", "T1"]}
 ```
 
-跑评测时**按 tag 分组**看 Recall@5：
+跑评测时按 tag 分组看 Recall@5：
 
 ```
 billing T1: 95% ✅
@@ -139,13 +134,13 @@ billing T2: 88% ✅
 billing T3: 62% ❌ ← 这里有问题
 ```
 
-定位优化方向。
+这样就能定位该往哪个方向优化。
 
 ---
 
 ## 7. Edge case 列表
 
-无论用什么数据源，**手动加** 一组 edge case：
+不管数据从哪来，都要手动补一组 edge case：
 
 ```python
 EDGE_CASES = [
@@ -158,9 +153,9 @@ EDGE_CASES = [
     # 多个意图混合
     {"query": "怎么取消订阅然后退款", "relevant_docs": ["kb_cancel", "kb_refund"]},
     
-    # typo
+    # 错别字 / 标点 / 换说法
+    {"query": "如何取消定阅", "relevant_docs": ["kb_cancel"]},     # 订 → 定
     {"query": "如何取消订阅?", "relevant_docs": ["kb_cancel"]},
-    {"query": "怎么取消订阅", "relevant_docs": ["kb_cancel"]},
     {"query": "我要取消订阅", "relevant_docs": ["kb_cancel"]},
     
     # 太长
@@ -181,7 +176,7 @@ EDGE_CASES = [
 
 ## 8. 标注协议
 
-多人标注必须协议化：
+多人标注时，得先把规则写下来：
 
 ```markdown
 # Relevant Docs 标注规则
@@ -212,11 +207,11 @@ EDGE_CASES = [
 500-1000 条：覆盖足够边界
 ```
 
-实战：**从 100 条起步**，跑迭代发现盲区再补。
+我的建议是先从 100 条起步，跑几轮迭代发现盲区，再往里补。
 
 ---
 
-## 10. evalset 长青
+## 10. 持续维护 evalset
 
 ```
 v1.0 - 100 条人工 + 50 LLM 生成
@@ -226,13 +221,13 @@ v1.3 - +20 条多语言
 ...
 ```
 
-evalset 也是要维护的 codebase。
+evalset 和代码一样，需要持续维护。
 
 ---
 
-## 11. 跟前面手册的呼应
+## 11. 跟 Prompt Engineering 手册的关系
 
-整套方法论跟 [04-prompt-engineering/02-process/03-build-evalset.md](../../../04-prompt-engineering/docs/02-process/03-build-evalset.md) 一致——区别是这里专门 retrieval 维度。
+整套方法和 [PE Process 03：建评测集，从 5 条到 500 条](../../../04-prompt-engineering/docs/02-process/03-build-evalset.md) 一致，区别在于这里只关注检索。
 
 PE evalset：(query, expected answer)
 RAG evalset：(query, expected docs)
@@ -242,7 +237,6 @@ RAG evalset：(query, expected docs)
 ## 12. 完整生成 demo
 
 ```python
-# demos/evaluation/02_build_evalset.py
 import json
 import random
 from openai import OpenAI
@@ -261,7 +255,7 @@ corpus = [
 
 def gen_queries_for_doc(doc_text, n=3):
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": f"""为这文档生成 {n} 种用户可能问的 query。
 要求多样性：
@@ -309,14 +303,14 @@ print(f"生成 {len(evalset)} 条 evalset")
 
 | 坑 | 解 |
 |----|----|
-| 全用 LLM 生成 → 都是模板 | 必加人工 + 日志 |
-| 标 relevant 太宽松 | 只标真正答案文档 |
-| evalset 跟 corpus 重叠太多 | LLM 生成的 query 跟原文太近 → 召回偏乐观 |
-| 不分 tag | 跑完一个 avg 看不出问题 |
+| 全靠 LLM 生成，条条像模板 | 一定要混入人工构造和日志数据 |
+| relevant 标得太宽 | 只标确实包含答案的文档 |
+| query 和 corpus 原文太像 | LLM 生成的 query 容易照抄原文，召回率会偏乐观 |
+| 不分 tag | 只看一个平均数，看不出问题在哪 |
 
 ---
 
 ## 14. 下一步
 
-- 📖 端到端 RAG 评测（含 LLM 答案）→ [03-end-to-end.md](./03-end-to-end.md)
-- 📖 持续评测 → [04-continuous.md](./04-continuous.md)
+- [端到端 RAG 评测（含 LLM 答案）](./03-end-to-end.md)
+- [持续评测 + 回归测试](./04-continuous.md)

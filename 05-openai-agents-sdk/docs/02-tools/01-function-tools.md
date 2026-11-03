@@ -1,6 +1,6 @@
 # Function Tools：@function_tool 装饰器
 
-> **一句话**：`@function_tool` 把 Python 函数变成 LLM 可调用的工具，参数 schema 由类型 hints + docstring 自动生成。
+> `@function_tool` 把普通 Python 函数变成 LLM 能调用的工具，参数 schema 从类型注解和 docstring 自动生成。0.19 起还有一个同义的短别名 `@tool`（在 `agents.decorators` 里），下文两种写法可以互换。
 
 ---
 
@@ -27,11 +27,14 @@ agent = Agent(
 )
 ```
 
-SDK 自动从：
+SDK 会自动做这几件事：
 
-- 函数名 → tool name
-- docstring 第一行 → tool description
-- 类型 hints → 参数 schema
+- 函数名作为 tool name
+- docstring 开头的说明段（`Args:` 之前的文字）作为 tool description
+- 类型注解生成参数 schema（由 `pydantic` 完成）
+- docstring 的 `Args:` 段作为每个参数的 description（用 `griffe` 解析，支持 google / numpy / sphinx 风格）
+
+`@function_tool` 得到的是 `FunctionTool` 实例，可以直接 `print(tool.params_json_schema)` 看模型实际收到的 schema，我习惯写完工具先打出来看一眼。`tool.__wrapped__` 能拿到原函数，写单测方便，但这样会绕过 schema 校验、context 注入、guardrails、超时和 tracing。
 
 ---
 
@@ -50,7 +53,20 @@ def search_news(query: str, limit: int = 5, lang: str = "zh") -> list[dict]:
     return [{"title": f"news{i}", "url": "..."} for i in range(limit)]
 ```
 
-`limit` 和 `lang` 有默认值，模型可省略。
+`limit` 和 `lang` 有默认值，模型调用时可以不传。要给参数加约束或描述，可以用 `Annotated` + pydantic `Field`，生成的 schema 里会带上 `enum`、`minimum`/`maximum`：
+
+```python
+from typing import Annotated, Literal
+from pydantic import Field
+
+@function_tool
+def pick(
+    level: Annotated[Literal["low", "high"], Field(description="优先级")],
+    n: Annotated[int, Field(ge=1, le=5, description="数量")] = 1,
+) -> str:
+    """选择"""
+    return f"{level}x{n}"
+```
 
 ---
 
@@ -73,7 +89,7 @@ def search_news(params: SearchParams) -> list[dict]:
     return [...]
 ```
 
-适合参数多、有嵌套结构。
+参数多、有嵌套结构时用这种写法。
 
 ---
 
@@ -92,7 +108,7 @@ async def fetch_url(url: str) -> str:
         return r.text[:5000]
 ```
 
-SDK 自动识别 sync / async。
+SDK 会自动识别同步和异步函数。0.8 起，同步函数工具会放到工作线程里执行（`asyncio.to_thread`），所以依赖线程局部变量或者必须在特定线程上使用的资源，要改写成 async 工具。
 
 ---
 
@@ -122,7 +138,7 @@ my_ctx = MyContext(user_id="42", db=...)
 await Runner.run(agent, "查我的订单", context=my_ctx)
 ```
 
-工具能拿 context（用户身份、连接池等），LLM 看不到 context。
+工具可以从 context 里拿用户身份、连接池这类东西，而这些内容 LLM 看不到。
 
 ---
 
@@ -137,9 +153,19 @@ def divide(a: float, b: float) -> float:
     return a / b
 ```
 
-工具抛异常 → SDK 自动把错误信息当 tool result 返回给 LLM → LLM 决定怎么处理（道歉 / 换参 / 用别的工具）。
+工具抛异常时，SDK 会捕获它，转成一条 tool result 交给 LLM，由 LLM 决定是道歉、换参数重试还是改用别的工具。
 
-要**让异常彻底 fail**而不是给 LLM 看：
+不过默认交给 LLM 的只是一句笼统的话：`An error occurred while running the tool. Please try again.`。比如工具里抛 `ValueError("除数不能为 0")`，“除数不能为 0”这句原因不会传给模型。想让模型看到原因，就自己写 `failure_error_function`：
+
+```python
+def explain(ctx, error: Exception) -> str:
+    return f"工具失败：{error}"
+
+@function_tool(failure_error_function=explain)
+def divide(a: float, b: float) -> float: ...
+```
+
+如果希望异常直接让这次 run 失败，而不是交给 LLM：
 
 ```python
 @function_tool(failure_error_function=None)
@@ -147,7 +173,9 @@ def critical_op():
     ...
 ```
 
-详见 [04-tool-choice.md](./04-tool-choice.md)。
+这时异常会从 `Runner.run` 抛出来，外面包了一层 `UserError("Error running tool critical_op: ...")`（如果是模型传了非法 JSON，则是 `ModelBehaviorError`）。
+
+更多见 [Tool Choice / Parallel / 超时 / 错误处理 / 人工审批](./04-tool-choice.md)。
 
 ---
 
@@ -162,13 +190,13 @@ def get_weather_data_v2(city: str) -> str:
     return "..."
 ```
 
-适合：函数名/文档不适合给 LLM 看，或者多语言文档。
+函数名或 docstring 不适合直接给 LLM 看，或者需要多语言描述时，用这种方式覆盖。
 
 ---
 
 ## 8. 工具的复杂返回值
 
-LLM 看到的是返回值的 `str()`，复杂结构推荐：
+LLM 看到的是返回值的字符串形式。结构复杂时可以返回 JSON：
 
 ```python
 import json
@@ -181,7 +209,7 @@ def get_orders(user_id: str) -> str:
     return json.dumps(orders, ensure_ascii=False, indent=2)
 ```
 
-或返回 Pydantic 实例（SDK 自动 dump）：
+也可以返回 Pydantic 实例，SDK 会自动序列化，比如让 `get_order` 返回 `Order`，模型能正确读出金额：
 
 ```python
 class Order(BaseModel):
@@ -196,7 +224,38 @@ def get_order(order_id: int) -> Order:
 
 ---
 
-## 9. 不让模型并发
+要返回图片或文件，直接返回 `ToolOutputImage(image_url=...)`、`ToolOutputFileContent(...)`、`ToolOutputText(...)`（或它们的 TypedDict 版本，也可以返回列表），模型会把它们当多模态内容读。注意 Chat Completions 端点只认纯文本输出：默认只提取其中的文本部分，图片、文件内容会被丢掉。
+
+---
+
+## 9. 超时、按条件启用、延迟加载
+
+```python
+import asyncio
+from agents import RunContextWrapper, function_tool
+
+@function_tool(timeout=2.0)                       # 仅 async 工具支持
+async def slow_lookup(q: str) -> str:
+    await asyncio.sleep(10)
+    return "x"
+# 超时默认给模型一条 "Tool 'slow_lookup' timed out after 2 seconds."（timeout_behavior="error_as_result"）
+# 想直接让 run 失败：timeout_behavior="raise_exception" → 抛 ToolTimeoutError
+# 自定义提示：timeout_error_function=...
+
+def only_admin(ctx: RunContextWrapper[dict], agent) -> bool:      # 每次 run 前评估，False 则对模型隐藏
+    return ctx.context.get("admin", False)
+
+@function_tool(is_enabled=only_admin)
+def admin_op() -> str: ...
+```
+
+`is_enabled` 返回 False 时，`await agent.get_all_tools(ctx)` 里就没有这个工具。但它只控制模型能不能看到这个工具，算不上权限控制。和参数、资源相关的权限检查仍然要写在工具里，或者交给 tool guardrails / 审批。
+
+工具特别多（超过 20 个）时，OpenAI Responses 模型支持延迟加载：`@function_tool(defer_loading=True)` + `tool_namespace(name=..., description=..., tools=[...])`，再在 agent 里加一个（只能一个）`ToolSearchTool()`，模型会按需把要用的那组工具搜出来，省下 schema 占用的 token。这只在 Responses 模型上可用，第三方端点不行。详见 [动态工具集与上下文感知工具](./05-dynamic-tools.md)。
+
+---
+
+## 10. 不让模型并发
 
 ```python
 from agents.model_settings import ModelSettings
@@ -208,37 +267,34 @@ agent = Agent(
 )
 ```
 
-适合工具间有顺序依赖。详见 [04-tool-choice.md](./04-tool-choice.md)。
+工具之间有先后依赖时这样设。详见 [Tool Choice / Parallel / 超时 / 错误处理 / 人工审批](./04-tool-choice.md)。
 
 ---
 
-## 10. 强制 / 禁用 tool
+## 11. 强制 / 禁用 tool
 
 ```python
 ModelSettings(tool_choice="required")  # 必须调一个 tool
 ModelSettings(tool_choice="none")      # 别调 tool
 ModelSettings(tool_choice="auto")      # 默认，让模型决定
-ModelSettings(tool_choice={"type": "function", "name": "get_weather"})  # 强制特定 tool
+ModelSettings(tool_choice="get_weather")   # 强制特定 tool：直接写工具名字符串
 ```
 
 ---
 
-## 11. 工具最佳实践
+## 12. 写工具的几条经验
 
 ### 命名
 
-- ❌ `do_thing`、`process` 太模糊
-- ✅ `search_news`、`create_order`、`fetch_user_profile`
+`do_thing`、`process` 这种名字太模糊，模型猜不出什么时候该用。`search_news`、`create_order`、`fetch_user_profile` 这样动词加对象的名字就清楚得多。
 
 ### 描述
 
-- ❌ "用这个工具" - 没用
-- ✅ "搜过去 7 天的新闻。query 用关键词，不要写长句。"
+"用这个工具" 这种描述等于没写。好的描述会说清楚范围和用法，比如 "搜过去 7 天的新闻。query 用关键词，不要写长句。"
 
 ### 参数
 
-- 加 docstring `Args:` 让模型知道每个参数怎么用
-- 用 `Literal["a", "b"]` 限制枚举值
+在 docstring 的 `Args:` 里写清每个参数怎么用；取值有限的参数用 `Literal["a", "b"]` 限定。
 
 ```python
 from typing import Literal
@@ -250,16 +306,13 @@ def set_priority(level: Literal["low", "medium", "high"]) -> str:
 
 ### 返回值
 
-- 短：`"OK"` / `"Done"` / `"22°C"`
-- 长：JSON dump
-- 失败：抛异常或返回 `{"error": "..."}`
+简单结果直接返回短字符串，如 `"OK"`、`"Done"`、`"22°C"`；结构化的结果用 JSON；失败时抛异常，或者返回 `{"error": "..."}`。
 
 ---
 
-## 12. 完整 demo
+## 13. 完整示例
 
 ```python
-# demos/tools/01_function_tools.py
 import asyncio
 from typing import Literal
 from pydantic import BaseModel
@@ -310,8 +363,8 @@ asyncio.run(main())
 
 ---
 
-## 13. 下一步
+## 14. 下一步
 
-- 📖 Hosted Tools：OpenAI 独门 → [02-hosted-tools.md](./02-hosted-tools.md)
-- 📖 把 Agent 当工具用 → [03-agent-as-tool.md](./03-agent-as-tool.md)
-- 📖 tool_choice / parallel / 错误 → [04-tool-choice.md](./04-tool-choice.md)
+- [Hosted Tools：OpenAI 托管的内置工具](./02-hosted-tools.md)
+- [Agent as Tool：把 Agent 当作工具调用](./03-agent-as-tool.md)
+- [Tool Choice / Parallel / 超时 / 错误处理 / 人工审批](./04-tool-choice.md)

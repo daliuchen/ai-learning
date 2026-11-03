@@ -1,6 +1,6 @@
 # PE By-Task 04：总结（Summarizer）
 
-> **一句话**：总结看似简单，但"为谁总结、总结到多长、保留什么、丢什么"必须明确。模糊的"请总结" → 各次输出长度风格全不同；明确的"为 CEO 总结 1 段不超过 100 字、含数字" → 稳。
+> 总结看起来是最简单的任务，但"给谁看、多长、留什么、丢什么"这几件事不写清楚，每次输出的长度和风格都会不一样。只写"请总结"，结果飘忽不定；写成"给 CEO 总结成 1 段、不超过 100 字、带数字"，输出就稳了。
 
 ---
 
@@ -8,12 +8,12 @@
 
 - 输入：长文本（500 字 - 50,000 字）
 - 输出：短文本（10-500 字）
-- 评测：人工 + faithfulness + relevance（LLM-judge）
-- 关键挑战：长文档 attention 衰减、丢关键信息、风格漂移
+- 评测：人工，加上用 LLM-judge 打 faithfulness 和 relevance
+- 难点：长文档注意力衰减、漏掉关键信息、风格漂移
 
 ---
 
-## 2. 明确"为谁、为什么"
+## 2. 先说清给谁看、为什么看
 
 模糊：
 ```
@@ -26,16 +26,16 @@
 长度: 1 段，不超过 100 字。必须含 3 个具体数字。"
 ```
 
-明确以下维度：
+动笔前把下面几个维度定下来：
 
 | 维度 | 例 |
 |------|-----|
-| **受众** | CEO / 工程师 / 5 岁小朋友 |
-| **目的** | 决策 / 学习 / 入门 / FYI |
-| **长度** | 1 句 / 1 段 / 500 字 / 1000 字 |
-| **格式** | 段落 / bullets / 结构化 JSON |
-| **必须含** | 数字 / 引用 / 时间线 |
-| **可以省** | 细节 / 引文 / 历史 |
+| 受众 | CEO / 工程师 / 5 岁小朋友 |
+| 目的 | 决策 / 学习 / 入门 / FYI |
+| 长度 | 1 句 / 1 段 / 500 字 / 1000 字 |
+| 格式 | 段落 / bullets / 结构化 JSON |
+| 必须含 | 数字 / 引用 / 时间线 |
+| 可以省 | 细节 / 引文 / 历史 |
 
 ---
 
@@ -82,9 +82,9 @@ class ArticleSummary(BaseModel):
 
 ---
 
-## 4. 长文档的 Map-Reduce 总结
+## 4. 长文档：Map-Reduce
 
-文档 > 10k token 时，直接喂效果差（attention 衰减）。用 map-reduce：
+文档超过 10k token 时整篇直接喂，效果会因为注意力衰减而变差。可以用 map-reduce：
 
 ```python
 def summarize_long(text: str, chunk_size: int = 3000) -> str:
@@ -97,7 +97,7 @@ def summarize_long(text: str, chunk_size: int = 3000) -> str:
     return summarize_short(combined)
 ```
 
-或迭代 refine：
+也可以迭代 refine：
 
 ```python
 def iter_refine(text: str, chunk_size: int = 3000) -> str:
@@ -115,7 +115,7 @@ def iter_refine(text: str, chunk_size: int = 3000) -> str:
     return summary
 ```
 
-map-reduce 更并行；iter-refine 更准但慢。
+map-reduce 可以并行，速度快，但各段总结彼此看不到；iter-refine 每一步都带着前文的总结，前后更连贯，代价是只能串行跑。
 
 ---
 
@@ -140,14 +140,14 @@ map-reduce 更并行；iter-refine 更准但慢。
 
 ## 6. 防止幻觉
 
-总结时模型可能"填补空白"：
+总结时模型会顺手"补全"原文没有的东西：
 
 ```
 原文: "营收 100 万"
 总结: "营收 100 万，同比增长 20%"  ← "20%" 是编的
 ```
 
-防御：
+prompt 里要明确禁止：
 
 ```
 重要：
@@ -157,22 +157,19 @@ map-reduce 更并行；iter-refine 更准但慢。
 - 数字必须从原文复述
 ```
 
-可以加 faithfulness 检查（详 [04-advanced/03-rag-prompting.md](../04-advanced/03-rag-prompting.md)）。
+还可以再加一道 faithfulness 检查，做法见 [RAG Prompting 与引用约束](../04-advanced/03-rag-prompting.md)。
 
 ---
 
 ## 7. 风格一致性
 
-总结风格漂移很常见。对策：
-- few-shot 给 2-3 个示例
-- voice guide
-- structured output 约束长度 / 字段
+总结的风格很容易漂。能用的手段有三种：给 2-3 个 few-shot 示例、写一份 voice guide、用 structured output 卡住长度和字段。
 
 ---
 
-## 8. 长度精确控制
+## 8. 精确控制长度
 
-字数控制是个微妙问题——模型按 token 算不按字算。技巧：
+字数不好控，因为模型是按 token 计数的，不是按字。可以这样写：
 
 ```
 长度: 80-120 字（中文）
@@ -180,7 +177,7 @@ map-reduce 更并行；iter-refine 更准但慢。
 如果不确定，宁短勿长。
 ```
 
-或后处理：
+或者在后处理里兜底：
 
 ```python
 result = summarize(...)
@@ -193,7 +190,6 @@ if len(result) > 120:
 ## 9. 完整 demo
 
 ```python
-# demos/by_task/04_summarizer.py
 from pydantic import BaseModel, Field
 from typing import Literal
 from openai import OpenAI
@@ -226,8 +222,8 @@ SYSTEM = """你是公司 CEO 的执行助理，擅长长文档 → 行动洞察�
 
 
 def summarize_article(text: str) -> ArticleSummary:
-    resp = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
+    resp = client.chat.completions.parse(
+        model="gpt-6-luna",
         response_format=ArticleSummary,
         messages=[
             {"role": "system", "content": SYSTEM},
@@ -254,18 +250,18 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **"请总结"** | 必须说清受众 / 长度 / 关注点 |
-| **长文档直接喂** | 超过 5k 字考虑 map-reduce |
-| **没要求"只用原文"** | 模型补全幻觉 |
-| **没字数控制** | 长度漂移 |
-| **总结里出现"本文讨论了"** | prompt 加"避免元描述" |
-| **数字精度丢失** | 强调"精确复述数字" |
-| **不同次输出风格差异大** | few-shot + temperature 调低 |
+| 只写"请总结" | 说清受众、长度、关注点 |
+| 长文档整篇直接喂 | 超过 1 万 token 左右考虑 map-reduce |
+| 没要求"只用原文" | 模型会补出原文没有的内容 |
+| 没有字数控制 | 长度漂移 |
+| 总结里出现"本文讨论了" | prompt 里加"避免元描述" |
+| 数字精度丢失 | 强调"数字照原文复述" |
+| 多次输出风格差异大 | 加 few-shot；能调采样参数的模型把 temperature 调低（Claude 5.x 不接受 temperature，靠 few-shot 和固定输出结构） |
 
 ---
 
 ## 11. 下一步
 
-- 📖 LLM-as-judge → [05-judge.md](./05-judge.md)
-- 📖 长文档处理 → [03-techniques/04-decomposition.md](../03-techniques/04-decomposition.md) (map-reduce)
-- 📖 防幻觉 → [04-advanced/03-rag-prompting.md](../04-advanced/03-rag-prompting.md)
+- [LLM-as-Judge](./05-judge.md)
+- 长文档处理（map-reduce）：[Decomposition 任务拆解](../03-techniques/04-decomposition.md)
+- 防幻觉：[RAG Prompting 与引用约束](../04-advanced/03-rag-prompting.md)

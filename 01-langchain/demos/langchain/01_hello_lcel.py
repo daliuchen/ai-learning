@@ -6,6 +6,7 @@ LangChain Hello World：演示最基础的三件套 prompt | model | parser
 运行：
     python demos/langchain/01_hello_lcel.py
 """
+import os
 from dotenv import load_dotenv
 
 from langchain_core.output_parsers import StrOutputParser
@@ -13,6 +14,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
 
 
 def main() -> None:
@@ -21,7 +23,7 @@ def main() -> None:
         ("human", "{question}"),
     ])
 
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+    model = ChatOpenAI(model=MODEL, temperature=0.3)
     parser = StrOutputParser()
 
     chain = prompt | model | parser

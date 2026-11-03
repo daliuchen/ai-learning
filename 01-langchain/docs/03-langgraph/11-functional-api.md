@@ -1,22 +1,21 @@
 # LangGraph 11：Functional API（@entrypoint / @task）
 
-> **一句话**：Functional API 让你用 Python 装饰器写"看起来像普通函数"的代码，由 LangGraph 自动转换成 graph，**同样具备持久化、HITL、流式所有能力**。它和 StateGraph 是同一引擎的两种风格。
+> Functional API 让你用装饰器写出跟普通 Python 函数差不多的代码，LangGraph 在背后把它当成 graph 执行，持久化、HITL、流式这些能力一样不少。它和 StateGraph 跑在同一个引擎上，只是写法不同。这篇讲它的基本用法、并发、持久化与中断，以及什么时候该选它。
+
+版本：以 `langgraph 1.2.19` 为准；`MemorySaver` 是 `InMemorySaver` 的别名。
 
 ---
 
 ## 1. Why Functional API
 
-StateGraph 是声明式：你画图、定义 node 和 edge。
-Functional API 是命令式：你写一个普通 Python 函数，里面调用其他 `@task`，控制流就是 `if/for/await`。
-
-两种风格的对比：
+StateGraph 是声明式的：你画图，定义 node 和 edge。Functional API 是命令式的：你写一个普通 Python 函数，在里面调用其他 `@task`，控制流就是 `if/for/await`。
 
 | 风格 | 写法 | 适合 |
 |------|------|------|
 | StateGraph | 画图，节点+边 | 流程清晰、需要可视化 |
 | Functional | 函数式，直接代码 | 控制流复杂、习惯 async/await |
 
-两者**功能完全等价**，可混用：一个 entrypoint 里可以调一个 StateGraph，反之亦然。
+两者功能等价，也能混用：entrypoint 里可以调一个 StateGraph，反过来也行。
 
 ---
 
@@ -42,12 +41,7 @@ def workflow(x: int) -> int:
 print(workflow.invoke(3))        # 8
 ```
 
-注意：
-
-- `@task` 让函数变成"可重放/可缓存"的任务
-- `@entrypoint()` 定义入口，签名就是 invoke 的 input/output
-- `step_a(x)` 返回的是 future，`.result()` 拿结果
-- 整个 workflow 被自动当成 graph 执行，跨进程可恢复
+`@task` 把函数变成可重放、可缓存的任务；`@entrypoint()` 定义入口，函数签名就是 invoke 的输入和输出。`step_a(x)` 返回的是一个 future，调 `.result()` 才拿到值。整个 workflow 会被当成 graph 执行，跨进程也能恢复。
 
 ---
 
@@ -60,18 +54,18 @@ def parallel(items: list[int]) -> list[int]:
     return [f.result() for f in futures]
 ```
 
-类似 `asyncio.gather`，所有 task 并行执行。
+效果和 `asyncio.gather` 差不多，所有 task 并行执行。
 
 ---
 
 ## 4. 持久化与 HITL
 
-`@entrypoint` 接受 `checkpointer`：
+`@entrypoint` 可以接收 `checkpointer`：
 
 ```python
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import InMemorySaver
 
-@entrypoint(checkpointer=MemorySaver())
+@entrypoint(checkpointer=InMemorySaver())
 def workflow(x: int) -> int:
     a = step_a(x).result()
     b = step_b(a).result()
@@ -80,14 +74,14 @@ def workflow(x: int) -> int:
 workflow.invoke(3, config={"configurable": {"thread_id": "t1"}})
 ```
 
-每个 `@task` 是一个 checkpoint 点，进程挂了重启从上次 task 结果继续。
+每个 `@task` 都是一个 checkpoint 点，进程挂了重启后，会从上次完成的 task 结果接着跑。
 
 interrupt 也能用：
 
 ```python
 from langgraph.types import interrupt, Command
 
-@entrypoint(checkpointer=MemorySaver())
+@entrypoint(checkpointer=InMemorySaver())
 def workflow(x):
     a = step_a(x).result()
     user_choice = interrupt({"q": "继续吗？", "current": a})
@@ -112,13 +106,13 @@ async def aworkflow(urls: list[str]) -> list[str]:
     return results
 ```
 
-`@entrypoint` 与 `@task` 都支持异步。
+`@entrypoint` 和 `@task` 都支持异步。
 
 ---
 
 ## 6. 与 StateGraph 混用
 
-`@task` 可以直接调用一个编译后的 StateGraph：
+`@task` 里可以直接调用编译好的 StateGraph：
 
 ```python
 sub_app = build_subgraph().compile()
@@ -128,7 +122,7 @@ def sub(input):
     return sub_app.invoke(input)
 ```
 
-反之，StateGraph 的 node 可以调 `@entrypoint` workflow。
+反过来，StateGraph 的 node 里也可以调用 `@entrypoint` workflow。
 
 ---
 
@@ -139,13 +133,13 @@ for ev in workflow.stream(3, stream_mode="updates"):
     print(ev)
 ```
 
-每个 `@task` 完成产生一个 update。
+每个 `@task` 完成时产生一条 update，最后还有一条以 entrypoint 函数名为 key 的最终返回值。实际输出是 `[{'step_a': 4}, {'step_b': 8}, {'workflow': 8}]`。
 
 ---
 
 ## 8. Functional ReAct
 
-LangGraph 给出了 Functional 版的 ReAct 模板：
+LangGraph 文档给了一个 Functional 版的 ReAct 模板：
 
 ```python
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -159,7 +153,7 @@ def call_model(messages):
 def call_tool(tool_call):
     return by_name[tool_call["name"]].invoke(tool_call["args"])
 
-@entrypoint(checkpointer=MemorySaver())
+@entrypoint(checkpointer=InMemorySaver())
 def react(messages):
     while True:
         resp = call_model(messages).result()
@@ -171,22 +165,24 @@ def react(messages):
             messages.append(ToolMessage(content=str(result), tool_call_id=tc["id"]))
 ```
 
-是不是比 StateGraph 版直观？但失去了 graph 可视化与显式条件边。**适合代码控制流复杂的场景**。
+读起来比 StateGraph 版直观，但没有了图的可视化和显式条件边。我会在控制流比较绕、用图表达反而别扭的时候选它。
 
 ---
 
-## 9. demo
+## 9. 本章 demo
+
+完整代码：[`demos/langgraph/11_functional.py`](../../demos/langgraph/11_functional.py)
 
 ```python
 # demos/langgraph/11_functional.py
 import asyncio
 from dotenv import load_dotenv
 from langgraph.func import entrypoint, task
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="qwen-flash")
 
 @task
 def joke(topic: str) -> str:
@@ -196,7 +192,7 @@ def joke(topic: str) -> str:
 def poem(topic: str) -> str:
     return model.invoke(f"写一首关于 {topic} 的两行诗").content
 
-@entrypoint(checkpointer=MemorySaver())
+@entrypoint(checkpointer=InMemorySaver())
 def workflow(topic: str) -> dict:
     f1 = joke(topic)
     f2 = poem(topic)
@@ -219,7 +215,7 @@ for ev in workflow.stream("狗", config={"configurable": {"thread_id": "t2"}}, s
 | 大量条件分支 + 循环 | Functional |
 | 多 Agent 显式编排 | StateGraph |
 | 需要可视化图 / 给 PM 看 | StateGraph |
-| 需要 Studio UI 调试 | StateGraph（Functional 支持有限） |
+| 需要 Studio UI 里看节点拓扑 | StateGraph（Functional 没有静态的节点/边可画） |
 | HITL / 持久化 | 都行 |
 
 ---
@@ -228,15 +224,10 @@ for ev in workflow.stream("狗", config={"configurable": {"thread_id": "t2"}}, s
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `.result()` 卡住 | task 没装饰器 | `@task` 装饰 |
-| 多次 invoke 重新执行已完成 task | 没 checkpointer | 加上 |
-| 异常重启后从头跑 | 错误打断了 task | 用 try 包 task 调用 |
-| 流式拿不到 token | Functional 颗粒度按 task | 想要 token 级用 `astream_events` |
+| 调 `.result()` 报 `AttributeError` | 函数没加 `@task`，返回的是普通值 | 用 `@task` 装饰 |
+| 出错后重新 invoke，已成功的 task 又跑了一遍 | 传了新输入就是一次新运行；或者没挂 checkpointer | 挂 checkpointer，用同一个 `thread_id` 调 `invoke(None, cfg)` 恢复，已完成的 task 直接用保存的结果 |
+| 流式拿不到 token | `updates` 模式的粒度是 task | 要 token 级就用 `stream_mode="messages"` |
 
 ---
 
-## 12. 本章 demo
-
-[`demos/langgraph/11_functional.py`](../../demos/langgraph/11_functional.py)
-
-下一篇：[12-deployment.md](12-deployment.md)
+下一篇：[LangGraph 12：部署与 Studio](12-deployment.md)

@@ -94,7 +94,7 @@ def build_dataset() -> Dataset[str, str]:
                     "回答必须严格是 question / complaint / praise 三者之一（小写）。"
                     "完全匹配 → 1.0；包含但不只这一个词 → 0.5；都不是 → 0.0。"
                 ),
-                model="openai:gpt-4o-mini",
+                model="openai-chat:qwen-flash",
                 include_input=True,
             )
         )
@@ -111,8 +111,8 @@ async def build_task():
 
     if os.getenv("OPENAI_API_KEY"):
         agent = Agent(
-            "openai:gpt-4o-mini",
-            system_prompt=(
+            "openai-chat:qwen-flash",
+            instructions=(
                 "你是客服意图分类器。把用户消息分类成 question / complaint / praise "
                 "三类之一。只输出小写英文类别名，不要其他任何字符。"
             ),
@@ -122,7 +122,7 @@ async def build_task():
             r = await agent.run(text)
             return r.output.strip().lower()
 
-        return task, "openai:gpt-4o-mini"
+        return task, "openai-chat:qwen-flash"
 
     # ===== fallback：TestModel 永远回 "question" =====
     print("[info] OPENAI_API_KEY 未设置，fallback 到 TestModel（输出全是 question）")
@@ -148,8 +148,9 @@ async def main() -> None:
     report.print(include_input=True, include_output=True)
 
     print("\n===== 平均分 =====")
-    for name, avg in report.averages().items():
-        print(f"  {name}: {avg}")
+    avg = report.averages()  # ReportCaseAggregate（pydantic 模型）
+    for name in ("scores", "labels", "metrics", "assertions", "task_duration"):
+        print(f"  {name}: {getattr(avg, name)}")
 
 
 if __name__ == "__main__":

@@ -11,9 +11,9 @@ from __future__ import annotations
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
-mcp = FastMCP("hello-mcp")
+mcp = MCPServer("hello-mcp")
 
 
 # ===== Tools：模型可调用的"动词" =====

@@ -1,19 +1,14 @@
 # LangChain 05：LCEL 与 Runnable 体系
 
-> **一句话**：LCEL = "用 `|` 把 Runnable 串成数据流"。它是 LangChain 现代 API 的灵魂，掌握了 LCEL 才算真正掌握了 LangChain。
+> LCEL 用管道符 `|` 把一个个 Runnable 串成数据流。LangChain 现在的 API 几乎都建在它上面，读懂了 LCEL，其他组件怎么拼在一起也就清楚了。这篇从 Runnable 协议讲起，再到几个组合原语、事件流和调试方法。
 
 ---
 
 ## 1. LCEL 是什么
 
-**LangChain Expression Language**，本质是一套基于 `Runnable` 协议的组合 DSL。
+LCEL 全称 LangChain Expression Language，是一套建立在 `Runnable` 协议上的组合 DSL。
 
-设计目标：
-
-1. **声明式**：你只描述数据流，不写循环/await
-2. **统一接口**：所有组件都实现 `invoke/batch/stream`，组合后自动继承所有能力
-3. **可观测**：每个步骤自动产生 LangSmith trace
-4. **无锁性能**：自动并行、自动流式
+写 LCEL 时只描述数据怎么流动，不用自己写循环和 await。所有组件都实现了 `invoke/batch/stream`，组合出来的链自然也有这些方法。每一步会自动生成 LangSmith trace，能并行的地方自动并行，流式也是自动打通的。
 
 ```python
 chain = prompt | model | parser
@@ -30,7 +25,7 @@ chain.astream_events(x, version="v2")  # 细粒度事件
 
 ## 2. Runnable 协议
 
-每个 LCEL 组件必须实现 `Runnable[Input, Output]`，核心方法：
+每个 LCEL 组件都要实现 `Runnable[Input, Output]`，核心方法如下：
 
 ```python
 class Runnable(Generic[Input, Output]):
@@ -42,22 +37,22 @@ class Runnable(Generic[Input, Output]):
     async def astream(self, input: Input, ...) -> AsyncIterator[Output]: ...
 ```
 
-只要实现了 `invoke`（或异步），LangChain 用 `_default_stream` 等默认实现把其他方法补齐。
+只要实现了 `invoke`，其他方法都有默认实现：`batch` 默认用线程池并发调 `invoke`，`stream` 默认等 `invoke` 返回后一次性吐出整个结果。
 
-`Runnable` 内置魔法方法：
+`Runnable` 重载了 `|`（`__or__` / `__ror__`），`|` 另一侧的对象会被自动转换：
 
 ```python
-a | b     →  RunnableSequence(a, b)
-{"x": a}  →  RunnableParallel({"x": a})
+a | b          →  RunnableSequence(a, b)
+{"x": a} | b   →  RunnableSequence(RunnableParallel({"x": a}), b)
 ```
 
-后者很关键：dict 字面量会自动包成 `RunnableParallel`，并行运行所有 value。
+第二种容易被忽略：dict 字面量会被自动包成 `RunnableParallel`，里面的每个 value 并行执行。普通函数会被包成 `RunnableLambda`，生成器函数会被包成 `RunnableGenerator`。
 
 ---
 
-## 3. LCEL 的"原语"
+## 3. LCEL 的组合原语
 
-### 3.1 RunnableSequence — 串联
+### 3.1 RunnableSequence：串联
 
 ```python
 seq = a | b | c
@@ -72,9 +67,9 @@ seq = RunnableSequence(a, b, c)
 
 执行：`c.invoke(b.invoke(a.invoke(x)))`
 
-### 3.2 RunnableParallel — 并联
+### 3.2 RunnableParallel：并联
 
-把同一个输入分发到多个分支并行执行，结果合并成 dict：
+把同一个输入分给多个分支并行执行，结果合并成一个 dict：
 
 ```python
 from langchain_core.runnables import RunnableParallel
@@ -97,9 +92,9 @@ chain = {
 } | summarize_prompt | model
 ```
 
-注意：**dict 出现在 `|` 链里才会自动转 RunnableParallel**，单独定义需要显式写 `RunnableParallel({...})`。
+dict 只有出现在 `|` 链里才会自动转成 RunnableParallel，单独定义时要显式写 `RunnableParallel({...})`。
 
-### 3.3 RunnableLambda — 把任意函数变成 Runnable
+### 3.3 RunnableLambda：把任意函数变成 Runnable
 
 ```python
 from langchain_core.runnables import RunnableLambda
@@ -114,7 +109,7 @@ print(shouter.invoke("hello"))  # HELLO!!!
 chain = prompt | model | StrOutputParser() | RunnableLambda(shout)
 ```
 
-`@chain` 装饰器是更甜的语法：
+用 `@chain` 装饰器写起来更简洁：
 
 ```python
 from langchain_core.runnables import chain as as_chain
@@ -124,9 +119,9 @@ def shout(text: str) -> str:
     return text.upper()
 ```
 
-### 3.4 RunnablePassthrough — 直通 + 注入
+### 3.4 RunnablePassthrough：直通与注入
 
-最常见的用法：把输入原样传下去，同时往字典里加新 key：
+最常见的用法是把输入原样往下传，同时往字典里加新的 key：
 
 ```python
 from langchain_core.runnables import RunnablePassthrough
@@ -144,7 +139,7 @@ chain.invoke({"text": "hello"})
 # prompt 看到的输入：{"text": "hello", "upper": "HELLO", "length": 5}
 ```
 
-### 3.5 RunnableBranch — 条件分支
+### 3.5 RunnableBranch：条件分支
 
 ```python
 from langchain_core.runnables import RunnableBranch
@@ -158,7 +153,7 @@ router = RunnableBranch(
 router.invoke({"q": "什么是 LCEL？"})
 ```
 
-也可以用 `RunnableLambda` 写更灵活的 router：
+也可以用 `RunnableLambda` 写一个更灵活的路由：
 
 ```python
 def route(info):
@@ -169,7 +164,7 @@ def route(info):
 chain = first_step | route   # route 返回的 Runnable 会被 invoke
 ```
 
-返回 Runnable 会被自动 invoke，这是个非常方便的小细节。
+函数返回的 Runnable 会被自动 invoke，所以路由函数只管挑出下一步是谁就行。
 
 ### 3.6 配置：with_config / configurable_fields
 
@@ -190,7 +185,7 @@ chain = (prompt | model).with_config({
 ```python
 from langchain_core.runnables import ConfigurableField
 
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0).configurable_fields(
+model = ChatOpenAI(model="gpt-6-luna", temperature=0).configurable_fields(
     temperature=ConfigurableField(id="temp"),
     model_name=ConfigurableField(id="model"),
 )
@@ -198,7 +193,7 @@ model = ChatOpenAI(model="gpt-4o-mini", temperature=0).configurable_fields(
 chain = prompt | model | StrOutputParser()
 
 # 运行时切配置
-chain.with_config(configurable={"temp": 0.9, "model": "gpt-4o"}).invoke(...)
+chain.with_config(configurable={"temp": 0.9, "model": "gpt-6.1-sol"}).invoke(...)
 ```
 
 #### 整体备选 chain
@@ -211,13 +206,13 @@ chain.configurable_alternatives(
 ).with_config(configurable={"chain_kind": "summarize"}).invoke(...)
 ```
 
-适合多业务场景共用入口，前端传不同 `configurable` 切换流程。
+多个业务场景共用一个入口时可以这样做，前端传不同的 `configurable` 就能切换流程。
 
 ---
 
 ## 4. 数据流类型转换
 
-一条 LCEL chain 里，每一步的输入输出类型必须能对接：
+一条 LCEL chain 里，上一步的输出类型必须是下一步能接受的输入：
 
 ```
 {"x": 1}                  ChatPromptTemplate
@@ -233,21 +228,19 @@ chain.configurable_alternatives(
 | 组件 | input | output |
 |------|-------|--------|
 | `ChatPromptTemplate` | `dict` | `ChatPromptValue` |
-| `ChatModel` | `dict / str / list[BaseMessage] / ChatPromptValue` | `AIMessage` |
+| `ChatModel` | `str / list[BaseMessage] / ChatPromptValue` | `AIMessage` |
 | `StrOutputParser` | `AIMessage / str` | `str` |
 | `JsonOutputParser` | `AIMessage / str` | `dict` |
 | `Retriever` | `str` | `List[Document]` |
 | `RunnableLambda(fn)` | 任意 | 任意 |
 
-如果两个组件不匹配，加 `RunnableLambda` / `RunnablePassthrough.assign` 适配即可。
+两个组件对不上时，中间加一个 `RunnableLambda` 或 `RunnablePassthrough.assign` 做转换。
 
 ---
 
-## 5. 一个 RAG 例子彻底吃透 LCEL
+## 5. 用一个 RAG 例子串起来
 
-我们要实现：
-
-> 给一个问题，先从向量库检索文档，把文档和问题塞给 LLM 回答。
+需求是：给一个问题，先从向量库检索文档，再把文档和问题一起交给 LLM 回答。
 
 ```python
 from langchain_core.runnables import RunnablePassthrough
@@ -276,17 +269,13 @@ rag_chain = (
 rag_chain.invoke("LCEL 是什么？")
 ```
 
-关键点：
-- `{...}` 是 RunnableParallel，并行运行两个分支
-- `"context": retriever | format_docs`：retriever 拿到 `"LCEL 是什么？"` 返回文档列表，然后 `format_docs` 拼成字符串
-- `"question": RunnablePassthrough()`：把输入字符串直接放进字典
-- 整个 `{}` 输出 `{"context": "...", "question": "LCEL 是什么？"}`，刚好对上 prompt 的变量
+拆开看：`{...}` 是一个 RunnableParallel，两个分支并行执行。`"context"` 分支里，retriever 拿到 `"LCEL 是什么？"` 返回文档列表，再由 `format_docs` 拼成字符串；`"question"` 分支用 `RunnablePassthrough()` 把输入字符串原样放进字典。整个 `{}` 的输出是 `{"context": "...", "question": "LCEL 是什么？"}`，正好对上 prompt 里的两个变量。
 
 ---
 
 ## 6. astream_events：细粒度事件流
 
-`.stream()` 只能流 chain 最末端的 chunk。如果链里有多个 LLM 调用、retriever、tool，想监听每一步的实时事件：
+`.stream()` 只能拿到 chain 最后一步的 chunk。链里有多个 LLM 调用、retriever、tool 时，如果想实时看到每一步的事件：
 
 ```python
 async for event in chain.astream_events({"...": "..."}, version="v2"):
@@ -310,21 +299,21 @@ on_retriever_start / on_retriever_end
 on_prompt_start / on_prompt_end
 ```
 
-这是构建 UI 流式应用（如 ChatGPT 那种 token-by-token + 显示"正在搜索..."状态）的核心 API。
+做 ChatGPT 那种界面时要用到它：既要逐 token 输出，又要显示「正在搜索...」这类中间状态。
 
 ---
 
 ## 7. config 的传递机制
 
-`config` 在 LCEL chain 里**自动透传**到每个子 Runnable。比如：
+`config` 在 LCEL chain 里会自动传给每个子 Runnable。比如：
 
 ```python
 chain.invoke(x, config={"tags": ["session-1"], "callbacks": [my_handler]})
 ```
 
-会传给 chain 里的每一个组件，无须显式转发。
+这份配置会传到 chain 里的每个组件，不用手动转发。
 
-`max_concurrency` 控制 `batch` 的并发：
+`batch` 的并发数由 `max_concurrency` 控制：
 
 ```python
 chain.batch(inputs, config={"max_concurrency": 10})
@@ -334,7 +323,7 @@ chain.batch(inputs, config={"max_concurrency": 10})
 
 ## 8. RunnableGenerator：流式自定义
 
-有时你想在流里插入自己的转换：
+有时候想在流的中间插一步自己的转换：
 
 ```python
 from typing import Iterator
@@ -343,20 +332,28 @@ def add_prefix(stream: Iterator[str]) -> Iterator[str]:
     for chunk in stream:
         yield "> " + chunk
 
-chain = prompt | model | StrOutputParser() | RunnableLambda(add_prefix)
+chain = prompt | model | StrOutputParser() | add_prefix   # 生成器函数在 | 链里自动包成 RunnableGenerator
 ```
 
-注意 `RunnableLambda` 在传入函数返回 generator 时会自动用作 streaming transform。
+直接把生成器函数放进 `|` 链，LangChain 会把它包成 `RunnableGenerator`，`add_prefix` 拿到的是上游的 chunk 流，逐个处理。想把意图写明白，也可以显式写：
+
+```python
+from langchain_core.runnables import RunnableGenerator
+
+chain = prompt | model | StrOutputParser() | RunnableGenerator(add_prefix)
+```
+
+不要写成 `RunnableLambda(add_prefix)`：`RunnableLambda(f)` 会先把上游输出攒成完整的值再交给 `f`，这里 `f` 拿到的是整段字符串，`for chunk in stream` 变成了逐字符遍历，每个字符前都会加上 `"> "`。
 
 ---
 
 ## 9. 调试 LCEL：get_graph / print_ascii
 
 ```python
-chain.get_graph().print_ascii()
+chain.get_graph().print_ascii()      # 需要 pip install grandalf
 ```
 
-会输出类似：
+输出大致是这样：
 
 ```
               +---------------------------+
@@ -379,27 +376,29 @@ chain.get_graph().print_ascii()
               +-----------------------+
 ```
 
-复杂链调试神器。
+链一复杂，靠它看结构比读代码快得多。
 
 ---
 
-## 10. 何时**不**用 LCEL
+## 10. 什么时候不用 LCEL
 
-LCEL 不是万能的，**复杂控制流（循环、状态机）建议直接用 LangGraph**。
+遇到循环、状态机这类复杂控制流，**直接用 LangGraph**。LCEL 适合的是流程固定的场景。
 
 | 场景 | 推荐 |
 |------|------|
 | 简单 RAG / 翻译 / 摘要 / 结构化提取 | LCEL |
 | 顺序很清晰的多步流程 | LCEL |
 | 需要 if/else 分支 | LCEL（RunnableBranch） |
-| Agent / 循环 / 多 Agent / Human-in-loop | **LangGraph** |
-| 需要持久化、断点续跑 | **LangGraph** |
+| Agent / 循环 / 多 Agent / Human-in-loop | LangGraph |
+| 需要持久化、断点续跑 | LangGraph |
 
-官方文档已经把 `AgentExecutor` 标记为 legacy，新项目都建议用 LangGraph。
+`AgentExecutor` 已经搬进 `langchain-classic`，新项目的 agent 一律用 `langchain.agents.create_agent`（底层就是 LangGraph）。LCEL 本身并没有被淘汰，在 1.x 里写固定流程，`prompt | model | parser` 仍然是最短的写法。
 
 ---
 
 ## 11. 综合 demo
+
+完整代码：[`demos/langchain/05_lcel.py`](../../demos/langchain/05_lcel.py)
 
 ```python
 # demos/langchain/05_lcel.py
@@ -412,7 +411,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+model = ChatOpenAI(model="gpt-6-luna", temperature=0)
 
 # ===== 并行：同时生成笑话和诗 =====
 joke = ChatPromptTemplate.from_template("讲一个关于 {topic} 的短笑话") | model | StrOutputParser()
@@ -451,16 +450,12 @@ print(router.invoke({"q": "讲讲春天"}))
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `dict` 不被自动并行 | 在链 `|` 外定义的 dict | 放进 `|` 链里，或显式 `RunnableParallel(...)` |
-| 流式不流 | 链中间有非流式 Lambda | Lambda 返回 generator，或用 `RunnableGenerator` |
-| `RunnableLambda` 报 NotIterable | 同步函数被当流式调用 | 显式实现 `__call__` 流式 |
-| `config` 没传到子链 | 自己 invoke 时丢了 | 永远 `def fn(x, config): chain.invoke(x, config)` |
-| 类型不匹配报错信息晦涩 | LCEL 不是静态类型 | 用 `chain.get_graph().print_ascii()` 看结构 |
+| `dict` 没有自动并行 | dict 定义在 `|` 链外面 | 放进 `|` 链里，或显式 `RunnableParallel(...)` |
+| 流式没生效 | 链中间有不支持流式的 `RunnableLambda` | 改成「迭代器进、生成器出」的函数，用 `RunnableGenerator` 包装 |
+| 想逐 chunk 处理，结果被攒成了整段 | 给 `RunnableLambda` 传的是普通函数 | 改用 `RunnableGenerator`，函数签名是迭代器进、生成器出 |
+| `config` 没传到子链 | 手动 invoke 时没带上 | 一律写成 `def fn(x, config): chain.invoke(x, config)` |
+| 类型不匹配，报错看不懂 | LCEL 没有静态类型检查 | 用 `chain.get_graph().print_ascii()` 看结构（需装 `grandalf`） |
 
 ---
 
-## 13. 本章 demo
-
-[`demos/langchain/05_lcel.py`](../../demos/langchain/05_lcel.py)
-
-下一篇：[06-streaming.md](06-streaming.md) — 全方位 Streaming。
+下一篇讲流式：[LangChain 06：Streaming 流式输出](06-streaming.md)

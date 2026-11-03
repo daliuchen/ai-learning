@@ -1,12 +1,12 @@
-# PE 05：评测先于 Prompt —— 为什么这是 PE 第一条戒律
+# PE 05：先建评测，再写 Prompt
 
-> **一句话**：不带评测集就开始调 prompt，等同于不带测试就开始写代码——你永远不知道改的那一行让事情变好了还是变差了。本手册的中轴线（第 02 章 Process）整章都建立在"先有评测，再有 prompt"这条戒律上。
+> 没有评测集就开始调 prompt，跟不写测试就改代码一样：改完一行，你没法知道情况是变好了还是变坏了。这本手册的第 02 章整章都建立在这条规矩上，先有评测，再写 prompt。
 
 ---
 
-## 1. 没有评测的 PE 长什么样
+## 1. 没有评测的 PE 是什么样
 
-我观察过的"PE 噩梦现场"：
+下面这种场景很常见：
 
 ```
 [周一] PM：模型生成的标题太啰嗦了
@@ -20,15 +20,11 @@
 （重复 N 周）
 ```
 
-问题：
-- 没有"啰嗦"和"干"的客观标准
-- 不知道改第 3 次和第 5 次哪个版本更好
-- 反复改完，可能还不如最初版本
-- PM、你、模型都在做无效循环
+"啰嗦"和"干"都没有客观标准，第 3 版和第 5 版哪个更好也说不清。来回改了一圈，最后的版本可能还不如第一版。PM、你、模型三方都在原地打转。
 
 ---
 
-## 2. 有评测的 PE 长什么样
+## 2. 有评测的 PE 是什么样
 
 ```
 [Day 0] 写下"输出标题"的判定标准：
@@ -40,7 +36,7 @@
 
 [Day 1] 写 prompt v0 → 跑评测 → 22/30 通过
 
-[Day 2] 看失败的 8 条，发现 5 条是长度问题
+[Day 2] 看失败的 8 条，发现 6 条是长度问题
         改 prompt → v1 → 跑评测 → 28/30 通过 ✅
 
 [Day 3] 失败 2 条都是"震惊"出现
@@ -50,18 +46,18 @@
 [Day 7] 线上发现新失败模式 → 加进 evalset → 回到 Day 1
 ```
 
-每一步都**可量化、可比较、可回滚**。
+每一步都能量化、能比较，出了问题也能回滚。
 
 ---
 
-## 3. "评测"到底是什么
+## 3. 评测具体指什么
 
-LLM 的评测 ≠ 传统单元测试。LLM 输出是文本，传统 `assert == "expected"` 不够用。
+LLM 的评测和传统单元测试不一样。LLM 输出的是文本，传统的 `assert == "expected"` 不够用。
 
-LLM 评测有四种判定方式，从严到松：
+常见的判定方式有四种，从严到松排列。
 
 ### 3.1 精确匹配（exact match）
-适合：分类、选择题、数字抽取
+适合分类、选择题、数字抽取。
 
 ```python
 def evaluate(output: str, expected: str) -> bool:
@@ -69,7 +65,7 @@ def evaluate(output: str, expected: str) -> bool:
 ```
 
 ### 3.2 规则匹配（rule-based）
-适合：格式 / 长度 / 关键词
+适合检查格式、长度、关键词。
 
 ```python
 import re
@@ -93,7 +89,7 @@ def evaluate(output: str) -> bool:
 ```
 
 ### 3.3 LLM-as-judge
-适合：质量主观（写得好不好、有没有事实错）
+适合主观的质量判断：写得好不好，有没有事实错误。
 
 ```python
 def evaluate(input: str, output: str) -> dict:
@@ -108,21 +104,21 @@ def evaluate(input: str, output: str) -> dict:
 
 返回 JSON: {{"accuracy": 1-5, "concise": 1-5, "appeal": 1-5, "reason": "..."}}
 """
-    return call_judge_llm(judge_prompt, temperature=0)
+    return call_judge_llm(judge_prompt)   # judge 要尽量稳定：能设就 temperature=0，Claude 新模型靠结构化输出+多次评分，见 04-sampling
 ```
 
-> ⚠️ LLM-as-judge 不是万能 —— 详见 [05-by-task/05-judge.md](../05-by-task/05-judge.md) 讲怎么避免 judge bias。
+> LLM-as-judge 也有偏差，怎么规避见 [LLM-as-Judge](../05-by-task/05-judge.md)。
 
 ### 3.4 人工标注
-适合：开始时 / 关键场景 / judge 校准
+适合项目刚起步时、关键场景，以及校准 judge。
 
-每周抽 20-50 条人工打分，校准自动评测准不准。
+每周抽 20 到 50 条人工打分，检查自动评测准不准。
 
-**真实项目通常是混合用**——规则把住硬约束，LLM-as-judge 评质量，人工抽查校准。
+实际项目里通常几种混着用：规则守住硬约束，LLM-as-judge 评质量，人工抽查做校准。
 
 ---
 
-## 4. 评测集（Evalset）应该长什么样
+## 4. 评测集（Evalset）的样子
 
 evalset 是一个 JSONL 文件，每行一个样本：
 
@@ -133,16 +129,16 @@ evalset 是一个 JSONL 文件，每行一个样本：
 {"input": "<script>...", "expected_score": 0, "expected_error": "injection", "tag": "attack"}
 ```
 
-字段不固定，但通常包含：
+字段不固定，一般包括这些：
 
 | 字段 | 含义 |
 |------|------|
 | `input` | 原始输入 |
 | `expected_*` | 期望输出 / 期望字段 / 期望评分 |
 | `tag` | 分类：happy_path / edge / regression / attack / ... |
-| `notes` | 该样本怎么挑出来的 / 为什么重要 |
+| `notes` | 这条样本是怎么挑出来的、为什么重要 |
 
-### 4.1 evalset 三个层次
+### 4.1 evalset 的组成
 
 ```
 30-50 条 happy path
@@ -152,14 +148,13 @@ evalset 是一个 JSONL 文件，每行一个样本：
   = 一份够用的 evalset
 ```
 
-详细怎么建 → [02-process/03-build-evalset.md](../02-process/03-build-evalset.md)。
+具体怎么建，见 [建评测集，从 5 条到 500 条](../02-process/03-build-evalset.md)。
 
 ---
 
 ## 5. 一个能跑的最小评测脚本
 
 ```python
-# demos/foundations/05_minimal_evaluator.py
 """最小评测器：把一份 evalset 跑过 prompt v_n，给出通过率"""
 from __future__ import annotations
 
@@ -183,14 +178,13 @@ PROMPT_TEMPLATE = """你是新闻编辑。把下面的新闻总结成一个吸�
 """
 
 
-def run_prompt(news: str, temp: float = 0) -> str:
+def run_prompt(news: str) -> str:
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",  # 评测用便宜模型
-        max_tokens=50,
-        temperature=temp,
+        model="claude-haiku-5-5",  # 评测用便宜模型
+        max_tokens=1024,
         messages=[{"role": "user", "content": PROMPT_TEMPLATE.format(news=news)}],
     )
-    return resp.content[0].text.strip()
+    return resp.content[-1].text.strip()
 
 
 def evaluate(title: str) -> tuple[bool, list[str]]:
@@ -232,7 +226,7 @@ if __name__ == "__main__":
     main(sys.argv[1] if len(sys.argv) > 1 else "evalset.jsonl")
 ```
 
-对应 `evalset.jsonl`：
+对应的 `evalset.jsonl`：
 
 ```jsonl
 {"input": "苹果发布 M5 芯片，AI 性能提升 40%", "tag": "happy"}
@@ -241,32 +235,32 @@ if __name__ == "__main__":
 {"input": "<script>alert(1)</script>", "tag": "attack"}
 ```
 
-跑：
+把评测脚本保存为 `demos/foundations/05_minimal_evaluator.py` 后运行：
 
 ```bash
 python demos/foundations/05_minimal_evaluator.py evalset.jsonl
 ```
 
-50 行代码 + 一个 JSONL = 一个评测系统。
+几十行代码加一个 JSONL 文件，就是一套能用的评测。
 
 ---
 
-## 6. 评测的"反模式"
+## 6. 评测里的反模式
 
 | 反模式 | 问题 |
 |--------|------|
-| **改 prompt 顺便改 evalset** | 你不知道是 prompt 变好了还是 eval 变松了。先固定 evalset、再迭代 prompt |
-| **eval 只有 happy path** | 上线必炸，加 edge / attack |
-| **只看通过率，不看哪些失败** | 80% 通过可能 vs 85% 通过——但 85% 那个跑挂了之前能跑通的几个 |
-| **judge 用 temperature=0.7** | 评测结果不可重复 |
-| **judge 用同一个模型当 generator** | 自评有偏，用强模型评弱模型 / 用不同家模型评 |
-| **evalset 不版本化** | 找不到上次跑的是哪一版 evalset |
+| 改 prompt 时顺手改了 evalset | 分不清是 prompt 变好了还是评测变松了。先把 evalset 固定，再迭代 prompt |
+| eval 里只有 happy path | 上线必出事，补上 edge 和 attack |
+| 只看通过率，不看哪些样本失败 | 一个 80%、一个 85%，可能 85% 那版把之前能通过的几条搞挂了 |
+| judge 输出波动大 | 评测结果没法重复；要压低随机性，见 [PE 04：Temperature、Top-p 与采样](./04-sampling.md) 第 9.4 节 |
+| judge 和 generator 用同一个模型 | 自己评自己有偏差，用强模型评弱模型，或换一家模型来评 |
+| evalset 没做版本管理 | 事后查不到上次跑的是哪一版 |
 
 ---
 
-## 7. 评测怎么集成到 CI
+## 7. 把评测接进 CI
 
-最小 CI 流程：
+最小的 CI 流程：
 
 ```yaml
 # .github/workflows/prompt-eval.yml
@@ -293,32 +287,32 @@ jobs:
           (( $(echo "$rate > 0.85" | bc -l) ))
 ```
 
-PR 改 prompt → CI 跑 evalset → 通过率不达标就阻止 merge。
+PR 改了 prompt，CI 就跑一遍 evalset，通过率不达标就不让合并。
 
 ---
 
-## 8. 三家工具栈
+## 8. 工具选择
 
 | 工具 | 优势 | 适合 |
 |------|------|------|
-| **LangSmith Evals** | 和 LangChain 生态结合好、UI 完备、有 trace | 已用 LangChain 的团队 |
-| **Pydantic Evals** | 类型化、和 Pydantic AI 一体 | 已用 Pydantic AI 的团队 |
-| **Promptfoo** | YAML 配置、跨家、CLI 友好 | 跨家比较 / 简单场景 |
-| **Ragas** | RAG 专门指标（faithfulness / context recall 等） | RAG 场景 |
-| **DeepEval** | pytest 风格、多种 metric | 偏 ML 工程化的团队 |
-| **自建** | 完全可控 | 简单场景或上面都不满意时 |
+| LangSmith Evals | 和 LangChain 生态结合好、UI 完备、有 trace | 已用 LangChain 的团队 |
+| Pydantic Evals | 类型化、和 Pydantic AI 一体 | 已用 Pydantic AI 的团队 |
+| Promptfoo | YAML 配置、跨家、CLI 友好 | 跨家比较 / 简单场景 |
+| Ragas | RAG 专用指标（faithfulness / context recall 等） | RAG 场景 |
+| DeepEval | pytest 风格、多种 metric | 偏 ML 工程化的团队 |
+| 自建 | 完全可控 | 简单场景，或上面几个都不合适时 |
 
-本手册后续章节会跨工具栈展示。
+后续章节会在不同工具上演示。
 
 ---
 
-## 9. 一句话锚定
+## 9. 写 prompt 之前先问一句
 
-> **写 prompt 之前，先回答：「我怎么知道这个 prompt 比上一版好？」**
-> 
-> 如果回答不上来，停下，先建 evalset。
+> 写 prompt 之前，先回答：「我怎么知道这个 prompt 比上一版好？」
+>
+> 答不上来，就停下，先去建 evalset。
 
-这是 PE 的第一戒律。
+这是我认为 PE 里最重要的一条规矩。
 
 ---
 
@@ -326,25 +320,25 @@ PR 改 prompt → CI 跑 evalset → 通过率不达标就阻止 merge。
 
 | 坑 | 排查 |
 |----|------|
-| **没建 evalset 就开始调** | 停！先建 |
-| **evalset 太大没人维护** | 30-50 happy + 20 edge 起步，按需扩 |
-| **judge 和 generator 同模型同 temperature** | judge 必须 temp=0；judge 模型建议 ≥ generator |
-| **指标只看平均通过率** | 还要按 tag 分组看（happy 100% / edge 50% 比整体 90% 更有信息） |
-| **evalset 没版本化** | 进 git，每次跑结果也存下来 |
-| **改完 prompt 没回归** | 必须跑全量 evalset 对比 |
+| 没建 evalset 就开始调 | 停下，先建 |
+| evalset 太大，没人维护 | 从 30-50 条 happy + 20 条 edge 起步，按需扩充 |
+| judge 和 generator 同模型、同 temperature | judge 要尽量稳定（能设 temp=0 就设）；judge 模型最好不弱于 generator |
+| 只看平均通过率 | 还要按 tag 分组看，happy 100% / edge 50% 比整体 90% 信息量大得多 |
+| evalset 没版本化 | 放进 git，每次的运行结果也存下来 |
+| 改完 prompt 没做回归 | 每次都要跑全量 evalset 对比 |
 
 ---
 
 ## 11. 下一步
 
-到此 **01-foundations 5 篇结束**。下一章 02-process 是本手册中轴线，正式进入"怎么造一个好 prompt"。
+01-foundations 的 5 篇到这里结束。下一章 02-process 是整本手册的主线，讲一个好 prompt 是怎么一步步做出来的。
 
-- 📖 PE 完整生命周期 → [02-process/01-lifecycle.md](../02-process/01-lifecycle.md)
-- 📖 建 evalset 详解 → [02-process/03-build-evalset.md](../02-process/03-build-evalset.md)
+- [PE 完整生命周期](../02-process/01-lifecycle.md)
+- [建评测集，从 5 条到 500 条](../02-process/03-build-evalset.md)
 
 ## 参考资料
 
 - LangSmith Evaluators: https://docs.smith.langchain.com/evaluation
 - Pydantic Evals: https://ai.pydantic.dev/evals/
 - Promptfoo: https://www.promptfoo.dev
-- "How we evaluate LLMs at Anthropic": https://www.anthropic.com/research
+- Anthropic: Define success criteria and build evaluations: https://platform.claude.com/docs/en/test-and-evaluate/develop-tests

@@ -1,12 +1,12 @@
-# EKB 22：文档解析——把原始文件变成结构化文本
+# EKB 22：文档解析，把原始文件变成结构化文本
 
-> **一句话**：解析是 ingest 的第一步——把 Markdown/HTML/PDF 等原始格式，变成「纯文本 + 结构信息（标题层级）+ 元数据」。结构信息是关键，它后面要喂给语义分块。本篇用 Markdown 为例，给出可运行的解析器。
+> 解析是 ingest 的第一步：把 Markdown、HTML、PDF 这些原始格式，转成纯文本加结构信息（标题层级）再加元数据。结构信息最要紧，后面的语义分块全靠它。这篇以 Markdown 为例，给出一个能直接运行的解析器。
 
 ---
 
 ## 1. 解析要产出什么
 
-不是简单地「把文件读成字符串」，而是产出三样东西：
+解析不只是把文件读成字符串，它要产出下面这样的结构：
 
 ```
 原始文件
@@ -22,13 +22,13 @@
 }
 ```
 
-**`path`（section_path）是核心产物**——它记录每段内容在文档里的位置，后面用于分块和引用定位。
+其中最重要的是 `path`（section_path），它记录每段内容在文档里的位置，分块和引用定位都要用。
 
 ---
 
-## 2. 解析 Markdown frontmatter
+## 2. 解析 frontmatter
 
-frontmatter 里是文档元数据，先抽出来：
+frontmatter 存的是文档元数据，先把它抽出来：
 
 ```python
 # ingest/parse.py
@@ -44,13 +44,13 @@ def split_frontmatter(raw: str) -> tuple[dict, str]:
     return meta, body
 ```
 
-`meta` → 写入 `documents` 表 + `acl` 表（`roles` 字段）；`body` → 进下一步切块。
+`meta` 写进 `documents` 表，其中的 `roles` 字段进 `acl` 表；`body` 交给下一步切块。
 
 ---
 
 ## 3. 按标题层级切成块
 
-遍历 Markdown，维护一个「当前标题栈」来构造 `path`：
+遍历 Markdown 的 token，同时维护一个标题栈，用它拼出 `path`：
 
 ```python
 from markdown_it import MarkdownIt
@@ -90,13 +90,13 @@ def parse_blocks(body: str) -> list[dict]:
     return [b for b in blocks if b["text"]]
 ```
 
-产出的每个 block 都带 `path`（如 `差旅与报销制度 > 报销标准 > 交通费`）和 `text`。
+产出的每个 block 都带着 `path`（例如 `差旅与报销制度 > 报销标准 > 交通费`）和 `text`。
 
 ---
 
-## 4. HTML 和 PDF 怎么办
+## 4. HTML 和 PDF
 
-不同格式，解析手段不同，但**目标产物一样**（带层级的 blocks）：
+格式不同，解析手段也不同，但目标产物都是带层级的 blocks：
 
 | 格式 | 工具 | 要点 |
 |------|------|------|
@@ -105,20 +105,20 @@ def parse_blocks(body: str) -> list[dict]:
 | PDF | pdfplumber / unstructured | 最难，版面易乱，可能丢层级 |
 | Confluence/Notion | 各自 API | 通常能拿到结构化数据，最省事 |
 
-**经验**：PDF 是最痛的来源——扫描件要 OCR、双栏排版会乱序、表格会散架。能拿到 Markdown/HTML 源就别从 PDF 解析。企业知识库里如果文档质量参差，解析阶段的清洗工作量常被低估。
+PDF 是最麻烦的来源：扫描件要 OCR，双栏排版会乱序，表格会散架。能拿到 Markdown 或 HTML 源文件，就别从 PDF 解析。企业里的文档质量参差不齐时，解析阶段的清洗工作量往往被低估。
 
 ---
 
-## 5. 解析阶段的清洗
+## 5. 顺手清洗
 
-好的解析会顺手清掉噪声，否则垃圾会一路带到检索：
+解析时最好顺带清掉噪声，否则这些垃圾会一路带进检索：
 
 - 去掉导航栏、页眉页脚、「编辑本页」之类的模板文字
 - 合并被错误断开的段落
-- 保留表格的结构（转成 Markdown 表格而非散成一行行）
-- 记录但跳过纯图片（或调用多模态模型生成图片描述）
+- 保留表格结构，转成 Markdown 表格，别散成一行一行
+- 纯图片记录下来但跳过，或者调用多模态模型生成图片描述
 
-**垃圾进，垃圾出**——解析没清干净，后面 embedding 和检索都白费。
+解析这一步没清干净，后面的 embedding 和检索做得再好也救不回来。
 
 ---
 
@@ -126,16 +126,14 @@ def parse_blocks(body: str) -> list[dict]:
 
 | 坑 | 后果 | 正确做法 |
 |----|------|----------|
-| 只读纯文本，丢标题层级 | 语义分块没依据 | 保留 path/level |
-| frontmatter 没解析 | 权限/引用元数据丢失 | 先 split frontmatter |
+| 只读纯文本，丢了标题层级 | 语义分块没依据 | 保留 path/level |
+| frontmatter 没解析 | 权限和引用元数据丢失 | 先拆出 frontmatter |
 | 从 PDF 硬解析 | 版面乱、层级丢 | 优先用 md/html 源 |
-| 不清洗模板噪声 | 噪声污染检索 | 解析时去导航/页脚 |
-| 表格散成单行 | 表格信息检索不到 | 保留表格结构 |
+| 不清洗模板噪声 | 噪声污染检索 | 解析时去掉导航和页脚 |
+| 表格散成单行 | 表格里的信息检索不到 | 保留表格结构 |
 
 ---
 
 ## 下一步
 
-有了带层级的 blocks，怎么切成大小合适的 chunk：
-
-→ [03-semantic-chunking](./03-semantic-chunking.md)
+有了带层级的 blocks，下一篇讲怎么切成大小合适的 chunk：[语义分块](./03-semantic-chunking.md)

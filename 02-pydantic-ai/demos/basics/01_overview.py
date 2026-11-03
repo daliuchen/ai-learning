@@ -28,9 +28,9 @@ load_dotenv()
 def pick_model() -> str | TestModel:
     """根据环境变量决定用真实模型还是 TestModel。"""
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-5-haiku-latest"
+        return "anthropic:claude-haiku-4-5"
     print("[warn] 未检测到 API key，使用 TestModel 跑测试输出。\n")
     return TestModel()
 
@@ -43,7 +43,7 @@ class Invoice(BaseModel):
 
 def demo_text(model) -> None:
     print("===== 1) 纯文本回复 =====")
-    agent = Agent(model, system_prompt="你是一位简洁的助手，一句话回答。")
+    agent = Agent(model, instructions="你是一位简洁的助手，一句话回答。")
     result = agent.run_sync("Python 的 GIL 是什么？")
     print(result.output)
     print()
@@ -54,7 +54,7 @@ def demo_structured(model) -> None:
     agent = Agent(
         model,
         output_type=Invoice,
-        system_prompt="从用户消息中抽取发票信息。",
+        instructions="从用户消息中抽取发票信息。",
     )
     result = agent.run_sync("发票：阿里云 2024-01-15 ¥1280")
     print(repr(result.output))
@@ -63,7 +63,7 @@ def demo_structured(model) -> None:
 
 def demo_tool(model) -> None:
     print("===== 3) 带工具的 Agent =====")
-    agent = Agent(model, system_prompt="你是一位天气助手，需要时调用 get_weather 工具。")
+    agent = Agent(model, instructions="你是一位天气助手，需要时调用 get_weather 工具。")
 
     @agent.tool_plain
     def get_weather(city: str) -> str:
@@ -74,7 +74,7 @@ def demo_tool(model) -> None:
     result = agent.run_sync("北京和上海的天气分别怎么样？")
     print(result.output)
     print("\n— usage —")
-    print(result.usage())
+    print(result.usage)
     print()
 
 

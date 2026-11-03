@@ -1,6 +1,6 @@
 # LangChain 04：Output Parsers 与结构化输出
 
-> **一句话**：Output Parser 把 `AIMessage` 转成业务能用的类型（字符串/JSON/Pydantic 对象）。在现代模型时代，`with_structured_output` 是绝对首选，Parser 只在特殊场景才用。
+> Output Parser 负责把 `AIMessage` 转成业务能直接用的类型：字符串、JSON 或 Pydantic 对象。不过现在的模型大都支持原生结构化输出，首选是 `with_structured_output`（写 agent 时用 `create_agent(response_format=...)`），Parser 只剩一些特殊场景还用得上。这篇把两条路都讲一遍，最后给一个选型流程。
 
 ---
 
@@ -13,7 +13,7 @@ resp = model.invoke("给我三种水果的 JSON")
 # AIMessage(content='```json\n{"fruits": ["apple", ...]}\n```')
 ```
 
-业务代码不想处理 `AIMessage`，也不想自己写正则提取 JSON。Parser 帮你做这件事，且**它本身是 Runnable，能直接接在 chain 末端**：
+业务代码不想跟 `AIMessage` 打交道，更不想自己写正则抠 JSON。Parser 做的就是这件事，而且它本身也是 Runnable，能直接接在 chain 的末尾：
 
 ```python
 chain = prompt | model | JsonOutputParser()
@@ -22,17 +22,19 @@ result = chain.invoke({...})  # 已经是 dict
 
 ---
 
-## 2. 解决方案演进路线
+## 2. 几种方案的演进
 
 | 方案 | 难度 | 可靠性 | 现状 |
 |------|------|--------|------|
-| 字符串 prompt + 正则 | 高 | 低 | ❌ 已过时 |
+| 字符串 prompt + 正则 | 高 | 低 | 已过时 |
 | `JsonOutputParser` 提示模型输出 JSON | 中 | 中 | 旧模型可用 |
 | `PydanticOutputParser` | 中 | 中 | 旧模型可用 |
-| `with_structured_output(schema)` | **低** | **高** | ✅ **首选** |
+| `with_structured_output(schema)` | 低 | 高 | 首选 |
 | `bind_tools([schema])` 工具调用 | 低 | 高 | 内部机制 |
 
-**推荐**：能用 `with_structured_output` 就用它，它会自动选最佳实现（OpenAI 用 function calling 或 JSON Mode，Anthropic 用 tool use）。
+能用 `with_structured_output` 就用它。它会按供应商选合适的实现：OpenAI 默认走 JSON Schema 严格模式，Anthropic 用 tool use。
+
+> 写 agent（循环里有工具调用）时别对模型用 `with_structured_output`，应该用 `create_agent(response_format=...)`，见本篇第 6 节。
 
 ---
 
@@ -50,7 +52,7 @@ class Joke(BaseModel):
     punchline: str = Field(description="笑点")
     rating: int = Field(description="自评分 1-10")
 
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="gpt-6-luna")
 structured = model.with_structured_output(Joke)
 
 joke = structured.invoke("讲一个程序员笑话")
@@ -92,19 +94,19 @@ structured = model.with_structured_output(schema)
 
 ### 3.4 method 参数
 
-OpenAI 系列模型支持三种内部实现：
+OpenAI 系列模型（含千问等 OpenAI 兼容接口）支持三种内部实现：
 
 ```python
-model.with_structured_output(Joke, method="function_calling")  # 默认
-model.with_structured_output(Joke, method="json_mode")         # 仅约束 JSON 合法，不一定符合 schema
-model.with_structured_output(Joke, method="json_schema")       # OpenAI 新版严格模式（推荐 gpt-4o 系列）
+model.with_structured_output(Joke)                              # 默认就是 json_schema
+model.with_structured_output(Joke, method="function_calling")   # 走工具调用（langchain-openai 0.3 之前的默认）
+model.with_structured_output(Joke, method="json_mode")          # 仅约束 JSON 合法，不一定符合 schema
 ```
 
-`json_schema` 模式在新模型上**保证字段齐全**，比 function calling 更严格。
+默认值变过：`langchain-openai` 从 0.3 起默认是 `json_schema`。这是 OpenAI 的严格结构化输出，能保证字段齐全；网上不少文章还写着默认走 function_calling，那已经过时了。代价是 schema 限制更多，比如顶层不能是 `Union`（见第 7 节）。遇到不兼容的 schema 或模型，可以显式改回 `method="function_calling"`。
 
 ### 3.5 include_raw
 
-如果想同时拿原始 `AIMessage`：
+想同时拿到原始的 `AIMessage`：
 
 ```python
 structured = model.with_structured_output(Joke, include_raw=True)
@@ -112,7 +114,7 @@ result = structured.invoke("...")
 # {"raw": AIMessage(...), "parsed": Joke(...), "parsing_error": None}
 ```
 
-适合做错误回退处理。
+解析失败时可以拿原始消息做兜底处理。
 
 ---
 
@@ -120,7 +122,7 @@ result = structured.invoke("...")
 
 ### 4.1 StrOutputParser
 
-最朴素，`AIMessage` → `str`：
+最简单的一个，把 `AIMessage` 转成 `str`：
 
 ```python
 from langchain_core.output_parsers import StrOutputParser
@@ -157,12 +159,12 @@ from langchain_core.output_parsers import PydanticOutputParser
 parser = PydanticOutputParser(pydantic_object=Joke)
 ```
 
-效果同 `JsonOutputParser(pydantic_object=...)`，只是返回 Pydantic 对象。
+效果和 `JsonOutputParser(pydantic_object=...)` 一样，区别是返回 Pydantic 对象。
 
 ### 4.4 CSV / List
 
 ```python
-from langchain.output_parsers import CommaSeparatedListOutputParser
+from langchain_core.output_parsers import CommaSeparatedListOutputParser
 parser = CommaSeparatedListOutputParser()
 # 模型回 "苹果, 香蕉, 橙子" → ["苹果","香蕉","橙子"]
 ```
@@ -170,18 +172,18 @@ parser = CommaSeparatedListOutputParser()
 ### 4.5 DatetimeOutputParser
 
 ```python
-from langchain.output_parsers import DatetimeOutputParser
+from langchain_classic.output_parsers import DatetimeOutputParser   # 1.x 起在 langchain-classic
 parser = DatetimeOutputParser()
 # 模型回符合格式的字符串 → datetime 对象
 ```
 
 ### 4.6 EnumOutputParser
 
-限制输出为枚举值：
+把输出限制在几个枚举值里：
 
 ```python
 from enum import Enum
-from langchain.output_parsers import EnumOutputParser
+from langchain_classic.output_parsers import EnumOutputParser
 
 class Color(Enum):
     RED = "red"
@@ -193,20 +195,22 @@ parser = EnumOutputParser(enum=Color)
 
 ### 4.7 OutputFixingParser / RetryOutputParser
 
-JSON 解析失败时让另一个 LLM 修复：
+JSON 解析失败时，让另一个 LLM 来修：
 
 ```python
-from langchain.output_parsers import OutputFixingParser
+from langchain_classic.output_parsers import OutputFixingParser
 fixing = OutputFixingParser.from_llm(parser=parser, llm=model)
 ```
 
-`RetryOutputParser` 类似但会带上原 prompt 一起重试。
+> 4.5 到 4.7 这几个 Parser 在 1.x 里都搬进了 `langchain-classic`（`pip install langchain-classic`）。有了 `with_structured_output` 之后基本用不到，留着主要是方便读老代码。
+
+`RetryOutputParser` 用法类似，区别是重试时会带上原来的 prompt。
 
 ---
 
 ## 5. JsonOutputParser 流式
 
-`JsonOutputParser` 支持**部分 JSON 流式**，模型还没生成完时就能拿到不完整的 dict：
+`JsonOutputParser` 支持流式输出不完整的 JSON，模型还没生成完，就能先拿到一个部分填充的 dict：
 
 ```python
 parser = JsonOutputParser()
@@ -216,13 +220,33 @@ for partial in chain.stream({"input": "..."}):
     print(partial)  # 边生成边补全的 dict
 ```
 
-这是 LangChain 在工程上做得很漂亮的一个点，内部用了 partial-json 解析。
+内部用的是 partial-json 解析。前端需要边生成边渲染时，这个功能很好用。
+
+## 6. agent 里的结构化输出：create_agent(response_format=...)
+
+写 agent 时想让最终答案是一个对象，就传 `response_format`，结果在返回值的 `structured_response` 里：
+
+```python
+from pydantic import BaseModel
+from langchain.agents import create_agent
+from langchain.agents.structured_output import ToolStrategy, ProviderStrategy
+
+class Issue(BaseModel):
+    title: str
+    severity: str
+
+agent = create_agent(model, tools=[...], response_format=Issue)   # 直接传 schema = 自动选策略
+out = agent.invoke({"messages": [{"role": "user", "content": "登录页 500 报错，很紧急"}]})
+print(out["structured_response"])      # Issue(title=..., severity=...)
+```
+
+有两种策略。`ProviderStrategy(schema)` 用模型自己的原生结构化输出，最可靠，但要模型支持。`ToolStrategy(schema)` 把 schema 包装成一个工具让模型去调用，凡是支持 tool calling 的模型都能用，校验失败时会自动把错误交回模型重试。直接传 schema 的话，LangChain 会按模型能力自动选一种。schema 可以是 Pydantic、`dataclass`、`TypedDict` 或 JSON Schema；注意 dataclass 返回的是 dataclass 实例，不是 dict。
 
 ---
 
-## 6. 多分支抽取：with_structured_output + Union
+## 7. 多分支抽取：Union 要包一层
 
-模型有时要返回多种 schema 之一：
+有时模型要在几种 schema 里选一种返回。0.x 时可以直接写 `with_structured_output(Union[A, B])`，现在默认的 `json_schema` 模式下会直接报 `TypeError`。解决办法是把 Union 放进外层对象的一个字段里：
 
 ```python
 from typing import Union
@@ -235,17 +259,20 @@ class FactStatement(BaseModel):
     fact: str
     source: str
 
-model_with = model.with_structured_output(Union[Joke, FactStatement])
+class Answer(BaseModel):
+    result: Union[Joke, FactStatement]     # 让模型在两种形状里二选一
 
-resp = model_with.invoke("讲个笑话")     # 返回 Joke
-resp = model_with.invoke("告诉我一个事实")  # 返回 FactStatement
+model_with = model.with_structured_output(Answer)
+
+resp = model_with.invoke("讲个笑话").result          # Joke(...)
+resp = model_with.invoke("告诉我一个事实").result     # FactStatement(...)
 ```
 
-底层会作为多个 function 让模型自选。
+agent 里不受这个限制，`response_format=ToolStrategy(Union[Joke, FactStatement])` 可以直接传 Union。
 
 ---
 
-## 7. 自定义 Parser
+## 8. 自定义 Parser
 
 继承 `BaseOutputParser`：
 
@@ -259,11 +286,13 @@ class UpperCaseParser(BaseOutputParser[str]):
 chain = prompt | model | UpperCaseParser()
 ```
 
-支持流式的话实现 `_transform`，详见源码。
+要支持流式，再实现 `_transform`，具体看源码。
 
 ---
 
-## 8. 一段对比 demo
+## 9. 一段对比 demo
+
+完整代码：[`demos/langchain/04_structured.py`](../../demos/langchain/04_structured.py)
 
 ```python
 # demos/langchain/04_structured.py
@@ -278,7 +307,7 @@ class Issue(BaseModel):
     severity: str = Field(description="严重程度 low/medium/high")
     tags: list[str] = Field(description="标签")
 
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="gpt-6-luna")
 
 # ===== 方式 A：with_structured_output（推荐） =====
 structured = model.with_structured_output(Issue)
@@ -296,14 +325,15 @@ print(chain.invoke({"input": "登录页 500 报错，需要尽快修复"}))
 
 ---
 
-## 9. 选型决策树
+## 10. 选型决策树
 
 ```
 要结构化输出吗？
 ├─ 否 → StrOutputParser
 └─ 是
-   ├─ 用支持 function calling 的模型？（GPT/Claude/Gemini）
-   │  └─ ✅ with_structured_output(schema)
+   ├─ 用支持 function calling 的模型？（GPT/Claude/Gemini/千问）
+   │  ├─ 裸模型 → ✅ with_structured_output(schema)
+   │  └─ agent 里 → ✅ create_agent(response_format=schema)
    ├─ 本地小模型 / 不支持工具？
    │  ├─ JsonOutputParser + Few-shot
    │  └─ 失败率高？→ OutputFixingParser 兜底
@@ -313,21 +343,18 @@ print(chain.invoke({"input": "登录页 500 报错，需要尽快修复"}))
 
 ---
 
-## 10. 常见坑
+## 11. 常见坑
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `with_structured_output` 报错 schema 不支持 | 某些字段类型如 `set` 没法序列化 | 改 `list` |
-| 返回字段全为 None | prompt 没引导，模型不知道字段含义 | Pydantic 加 `description` |
-| 字段顺序混乱 | OpenAI function call 不保证顺序 | 字段顺序无意义，按 key 取 |
-| 数字字段返回字符串 | 模型回了 `"123"` | 用 Pydantic 自动校验 + 类型转换 |
-| 流式但 parser 卡住 | StrOutputParser 才支持 token 级流式，Json/Pydantic 是 chunk 级 | 接受 chunk 级即可 |
-| `include_raw=True` 后忘了取 `parsed` | 返回是 dict | `result["parsed"]` |
+| `with_structured_output` 报错 schema 不支持 | 某些字段类型如 `set` 没法序列化；`json_schema` 模式下顶层不能是 `Union` | 改 `list`；Union 包一层对象 |
+| `from langchain.output_parsers import EnumOutputParser` 找不到 | 1.x 搬到了 langchain-classic | `from langchain_classic.output_parsers import ...` |
+| 返回字段全是 None | 模型不知道字段是什么意思 | 给 Pydantic 字段加 `description` |
+| 字段顺序乱 | OpenAI function call 不保证顺序 | 顺序本来就不重要，按 key 取 |
+| 数字字段返回了字符串 | 模型回的是 `"123"` | 交给 Pydantic 校验并自动转换类型 |
+| 开了流式，结果却一次性全出来 | `JsonOutputParser` / `PydanticOutputParser` 本身会逐步吐出部分结果，卡住的通常是链里不支持流式的一步（如普通函数包成的 `RunnableLambda`） | 检查中间步骤，必要时改成生成器函数 |
+| 开了 `include_raw=True` 却忘了取 `parsed` | 返回值是 dict | 用 `result["parsed"]` |
 
 ---
 
-## 11. 本章 demo
-
-[`demos/langchain/04_structured.py`](../../demos/langchain/04_structured.py)
-
-下一篇：[05-lcel.md](05-lcel.md) — LangChain 灵魂 LCEL 全解。
+下一篇讲 LCEL：[LangChain 05：LCEL 与 Runnable 体系](05-lcel.md)

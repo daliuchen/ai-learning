@@ -25,7 +25,10 @@ from dataclasses import dataclass, field
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
-from pydantic_graph import BaseNode, End, Graph, GraphRunContext
+from pydantic_graph import BaseNode, End, GraphBuilder, GraphRunContext, StepContext
+
+# 有千问 key 用千问（OpenAI 兼容端点），否则用内置 test 模型
+MODEL_NAME = "openai-chat:qwen-flash" if os.getenv("OPENAI_API_KEY") else "test"
 
 load_dotenv()
 
@@ -62,10 +65,10 @@ class ResearcherDeps:
 
 
 researcher = Agent[ResearcherDeps, str](
-    "openai:gpt-4o-mini",
+    MODEL_NAME,
     deps_type=ResearcherDeps,
     output_type=str,
-    system_prompt=(
+    instructions=(
         "你是一名资深研究员。给定主题，调用 search 工具收集 3-5 条最有价值的资料，"
         "然后整理成研究笔记（800 字以内）：列出核心要点、关键 url 和相互矛盾的信息。"
         "禁止凭印象回答，必须先调 search。"
@@ -77,9 +80,9 @@ researcher = Agent[ResearcherDeps, str](
 async def search(ctx: RunContext[ResearcherDeps], query: str) -> list[dict]:
     """用 DuckDuckGo 搜索（无需 API key）。"""
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS  # 包名已从 duckduckgo_search 改为 ddgs（pip install "pydantic-ai-slim[duckduckgo]"）
     except ImportError:
-        return [{"title": "DDG 未安装", "url": "", "snippet": "pip install duckduckgo-search"}]
+        return [{"title": "DDG 未安装", "url": "", "snippet": "pip install ddgs"}]
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=ctx.deps.search_max_results))
@@ -97,9 +100,9 @@ async def search(ctx: RunContext[ResearcherDeps], query: str) -> list[dict]:
 # ============================================================
 
 writer = Agent(
-    "openai:gpt-4o-mini",
+    MODEL_NAME,
     output_type=ResearchReport,
-    system_prompt=(
+    instructions=(
         "你是一名技术作家。基于提供的研究笔记起草结构化报告。"
         "如果有审稿意见（Review），严格按建议修订；务必引用研究笔记里出现的 url 到 references 字段。"
     ),
@@ -111,9 +114,9 @@ writer = Agent(
 # ============================================================
 
 reviewer = Agent(
-    "openai:gpt-4o-mini",
+    MODEL_NAME,
     output_type=Review,
-    system_prompt=(
+    instructions=(
         "你是一名严苛的总编。对提供的报告打分（0-10），列 pros / issues，"
         "并给出可操作的修改建议。评分维度：准确性、完整性、引用、可读性。"
         "score >= 8 才能放行。第一轮通常 5-7 分，修订后才给 8+。"
@@ -204,7 +207,22 @@ class Review_(BaseNode[ResearchState, None, ResearchReport]):
         return Write()
 
 
-graph = Graph(nodes=[Research, Write, Review_])
+# 新版 pydantic-graph：GraphBuilder 装配 → build() 出可执行的 Graph
+g = GraphBuilder(state_type=ResearchState, input_type=None, output_type=ResearchReport)
+
+
+@g.step
+async def start(ctx: StepContext[ResearchState, None, None]) -> Research:
+    return Research()
+
+
+g.add(
+    g.node(Research),
+    g.node(Write),
+    g.node(Review_),
+    g.edge_from(g.start_node).to(start),
+)
+graph = g.build()
 
 
 # ============================================================
@@ -213,16 +231,16 @@ graph = Graph(nodes=[Research, Write, Review_])
 
 async def main(topic: str, max_iter: int = 3) -> None:
     state = ResearchState(topic=topic, max_iter=max_iter)
-    result = await graph.run(Research(), state=state)
+    output = await graph.run(state=state)  # 直接返回 End(...) 里的 ResearchReport
 
     print("\n" + "=" * 60)
     print("FINAL REPORT")
     print("=" * 60)
-    if result.output:
-        print(result.output.model_dump_json(indent=2, exclude_none=True))
+    if output:
+        print(output.model_dump_json(indent=2, exclude_none=True))
         # 保存
         with open("report.json", "w", encoding="utf-8") as f:
-            f.write(result.output.model_dump_json(indent=2, exclude_none=True))
+            f.write(output.model_dump_json(indent=2, exclude_none=True))
         print(f"\n💾 已保存到 report.json")
     print(
         f"\n经过 {state.iteration} 轮迭代，"
@@ -233,8 +251,7 @@ async def main(topic: str, max_iter: int = 3) -> None:
 
 if __name__ == "__main__":
     if not os.getenv("OPENAI_API_KEY"):
-        print("❌ 请先在 .env 设置 OPENAI_API_KEY")
-        sys.exit(1)
+        print("[!] 未设置 OPENAI_API_KEY：三个 Agent 都用 test 模型，只演示图的流转\n")
 
     topic = sys.argv[1] if len(sys.argv) > 1 else "Pydantic AI 的核心特性"
     asyncio.run(main(topic, max_iter=3))

@@ -26,7 +26,7 @@ from pydantic_ai.models.test import TestModel
 
 # 没设 key 时整个 demo 走 TestModel
 USE_TEST_MODEL = not os.getenv("OPENAI_API_KEY")
-MODEL_NAME = "openai:gpt-4o-mini"
+MODEL_NAME = "openai-chat:qwen-flash" if os.getenv("OPENAI_API_KEY") else "test"  # 没 key 时用内置 test 模型
 
 
 # =====================================================================
@@ -34,12 +34,12 @@ MODEL_NAME = "openai:gpt-4o-mini"
 # =====================================================================
 translator = Agent(
     MODEL_NAME,
-    system_prompt="你是一名翻译，把任何输入翻译成英文，只输出译文。",
+    instructions="你是一名翻译，把任何输入翻译成英文，只输出译文。",
 )
 
 main_agent = Agent(
     MODEL_NAME,
-    system_prompt="你是助手。需要把中文翻译成英文时，调用 translate 工具。",
+    instructions="你是助手。需要把中文翻译成英文时，调用 translate 工具。",
 )
 
 
@@ -63,7 +63,7 @@ async def demo_agent_as_tool() -> None:
     else:
         r = await main_agent.run("把'今天天气真好'翻译成英文")
     print("输出:", r.output)
-    print("总 token:", r.usage())
+    print("总 token:", r.usage)
 
 
 # =====================================================================
@@ -83,16 +83,16 @@ class ValidatedTicket(BaseModel):
 
 
 extractor = Agent(MODEL_NAME, output_type=ExtractedTicket,
-                  system_prompt="从用户描述中抽取工单结构。")
+                  instructions="从用户描述中抽取工单结构。")
 validator = Agent(MODEL_NAME, output_type=ValidatedTicket,
-                  system_prompt="校验工单并判断是否重复。is_duplicate 默认 false。")
+                  instructions="校验工单并判断是否重复。is_duplicate 默认 false。")
 
 
 async def pipeline(raw: str) -> ValidatedTicket:
     step1 = await extractor.run(raw)
     step2 = await validator.run(
         f"校验以下工单：{step1.output.model_dump_json()}",
-        usage=step1.usage(),
+        usage=step1.usage,
     )
     return step2.output
 
@@ -118,13 +118,13 @@ class Routing(BaseModel):
 frontdesk = Agent(
     MODEL_NAME,
     output_type=Routing,
-    system_prompt=(
+    instructions=(
         "你是客服前台，判断用户问题应该转给：tech（技术）、billing（账单）"
         "或 self（你自己直接回答闲聊）。reason 写一句话说明。"
     ),
 )
-tech = Agent(MODEL_NAME, system_prompt="你是技术支持，简洁专业地回复。")
-billing = Agent(MODEL_NAME, system_prompt="你是账单专员，回答账单相关问题。")
+tech = Agent(MODEL_NAME, instructions="你是技术支持，简洁专业地回复。")
+billing = Agent(MODEL_NAME, instructions="你是账单专员，回答账单相关问题。")
 AGENTS = {"tech": tech, "billing": billing}
 
 
@@ -135,7 +135,7 @@ async def handle_handoff(question: str) -> str:
     if target == "self":
         return routing.output.reason
     agent = AGENTS[target]
-    answer = await agent.run(question, usage=routing.usage())
+    answer = await agent.run(question, usage=routing.usage)
     return answer.output
 
 
@@ -160,8 +160,8 @@ async def demo_handoff() -> None:
 # =====================================================================
 # 模式 4：Message Bus（asyncio.Queue + 多个 worker）
 # =====================================================================
-summarizer = Agent(MODEL_NAME, system_prompt="一句话总结这条日志。")
-alerter = Agent(MODEL_NAME, system_prompt="判断这条日志是否需要告警，只回 yes 或 no。")
+summarizer = Agent(MODEL_NAME, instructions="一句话总结这条日志。")
+alerter = Agent(MODEL_NAME, instructions="判断这条日志是否需要告警，只回 yes 或 no。")
 
 
 async def demo_message_bus() -> None:

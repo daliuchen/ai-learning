@@ -1,23 +1,30 @@
-# 企业知识库实战 —— 依赖
+# 企业知识库实战 —— 依赖（版本基线：2026-11，Python 3.12 实测）
 # AI 服务核心
-pydantic-ai>=0.0.14
-openai>=1.40.0
-anthropic>=0.34.0
+pydantic-ai>=2.64          # V2：默认带 OpenAI / Anthropic / Google；其它 provider 用 extra
+openai>=3.0              # embedding 调用 + OpenAI 兼容端点（千问 / DashScope）
+# anthropic 不用单独装：pydantic-ai 已带
 
-# 检索 / 向量
-pgvector>=0.3.0
-psycopg[binary]>=3.2.0
+# 检索 / 向量（Postgres 侧需要 pgvector 扩展 0.8+，docker 镜像 pgvector/pgvector:pg17）
+pgvector>=0.5.0
+psycopg[binary]>=3.3.0
 rank-bm25>=0.2.2          # BM25 关键词检索
-sentence-transformers>=3.0.0  # 本地 embedding / rerank（可选）
+jieba>=0.42.1             # 中文分词（BM25 必需）
+# sentence-transformers>=3.0.0  # 本地 embedding / rerank（可选，按需取消注释；会拖入 torch，很大）
 
 # 文档解析 / 分块
-markdown-it-py>=3.0.0
+markdown-it-py>=4.0.0
 beautifulsoup4>=4.12.0
+pyyaml>=6.0               # 解析 frontmatter（ingest/parse.py）
 
 # Web 服务
-fastapi>=0.115.0
-uvicorn>=0.30.0
-sse-starlette>=2.1.0      # SSE 流式回答
+fastapi>=0.162.0
+uvicorn>=0.54.0
+sse-starlette>=3.6.0      # SSE 流式回答
+python-multipart>=0.0.20  # FastAPI 接收上传文件 / 表单（文档后台）
+httpx>=0.28.0             # 测试 SSE 用
 
 # 评估
-numpy>=1.26.0
+numpy>=2.0.0
+
+# 可观测（可选）
+# logfire>=5.0

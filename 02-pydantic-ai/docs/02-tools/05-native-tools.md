@@ -1,6 +1,8 @@
 # Pydantic AI 02-05：Native Tools 模型内置工具
 
-> **一句话**：Native Tools 是"模型 provider 自带、由 provider 在云端执行"的工具（OpenAI 的 web search、Anthropic 的 code execution、Google 的 url context……），Pydantic AI 用统一接口暴露，你只管声明，不用写函数体。
+> 有一类工具不用你写函数体：OpenAI 的 web search、Anthropic 的 code execution、Google 的 url context，都由模型 provider 在自己的云端执行。Pydantic AI 把它们统一成 native tools，你只要声明要用哪个。这篇讲怎么挂载、各家支持到什么程度，以及怎么写才能在 provider 之间切换。
+
+以 `pydantic-ai 2.64.0` 为准。V1 的 `builtin_tools=` 在 V2 改名为 native tools，通过 `NativeTool` capability 挂载。千问等兼容端点没有原生工具，本篇示例需要 Anthropic、OpenAI Responses 或 Google 的 key。
 
 ---
 
@@ -17,8 +19,8 @@ Native tool        ✨ 没有函数体 ✨  模型 provider 直接在它自己�
 | 函数体谁写 | 你 | Pydantic AI | 不用写 |
 | 执行在哪 | 你本地 | 你本地 | provider 云端 |
 | 计费 | 模型 token | 模型 token + 第三方 API | 模型 token + provider 工具费 |
-| 跨 provider | ✅ | ✅ | ❌（看 provider 支持矩阵） |
-| 典型例子 | 查 DB | DDG 搜索 | OpenAI web_search / Anthropic code execution |
+| 跨 provider | 可以 | 可以 | 不一定，看各家支持情况 |
+| 例子 | 查 DB | DDG 搜索 | OpenAI web_search / Anthropic code execution |
 
 ---
 
@@ -34,23 +36,24 @@ from pydantic_ai import (
     MemoryTool,          # 记忆
     MCPServerTool,       # 把 MCP 当 native（由 provider 代理通信）
     FileSearchTool,      # 文件向量检索（RAG）
+    AdvisorTool,         # 让快模型在生成中途咨询强模型（Anthropic、OpenRouter）
 )
 ```
 
-所有 native tool 都从 `pydantic_ai`（或 `pydantic_ai.native_tools`）顶层导出。
+所有 native tool 都可以从 `pydantic_ai`（或 `pydantic_ai.native_tools`）顶层导入。
 
 ---
 
 ## 3. 怎么用：`capabilities=[NativeTool(...)]`
 
-跟 function tool 不一样，**native tool 通过 `capabilities` 注册**：
+和 function tool 不同，native tool 通过 `capabilities` 注册：
 
 ```python
 from pydantic_ai import Agent, WebSearchTool
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5-5',
     capabilities=[NativeTool(WebSearchTool())],
 )
 
@@ -58,20 +61,20 @@ result = agent.run_sync('Biggest AI news this week.')
 print(result.output)
 ```
 
-为什么要包 `NativeTool(...)`？因为 capability 系统是 Pydantic AI 用来挂"模型层能力"的统一入口，`NativeTool` 是其中一个。
+为什么要包一层 `NativeTool(...)`？capability 是 Pydantic AI 挂载模型层能力的统一入口，`NativeTool` 是其中一种。
 
 ---
 
 ## 4. WebSearchTool
 
-最常用的 native 工具。配置参数因 provider 而异：
+用得最多的 native 工具。能配哪些参数，因 provider 而异：
 
 ```python
 from pydantic_ai import Agent, WebSearchTool, WebSearchUserLocation
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5-5',
     capabilities=[
         NativeTool(
             WebSearchTool(
@@ -90,42 +93,43 @@ agent = Agent(
 )
 ```
 
-### 4.1 Provider 支持矩阵
+### 4.1 Provider 支持情况
 
 | Provider | WebSearch | 备注 |
 |----------|-----------|------|
-| OpenAI Responses (`openai-responses:gpt-5.2`) | ✅ | 必须用 Responses API |
-| Anthropic (`anthropic:claude-sonnet-4-6`) | ✅ | 全特性支持 |
-| Google (`google:gemini-...`) | ✅ | 不支持参数；流式时没有 `NativeToolCallPart`；不能同时用 function tools |
-| xAI (`xai:grok-...`) | ✅ | 支持 `blocked_domains` / `allowed_domains` |
-| Groq | ✅ | 仅 compound models |
-| OpenAI Chat Completions | ❌ | 用 Responses API 替代 |
-| Bedrock / Mistral / Cohere | ❌ | 不支持 |
+| OpenAI Responses （`openai:` 默认就是 Responses API） | 支持 | 必须用 Responses API |
+| Anthropic （`anthropic:`） | 支持 | 全部特性 |
+| Google (`google:gemini-...`) | 支持 | 不支持参数（带限制参数会被视为不支持）；Gemini 3 起可以和 function tools 同时用，更早的 Gemini 不行 |
+| OpenRouter | 支持 | 走 OpenRouter 的 web-search server tool |
+| xAI (`xai:grok-...`) | 支持 | 支持 `blocked_domains` / `allowed_domains` |
+| Groq | 支持 | 仅 compound models |
+| OpenAI Chat Completions（`openai-chat:`，包括千问等兼容端点） | 不支持 | 改用 Responses API（`openai:`） |
+| Bedrock / Mistral / Cohere | 不支持 | |
 
-### 4.2 参数支持矩阵
+### 4.2 参数支持情况
 
 | 参数 | OpenAI | Anthropic | xAI | Groq |
 |------|--------|-----------|-----|------|
-| `search_context_size` | ✅ | ❌ | ❌ | ❌ |
-| `user_location` | ✅ | ✅ | ❌ | ❌ |
-| `blocked_domains` | ❌ | ✅ | ✅ | ✅ |
-| `allowed_domains` | ✅ | ✅ | ✅ | ✅ |
-| `max_uses` | ❌ | ✅ | ❌ | ❌ |
+| `search_context_size` | 支持 | 不支持 | 不支持 | 不支持 |
+| `user_location` | 支持 | 支持 | 不支持 | 不支持 |
+| `blocked_domains` | 不支持 | 支持 | 支持 | 支持 |
+| `allowed_domains` | 支持 | 支持 | 支持 | 支持 |
+| `max_uses` | 不支持 | 支持 | 不支持 | 不支持 |
 
-> **Anthropic 注意**：`blocked_domains` 和 `allowed_domains` 二选一，不能同时用。
+> Anthropic 上 `blocked_domains` 和 `allowed_domains` 只能二选一。
 
 ---
 
 ## 5. CodeExecutionTool
 
-让模型在 provider 沙箱里跑代码，做计算 / 数据分析最爽：
+让模型在 provider 的沙箱里跑代码，做计算和数据分析很合适：
 
 ```python
 from pydantic_ai import Agent, CodeExecutionTool
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5-5',
     capabilities=[NativeTool(CodeExecutionTool())],
 )
 
@@ -133,18 +137,18 @@ r = agent.run_sync('Calculate the factorial of 50 and tell me the digit count.')
 print(r.output)
 ```
 
-支持矩阵：
+支持情况：
 
 | Provider | Code Execution | 备注 |
 |----------|----------------|------|
-| OpenAI | ✅ | 可生成图（charts）到 `result.response.images` |
-| Anthropic | ✅ | Sonnet 4+ |
-| Google | ✅ | 不能同时用 function tools |
-| xAI | ✅ | 全特性 |
-| Bedrock | ✅ | 仅 Nova 2.0 |
-| 其他 | ❌ | |
+| OpenAI | 支持 | 生成的图（charts）可以放到 `result.response.images` |
+| Anthropic | 支持 | Sonnet 4+ |
+| Google | 支持 | Gemini 3 起可与 function tools 共用 |
+| xAI | 支持 | 全部特性 |
+| Bedrock | 支持 | 仅 Nova 2.0 |
+| 其他 | 不支持 | |
 
-### 5.1 拿到执行 log / 生成的图
+### 5.1 拿到执行日志和生成的图
 
 执行细节在 `result.response.native_tool_calls` 里：
 
@@ -154,14 +158,14 @@ for call, ret in result.response.native_tool_calls:
     print(ret.content)  # stdout / stderr / files
 ```
 
-OpenAI 上若想拿生成的图作为输出，开 model setting：
+在 OpenAI 上想把生成的图当作输出，要打开对应的 model setting：
 
 ```python
 from pydantic_ai.models.openai import OpenAIResponsesModelSettings
 from pydantic_ai import BinaryImage
 
 agent = Agent(
-    'openai-responses:gpt-5.2',
+    'openai:gpt-6.1-sol',
     capabilities=[NativeTool(CodeExecutionTool())],
     output_type=BinaryImage,
     model_settings=OpenAIResponsesModelSettings(openai_include_code_execution_outputs=True),
@@ -172,14 +176,14 @@ agent = Agent(
 
 ## 6. ImageGenerationTool
 
-生成图：
+生成图片：
 
 ```python
 from pydantic_ai import Agent, BinaryImage, ImageGenerationTool
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'openai-responses:gpt-5.2',
+    'openai:gpt-6.1-sol',
     capabilities=[NativeTool(ImageGenerationTool())],
     output_type=BinaryImage,
 )
@@ -188,7 +192,7 @@ r = agent.run_sync('Draw an axolotl wearing a hat.')
 assert isinstance(r.output, BinaryImage)
 ```
 
-支持矩阵：仅 **OpenAI Responses** 和 **Google**（Gemini Image 模型）。
+目前只有 OpenAI Responses 和 Google（Gemini Image 模型）支持。
 
 配置：
 
@@ -205,43 +209,44 @@ ImageGenerationTool(
 
 ---
 
-## 7. WebFetchTool / UrlContextTool
+## 7. WebFetchTool
 
-抓网页内容塞进上下文：
+把网页内容抓进上下文：
 
 ```python
 from pydantic_ai import Agent, WebFetchTool
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5-5',
     capabilities=[NativeTool(WebFetchTool())],
 )
 
-r = agent.run_sync('Summarize https://ai.pydantic.dev')
+r = agent.run_sync('Summarize https://pydantic.dev/docs/ai')
 ```
 
-Google 上对应的概念叫 **UrlContextTool**（Gemini 1.5+），用法类似。
+目前支持它的是 Anthropic 和 Google。在 Google 上，同一个 `WebFetchTool` 会被映射成 Gemini 的 URL context 工具，不需要换类（V1 时代单独的 `UrlContextTool` 在 V2 里已经没有了）。
 
-> 想跨 provider 通吃，用 `WebFetch` capability（高层抽象，自动 fallback 到 common `web_fetch_tool`）。
+> 要在所有 provider 上都能用，换成 `WebFetch` capability，它是更高一层的封装，不支持时自动回退到 common 的 `web_fetch_tool`。
 
 ---
 
 ## 8. MemoryTool / FileSearchTool / XSearchTool / MCPServerTool
 
-- `MemoryTool`：让模型自己写/读"长期记忆"，Anthropic 提出，OpenAI 也跟进
-- `FileSearchTool`：基于上传文件的 RAG（OpenAI Vector Stores / Anthropic Files）
-- `XSearchTool`：搜 X/Twitter，xAI 独占
-- `MCPServerTool`：把远程 MCP 服务当 native 工具，由 provider 代理通信
+- `MemoryTool`：让模型自己读写长期记忆，Anthropic 先提出，OpenAI 随后也支持了
+- `FileSearchTool`：基于上传文件做 RAG（OpenAI Vector Stores / Anthropic Files）
+- `XSearchTool`：搜 X/Twitter，只有 xAI 有
+- `MCPServerTool`：把远程 MCP 服务当 native 工具，由 provider 代为通信（更高层的写法是 `MCP(url, native=True)` capability，不支持时回退到本地连接）
+- `AdvisorTool`：让执行任务的快模型在生成途中去问一个更强的顾问模型（Anthropic、OpenRouter 支持）
 
-这些工具用法一致——都是 `NativeTool(...)` 包一下：
+用法都一样，用 `NativeTool(...)` 包一下：
 
 ```python
 from pydantic_ai import Agent, MemoryTool, FileSearchTool, MCPServerTool
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'openai-responses:gpt-5.2',
+    'openai:gpt-6.1-sol',
     capabilities=[
         NativeTool(MemoryTool()),
         NativeTool(FileSearchTool(vector_store_ids=['vs_xxx'])),
@@ -253,7 +258,7 @@ agent = Agent(
 
 ## 9. 动态配置：`NativeTool(callable)`
 
-`WebSearchTool` 经常要按用户地理位置定制，可以传**一个函数**给 `NativeTool`，每次 run 时动态生成工具：
+`WebSearchTool` 经常要按用户所在地定制。可以给 `NativeTool` 传一个函数，每次运行时动态生成工具：
 
 ```python
 from pydantic_ai import Agent, RunContext, WebSearchTool
@@ -265,36 +270,31 @@ async def prepared_web_search(ctx: RunContext[dict]) -> WebSearchTool | None:
     return WebSearchTool(user_location={'city': ctx.deps['location']})
 
 agent = Agent(
-    'openai-responses:gpt-5.2',
+    'openai:gpt-6.1-sol',
     capabilities=[NativeTool(prepared_web_search)],
     deps_type=dict,
 )
 ```
 
-返回 `None` → 这次 run 不开工具；返回工具实例 → 用它。和 function tool 的 `prepare` 钩子神似。
+返回 `None`，这次运行就不开这个工具；返回工具实例就用它。思路和 function tool 的 `prepare` 钩子一样。
 
 ---
 
-## 10. 跨 provider 写法：用 capability 抽象
+## 10. 跨 provider 写法：用 capability
 
-如果项目要在多家 provider 之间切，**不要写死 `NativeTool(...)`**，用更高层的 capability：
+项目要在几家 provider 之间切换时，不要写死 `NativeTool(...)`，改用更高层的 capability：
 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import WebSearch, WebFetch, ImageGeneration, MCP
 
 agent = Agent(
-    'openai:gpt-4o-mini',
-    capabilities=[WebSearch(), WebFetch(), ImageGeneration()],
+    'openai:gpt-6.1-sol',
+    capabilities=[WebSearch(local='duckduckgo'), WebFetch(local=True), ImageGeneration()],
 )
 ```
 
-行为：
-
-- 当前 model 支持 native → 用 native
-- 不支持 → 自动 fallback 到 common tool（如 `duckduckgo_search_tool`）
-
-业务代码一行不改，只换 `Agent(model=...)` 字符串。
+当前模型支持原生工具就用原生的；不支持时，回退到你通过 `local=` 指定的 common tool（比如 `duckduckgo_search_tool`）。业务代码不用改，换的只是 `Agent(model=...)` 里的字符串。
 
 ---
 
@@ -304,24 +304,24 @@ agent = Agent(
 |------|---------------|-------------|
 | 你写函数体 | 必须 | 不用 |
 | 注册方式 | `tools=[]` / `@agent.tool` | `capabilities=[NativeTool(...)]` |
-| 控制粒度 | 完全可控 | 看 provider 暴露多少参数 |
-| 计费 | 你掏第三方钱 | provider 收工具费 |
+| 控制粒度 | 完全可控 | 取决于 provider 暴露多少参数 |
+| 计费 | 你付第三方的费用 | provider 收工具费 |
 | 失败重试 | `ModelRetry` | provider 内部处理 |
 | 观测 | `ToolCallPart` / `ToolReturnPart` | `NativeToolCallPart` / `NativeToolReturnPart` |
-| 与 function tool 共存 | / | OpenAI / Anthropic 可以；Google **不行** |
+| 与 function tool 共存 | / | OpenAI / Anthropic 可以；Google 的 Gemini 3 起可以，更早的不行 |
 
-> ⚠️ **Google 限制**：用了 native tool 就**不能同时**用 function tool 或 tool-output mode。要结构化输出请用 `PromptedOutput`。
+> Google 有个限制：Gemini 3 之前的模型用了 native tool，就不能同时用 function tool 或 tool-output 模式，要结构化输出得用 `PromptedOutput`。Gemini 3 起支持这些组合（包括 `NativeOutput`）。
 
 ---
 
-## 12. 实战：搜索 + 代码执行的"数据 Agent"
+## 12. 实战：搜索 + 代码执行的数据 Agent
 
 ```python
 from pydantic_ai import Agent, CodeExecutionTool, WebSearchTool
 from pydantic_ai.capabilities import NativeTool
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5-5',
     capabilities=[
         NativeTool(WebSearchTool(max_uses=3)),
         NativeTool(CodeExecutionTool()),
@@ -338,7 +338,7 @@ r = agent.run_sync('Average box-office of top 5 animated films in 2025?')
 print(r.output)
 ```
 
-模型会自己"先搜、再算、最后讲"，每一步都在 Anthropic 云端跑，本地不写一行函数。
+模型会先搜索、再计算、最后解释，每一步都在 Anthropic 那边执行，本地一个函数都不用写。
 
 ---
 
@@ -346,25 +346,26 @@ print(r.output)
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `UserError: provider does not support WebSearchTool` | 模型不支持 | 切 provider，或用 `WebSearch` capability fallback |
-| OpenAI 上 `WebSearchTool` 不工作 | 用了 Chat Completions API | 切到 `openai-responses:...` |
-| Google 上同时用 native + function tool 报错 | Google 限制 | 二选一，结构化输出用 `PromptedOutput` |
-| Anthropic `blocked_domains` + `allowed_domains` 同传报错 | Anthropic 互斥 | 二选一 |
-| native 工具结果取不到 | 看错地方了 | `result.response.native_tool_calls` 不是 `all_messages()` |
+| `UserError: provider does not support WebSearchTool` | 模型不支持 | 换 provider，或用 `WebSearch` capability 回退 |
+| OpenAI 上 `WebSearchTool` 不工作 | 用了 Chat Completions API（`openai-chat:`） | 改成 `openai:...`（Responses） |
+| 老版 Gemini 上同时用 native 和 function tool 报错 | Gemini 3 之前不支持这种组合 | 二选一，结构化输出用 `PromptedOutput`；或换 Gemini 3 |
+| 千问 / DeepSeek 等兼容端点用 native 工具报 `UserError` | 它们走 Chat Completions，没有原生工具 | 用 `WebSearch(local=...)` 这类 capability 回退到本地工具 |
+| Anthropic 同时传 `blocked_domains` 和 `allowed_domains` 报错 | Anthropic 上两者互斥 | 二选一 |
+| 取不到 native 工具的结果 | 找错地方了 | 看 `result.response.native_tool_calls`，不是 `all_messages()` |
 | OpenAI code execution 没出图 | 没开 model setting | `OpenAIResponsesModelSettings(openai_include_code_execution_outputs=True)` |
-| 费用突然飙升 | native 工具有自己的计费 | 用 `max_uses` 限制 / Logfire 追 |
+| 费用突然上涨 | native 工具单独计费 | 用 `max_uses` 限制，用 Logfire 追踪 |
 | 流式时拿不到 native tool 事件 | Google 上不发流 | 用非流式 |
 
 ---
 
 ## 14. 生产建议
 
-1. **跨 provider 一律用 capability 抽象**（`WebSearch()` / `WebFetch()` / `ImageGeneration()`），别写死 `NativeTool(...)`
-2. **接 OpenAI native tool 必须用 `openai-responses:...` 模型字符串**，别用普通 `openai:...`
-3. **`max_uses` / `max_results` 一定要设**，native 工具的成本很容易翻车
-4. **Google 项目谨慎引入 native tool**，会冲掉 function tool / tool-output
-5. **Logfire 监控 `native_tool_calls`**，分别计费
-6. **动态启用用 `NativeTool(callable)`**，按 deps 决定开不开
+1. 要跨 provider，就用 capability（`WebSearch()` / `WebFetch()` / `ImageGeneration()`），别写死 `NativeTool(...)`
+2. 用 OpenAI 的 native tool 要走 Responses API：V2 里 `openai:...` 默认就是 Responses，`openai-chat:...`（Chat Completions）不支持
+3. 一定要设 `max_uses` / `max_results`，native 工具的费用很容易失控
+4. 老版 Gemini 项目引入 native tool 要谨慎，会让 function tool 和 tool-output 不能用（Gemini 3 起已经放开）
+5. 用 Logfire 监控 `native_tool_calls`，这部分单独计费
+6. 需要按条件启用时用 `NativeTool(callable)`，按 deps 决定开不开
 
 ---
 
@@ -372,8 +373,8 @@ print(r.output)
 
 完整可运行代码：[`demos/tools/05_native_tools.py`](../../demos/tools/05_native_tools.py)
 
-工具系统五篇到此结束。接下来你可以看：
+工具部分的五篇到这里结束。相关阅读：
 
-- [《工具与 RAG 实战》](../03-advanced/) （正在写）
-- [Pydantic AI 官网](https://ai.pydantic.dev) 的 `Deferred Tools` 章节，深入人在回路
-
+- [Pydantic AI 进阶 08：Deferred Tools 与人审批](../03-advanced/08-deferred-tools.md)：人在回路、审批、外部执行
+- [Pydantic AI 进阶 06：Capabilities（能力）与 ModelProfile](../03-advanced/06-capabilities.md)：capability，以及 `WebSearch` / `WebFetch` 这类按 provider 自动适配的能力
+- [Pydantic AI 官网](https://pydantic.dev/docs/ai) 的 *Native Tools* 与 *Deferred Tools* 章节

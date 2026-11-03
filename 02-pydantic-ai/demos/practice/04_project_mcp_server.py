@@ -7,7 +7,7 @@
   3) Pydantic AI 作 client，连上面的 server 跑一次问答
 
 用法：
-    pip install "mcp[cli]>=1.0.0" httpx pydantic-ai python-dotenv
+    pip install "pydantic-ai-slim[mcp,openai]" httpx python-dotenv   # 装的是 FastMCP 4
     export GITHUB_TOKEN=ghp_xxx   # 可选；不给则走匿名（每小时 60 次）
 
     # 1) 作为 stdio server 运行（Claude Desktop / mcp dev）
@@ -20,8 +20,8 @@
     export OPENAI_API_KEY=...
     python demos/practice/04_project_mcp_server.py --client stdio
 
-    # 4) 用 mcp dev 工具调试
-    mcp dev demos/practice/04_project_mcp_server.py
+    # 4) 用 FastMCP CLI 调试
+    fastmcp dev inspector demos/practice/04_project_mcp_server.py
 
 Claude Desktop config（macOS：~/Library/Application Support/Claude/claude_desktop_config.json）：
 
@@ -43,7 +43,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from dotenv import load_dotenv
@@ -121,7 +121,7 @@ async def gh_create(repo: str, title: str, body: str = "") -> Issue:
 # ============================================================
 
 def build_server():
-    from mcp.server.fastmcp import FastMCP
+    from fastmcp import FastMCP
 
     mcp = FastMCP("github-issues")
 
@@ -153,7 +153,7 @@ def build_server():
     @mcp.tool()
     async def create_issue(
         repo: str,
-        title: str = Field(..., description="issue 标题"),
+        title: Annotated[str, Field(description="issue 标题")],
         body: str = "",
     ) -> dict:
         """在指定 repo 创建一条 issue。需要环境变量 GITHUB_TOKEN。
@@ -207,23 +207,26 @@ mcp = build_server()
 
 async def run_client_stdio() -> None:
     """spawn 一个 stdio server 进程，让 Pydantic AI Agent 使用它的工具。"""
+    from fastmcp.client.transports import StdioTransport
     from pydantic_ai import Agent
-    from pydantic_ai.mcp import MCPServerStdio
+    from pydantic_ai.mcp import MCPToolset
 
     if not os.getenv("OPENAI_API_KEY"):
         print("❌ 请设置 OPENAI_API_KEY")
         return
 
-    server = MCPServerStdio(
-        command=sys.executable,
-        args=[__file__, "--server", "stdio"],
-        env={
-            "GITHUB_TOKEN": GH_TOKEN or "",
-            "PATH": os.environ.get("PATH", ""),
-        },
+    server = MCPToolset(
+        StdioTransport(
+            command=sys.executable,
+            args=[__file__, "--server", "stdio"],
+            env={
+                "GITHUB_TOKEN": GH_TOKEN or "",
+                "PATH": os.environ.get("PATH", ""),
+            },
+        )
     )
-    agent = Agent("openai:gpt-4o-mini", toolsets=[server],
-                  system_prompt="你是一个 GitHub 助手，遇到查询请求时一定要调工具。")
+    agent = Agent("openai-chat:qwen-flash", toolsets=[server],
+                  instructions="你是一个 GitHub 助手，遇到查询请求时一定要调工具。")
 
     async with agent:
         result = await agent.run(
@@ -236,15 +239,15 @@ async def run_client_stdio() -> None:
 async def run_client_http(url: str = "http://localhost:8765") -> None:
     """连接已经在运行的 HTTP server。"""
     from pydantic_ai import Agent
-    from pydantic_ai.mcp import MCPServerStreamableHTTP
+    from pydantic_ai.mcp import MCPToolset
 
     if not os.getenv("OPENAI_API_KEY"):
         print("❌ 请设置 OPENAI_API_KEY")
         return
 
-    server = MCPServerStreamableHTTP(url=url)
-    agent = Agent("openai:gpt-4o-mini", toolsets=[server],
-                  system_prompt="你是一个 GitHub 助手。")
+    server = MCPToolset(f"{url}/mcp")  # FastMCP 的 HTTP 端点默认挂在 /mcp
+    agent = Agent("openai-chat:qwen-flash", toolsets=[server],
+                  instructions="你是一个 GitHub 助手。")
     async with agent:
         result = await agent.run("列一下 pydantic/pydantic 最近 3 个 open issue")
     print("\n=== Agent 回复 ===")
@@ -272,10 +275,10 @@ def main() -> None:
 
     if args.server == "stdio":
         log.info("启动 stdio MCP server")
-        mcp.run()
+        mcp.run(show_banner=False)
     elif args.server == "http":
-        log.info(f"启动 HTTP MCP server on 0.0.0.0:{args.port}")
-        mcp.run(transport="streamable-http", host="0.0.0.0", port=args.port)
+        log.info(f"启动 HTTP MCP server on 127.0.0.1:{args.port}")
+        mcp.run(transport="http", host="127.0.0.1", port=args.port, show_banner=False)
     elif args.client == "stdio":
         asyncio.run(run_client_stdio())
     elif args.client == "http":

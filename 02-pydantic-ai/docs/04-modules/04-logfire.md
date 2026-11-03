@@ -1,20 +1,22 @@
 # Pydantic AI 04-04：Logfire 可观测性集成
 
-> **一句话**：Logfire 是 Pydantic 团队出品的可观测性平台（基于 OpenTelemetry），两行代码就能把 Agent 的每一次 run、每一次工具调用、每一次模型请求都打进 dashboard，看 prompt / response / token / 时延 / 失败堆栈一目了然。
+> Logfire 是 Pydantic 团队做的可观测性平台，底层基于 OpenTelemetry。接入只要两行代码，之后 Agent 的每次 run、每次工具调用、每次模型请求都会进到 dashboard，prompt、response、token、时延和失败堆栈都能直接查到。
+
+以 `pydantic-ai 2.64.0` + `logfire 5.4` 为准。V2 去掉了 Agent 的 `instrument=` 参数，改用 `Instrumentation` capability。
 
 ---
 
 ## 1. 为什么 LLM 应用特别需要 trace
 
-传统服务监控通常关注 QPS / Latency / Error Rate 三件套。LLM 应用多了一堆"非典型问题"：
+传统服务监控看的通常是 QPS、Latency、Error Rate。LLM 应用还有一些别的问题：
 
-- **慢**：单次调用 1-10 秒是常态，传统 APM 阈值告警全在响
-- **贵**：每次调用按 token 算钱，没监控就被无脑刷爆
-- **黑盒**：模型输出非确定，事后没办法"复现"
-- **多跳**：一次 user message 后端可能调 3 个 Agent / 8 个工具，链路深
-- **改 prompt = 改逻辑**：改了一行 prompt 行为变了你需要回过头看实际 prompt
+- 慢：单次调用 1-10 秒很常见，按传统 APM 阈值设的告警会一直响
+- 贵：按 token 计费，没有监控的话，费用被刷上去了也不知道
+- 难复现：模型输出不确定，事后很难重现当时的情况
+- 链路深：一条用户消息，后端可能调了 3 个 Agent、8 个工具
+- prompt 就是逻辑：改一行 prompt 行为就变了，排查时得回头看当时实际发出去的 prompt
 
-裸用 OpenAI SDK 你要自己埋点、自己存 prompt、自己算 token、自己捕错。Logfire 在 Pydantic AI 里**一行 `instrument_pydantic_ai()` 就把这一切自动捕获**。
+直接用 OpenAI SDK 的话，埋点、存 prompt、算 token、捕获异常都得自己做。在 Pydantic AI 里，调一次 `instrument_pydantic_ai()` 就全部自动记录了。
 
 ---
 
@@ -27,11 +29,11 @@ from pydantic_ai import Agent
 logfire.configure()                   # 1) 初始化（读环境变量 LOGFIRE_TOKEN）
 logfire.instrument_pydantic_ai()      # 2) 给所有 Agent 自动埋点
 
-agent = Agent("openai:gpt-4o-mini", system_prompt="...")
+agent = Agent("openai-chat:qwen-flash", instructions="...")
 result = agent.run_sync("hi")
 ```
 
-跑一次后到 https://logfire.pydantic.dev 就能看到一条 span，点开里面有：
+运行之后，到 https://logfire.pydantic.dev 能看到一条 span，点开有这些内容：
 
 - 完整 system prompt + user message
 - 模型输出（text & tool_calls）
@@ -56,7 +58,7 @@ logfire.configure(
 )
 ```
 
-**`send_to_logfire=False`** 很关键：本地开发不想上报、或要把数据导到自家 OTel 后端时用。
+`send_to_logfire=False` 用得很多：本地开发不想上报，或者要把数据导到自己的 OTel 后端时，都靠它。不传时默认是 `"if-token-present"`：配了 `LOGFIRE_TOKEN` 才上报，没配就只把 trace 树打印到 stdout，模型请求（如 `chat qwen-flash`）、工具调用（`running tool: ...`）和自定义 span 都会出现在树里。
 
 ### 3.1 获取 token
 
@@ -71,7 +73,7 @@ logfire projects new        # 在你的 organization 下新建项目
 
 ## 4. `instrument_pydantic_ai()` 都装了什么
 
-一行函数实际上在背后干了三件事：
+这个函数在背后给三类对象加了埋点：
 
 | 自动埋点对象 | span 内容 |
 |------------|----------|
@@ -79,14 +81,31 @@ logfire projects new        # 在你的 organization 下新建项目
 | 模型每一次 HTTP 请求 | 模型名、tokens、latency、cost（按官方价目表估） |
 | `@agent.tool` 工具执行 | 函数名、入参、返回值、异常 |
 
-输出是符合 **OpenTelemetry GenAI semantic conventions** 的 attribute 名（`gen_ai.system`、`gen_ai.usage.input_tokens`…），不绑死 Logfire 后端。
+attribute 名遵循 OpenTelemetry GenAI semantic conventions（`gen_ai.system`、`gen_ai.usage.input_tokens`…），不和 Logfire 后端绑定。
+
+### 4.0 三种打开方式
+
+```python
+# A. 全局：给所有 Agent 打开（最常用）
+logfire.instrument_pydantic_ai()
+
+# B. 单个 Agent：Instrumentation capability（V2）
+from pydantic_ai.capabilities import Instrumentation
+agent = Agent("openai:gpt-6.1-sol", capabilities=[Instrumentation()])
+
+# C. 不用 logfire 库，纯 OTel：给全局 TracerProvider 之后
+from pydantic_ai import Agent, InstrumentationSettings
+Agent.instrument_all(InstrumentationSettings())
+```
+
+`Instrumentation(settings=InstrumentationSettings(...))` 可以定制 provider、内容采集和数据格式版本（`version=`，和 Pydantic AI 的包版本无关：默认 5，可选 6；2/3/4 是弃用的兼容格式。版本 3 起 span 名遵循 OpenTelemetry GenAI 语义约定，比如 agent 的 span 叫 `invoke_agent {agent 名}`、工具的叫 `execute_tool {工具名}`）。其它 capability 可以通过 `opentelemetry.trace.get_current_span().set_attribute(...)` 往这些 span 上加属性。`InstrumentationSettings` 直接从 `pydantic_ai` 导入；V2 的 Agent 没有 `instrument=` 构造参数，单个 Agent 开 trace 用上面的 B 写法。
 
 ### 4.1 控制敏感字段
 
-工具入参 / 模型 prompt 可能含 PII，可以：
+工具入参和模型 prompt 里可能有 PII，可以这样关掉内容采集：
 
 ```python
-from pydantic_ai.agent import InstrumentationSettings
+from pydantic_ai import InstrumentationSettings
 
 logfire.instrument_pydantic_ai(
     settings=InstrumentationSettings(
@@ -95,13 +114,13 @@ logfire.instrument_pydantic_ai(
 )
 ```
 
-`include_content=False` 后你只看得到"调用了模型 X、花了 N token、耗时 M ms"，看不到具体内容，符合很多内部合规要求。
+设了 `include_content=False` 之后，你只能看到"调用了模型 X、花了 N token、耗时 M ms"，看不到具体内容（prompt、模型回复、工具参数和返回值都不记），这能满足不少内部合规要求。另有 `include_binary_content=False`（只去掉图片 / 音频等二进制内容）和排除模型请求参数的选项，见官方 *Advanced usage*。
 
 ---
 
 ## 5. 自定义 span：把业务字段也带上
 
-Logfire 不只是给 LLM 用的——任何业务逻辑都能加 span：
+Logfire 不限于 LLM，任何业务逻辑都能加 span：
 
 ```python
 with logfire.span("process_order", order_id=order.id, user_id=u.id) as span:
@@ -110,7 +129,7 @@ with logfire.span("process_order", order_id=order.id, user_id=u.id) as span:
     await db.save(parsed.output)
 ```
 
-在 dashboard 里这条 span 会包住底下的 Agent / model / tool 子 span，形成"业务视角"的火焰图。
+在 dashboard 里，这条 span 会包住下面的 Agent、model、tool 子 span，看到的就是按业务划分的火焰图。
 
 ### 5.1 字段 vs 子 span
 
@@ -122,17 +141,27 @@ with logfire.span("process_order", order_id=order.id, user_id=u.id) as span:
 
 ---
 
-## 6. 配合 Hook 把每次 run 的元数据捞出来
+## 6. 把每次 run 的业务元数据带进 span
 
-Pydantic AI 允许你在 Agent 上挂 hook（`@agent.run_step`、`@agent.tool_call` 等），结合 Logfire 你可以把"用户 id / 业务字段"塞进 span：
+两种办法：
 
 ```python
-@agent.run_step
-async def add_user_attr(ctx, step):
-    logfire.span_current().set_attribute("user_id", ctx.deps.user_id)
+# A. 运行元数据：Agent(metadata=...) 或 run(metadata=...)，开着 instrumentation 时会写进 run span 的属性
+result = await agent.run(msg, metadata={"tenant_id": "t-42", "user_id": ctx_user})
+print(result.metadata)
+
+# B. 在 hook / 工具里直接设当前 span 的属性
+from pydantic_ai.capabilities import Hooks
+hooks = Hooks()
+
+@hooks.on.before_run
+async def tag(ctx):
+    logfire.span_current().set_attribute("user_id", ctx.deps.user_id)   # 或 opentelemetry 的 get_current_span()
+
+agent = Agent("openai-chat:qwen-flash", deps_type=Deps, capabilities=[hooks])
 ```
 
-dashboard 里搜 `user_id=12345` 就能拉到这个用户所有的 Agent 调用。
+（`@agent.run_step` / `@agent.tool_call` 这样的装饰器在 2.x 里不存在，对应能力是 04 篇的 `Hooks`。）dashboard 里搜 `user_id=12345` 就能拉到这个用户所有的 Agent 调用。
 
 ---
 
@@ -140,25 +169,26 @@ dashboard 里搜 `user_id=12345` 就能拉到这个用户所有的 Agent 调用�
 
 | 视图 | 看什么 |
 |------|-------|
-| **Live** | 实时 trace 流，开发时狂用 |
-| **Explore** | 历史查询，按 attribute 过滤 |
-| **Dashboards** | 自定义仪表板：avg latency、p95、token/天、按用户的成本 |
-| **Alerts** | 阈值告警（错误率 / 时延 / token spike） |
+| Live | 实时 trace 流，开发时最常用 |
+| Explore | 历史查询，按 attribute 过滤 |
+| Dashboards | 自定义仪表板：avg latency、p95、token/天、按用户的成本 |
+| Alerts | 阈值告警（错误率 / 时延 / token 突增） |
 
-最有用的几条 SQL（Logfire 用 SQL 查 trace）：
+Logfire 用 SQL 查 trace，下面几条我觉得最常用：
 
 ```sql
--- 看哪个 user 最烧钱（top spender）
-select user_id, sum(gen_ai.usage.output_tokens) tokens
+-- 看哪个 user 输出 token 最多（user_id 是第 6 节写进 span 的属性）
+select attributes->>'user_id' as user_id,
+       sum((attributes->>'gen_ai.usage.output_tokens')::bigint) as tokens
 from records where service_name = 'my-agent'
-group by user_id order by tokens desc limit 10;
+group by 1 order by tokens desc limit 10;
 
--- p95 latency
-select percentile_cont(0.95) within group (order by duration)
-from records where span_name = 'agent run';
+-- agent run 的 p95 时延（默认数据格式下 span 名是 invoke_agent <agent 名>）
+select approx_percentile_cont(duration, 0.95)
+from records where span_name like 'invoke_agent%';
 
--- 失败 trace
-select * from records where is_exception group by trace_id;
+-- 有异常的 trace
+select trace_id, count(*) as n from records where is_exception group by trace_id;
 ```
 
 ---
@@ -174,7 +204,7 @@ import os
 os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
 ```
 
-兼容的后端清单（官方提到）：
+官方提到的兼容后端有：
 
 - Langfuse
 - W&B Weave
@@ -182,29 +212,29 @@ os.environ["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
 - mlflow
 - 自建 OTel Collector → Jaeger / Tempo / Honeycomb
 
-也就是说 **`instrument_pydantic_ai()` 是协议适配**，不是 Logfire 厂商锁定。
+所以 `instrument_pydantic_ai()` 做的是协议层的适配，用它并不会被 Logfire 锁定。
 
 ---
 
 ## 9. 也给 HTTPX / SQLAlchemy / FastAPI 一起埋
 
-Agent 之外的 IO 也要上 trace，才能看清楚"业务全链路"：
+Agent 之外的 IO 也加上 trace，才能看到完整的业务链路：
 
 ```python
 logfire.configure()
 logfire.instrument_pydantic_ai()
-logfire.instrument_httpx()           # OpenAI SDK 走 httpx
+logfire.instrument_httpx()           # 只覆盖 httpx；openai 3.x 默认走 httpx2，见下方常见坑
 logfire.instrument_fastapi(app)
 logfire.instrument_sqlalchemy(engine=engine)
 ```
 
-一条 trace 里就能看到：HTTP 请求 → FastAPI 路由 → Agent run → 模型 HTTP 调用 → 工具里的 DB 查询。这是排查"为什么这次 user 请求 8 秒"的神器。
+这样一条 trace 里就能看到：HTTP 请求 → FastAPI 路由 → Agent run → 模型 HTTP 调用 → 工具里的 DB 查询。排查"这个请求为什么花了 8 秒"时特别好用。
 
 ---
 
 ## 10. 实战：给客服 Agent 加 trace
 
-完整代码见 [`demos/modules/04_logfire.py`](../../demos/modules/04_logfire.py)。核心结构：
+完整代码见 [`demos/modules/04_logfire.py`](../../demos/modules/04_logfire.py)，主要结构如下：
 
 ```python
 import logfire
@@ -213,7 +243,7 @@ from pydantic_ai import Agent
 logfire.configure(service_name="customer-service", send_to_logfire=False)
 logfire.instrument_pydantic_ai()
 
-agent = Agent("openai:gpt-4o-mini", system_prompt="...")
+agent = Agent("openai-chat:qwen-flash", instructions="...")
 
 @agent.tool_plain
 def lookup_order(order_id: str) -> dict:
@@ -227,15 +257,15 @@ async def handle(user_id: str, msg: str):
         return r.output
 ```
 
-跑完之后 `console=True` 时 stdout 直接打印 trace 树：
+`console=True` 时，跑完后 stdout 会直接打印 trace 树，结构大致如下（示意，具体的 span 名和属性随 instrumentation 数据格式版本而变）：
 
 ```
 customer_request user_id=u_123
-└─ agent run prompt="客服 agent"
-   ├─ chat completion model=gpt-4o-mini tokens_in=120 tokens_out=18
-   ├─ tool: lookup_order order_id=A001
+└─ invoke_agent agent
+   ├─ chat qwen-flash
+   ├─ running tool: lookup_order
    │  └─ db_lookup order_id=A001
-   └─ chat completion model=gpt-4o-mini tokens_in=180 tokens_out=42
+   └─ chat qwen-flash
 done user_id=u_123 output_len=87
 ```
 
@@ -245,11 +275,11 @@ done user_id=u_123 output_len=87
 
 | 场景 | 上 Logfire | 用其他 |
 |------|-----------|--------|
-| Prod 任何规模的 Agent 服务 | ✅ 必须 | — |
-| 一次性脚本、本地写 demo | ✅ `console=True` 直接看 stdout | — |
-| 公司有自家 OTel 平台（Jaeger / Honeycomb） | ✅ `send_to_logfire=False` 导出去 | — |
-| 数据合规严格、不想出公网 | ✅ self-host OTel collector | — |
-| 想看 token / cost 趋势 | ✅ Logfire 内置维度 | — |
+| 生产环境的 Agent 服务，不论规模 | 应该上 | — |
+| 一次性脚本、本地写 demo | 可以，`console=True` 直接看 stdout | — |
+| 公司有自己的 OTel 平台（Jaeger / Honeycomb） | 可以，`send_to_logfire=False` 导出去 | — |
+| 数据合规严格、不想出公网 | 可以，自建 OTel collector | — |
+| 想看 token / cost 趋势 | 可以，Logfire 内置这些维度 | — |
 
 ---
 
@@ -259,20 +289,21 @@ done user_id=u_123 output_len=87
 |------|------|------|
 | dashboard 看不到任何数据 | 没设 `LOGFIRE_TOKEN`，或 `send_to_logfire=False` | 检查 token / configure 参数 |
 | 看到 trace 但 prompt 是空的 | `include_content=False` | 改回 True（或这就是你想要的） |
-| token 飙到天文数字 | 把全量 prompt 都打了进去 | 用 `include_content=False`，或采样 |
+| trace 数据量暴涨 | 把全量 prompt 都记了进去 | 用 `include_content=False`，或采样 |
 | trace 太多导致前端卡 | 没采样 | `logfire.configure(sampling=...)` |
-| 看不到 HTTPX 子 span | 没调 `instrument_httpx` | 单独调一下，需要 OpenAI SDK 1.x+ |
+| 看不到 HTTP 子 span | 没给 HTTP 客户端装 instrumentation；而且 `openai` 3.x 和 Pydantic AI 2.x 默认用的是 `httpx2`，不是 `httpx` | 按你实际用的客户端装对应的 instrumentation，装之前先确认 logfire 版本是否支持 httpx2 |
 | FastAPI 路由 + Agent 没拼在一起 | trace context 没传 | 用 `instrument_fastapi` 让 OTel 接住 |
-| 想关掉 stdout 输出 | `console=False` | 别忘 `configure(console=False)` |
+| 想关掉 stdout 输出 | 默认会打印到 console | `configure(console=False)` |
 | 敏感字段意外上报 | 用 attribute 装 PII | 用 `attribute_scrubbing_patterns` 配 regex 脱敏 |
 | 改了 prompt 想对比效果 | 没记 service_version | configure 时填 `service_version`，dashboard 按版本对比 |
+| 第一次运行时打印一个 ASCII 图案横幅 | Pydantic AI 的启动横幅 | 设环境变量 `PYDANTIC_AI_NO_BANNER=1` |
 | 想给 Graph 也加 trace | `instrument_pydantic_ai()` 已自动覆盖 Agent | Graph 里调 Agent 的部分自动出现，节点之间手动 `logfire.span` |
 
 ---
 
 ## 13. 成本控制：采样与脱敏
 
-LLM trace 体量很容易爆，简单几招控成本：
+LLM 的 trace 数据量很容易膨胀，下面几个办法可以控制成本。
 
 ### 13.1 按比例采样
 
@@ -280,23 +311,15 @@ LLM trace 体量很容易爆，简单几招控成本：
 from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
 
 logfire.configure(
-    sampling=TraceIdRatioBased(rate=0.1),   # 只采 10%
+    sampling=logfire.SamplingOptions(head=0.1),   # 头部采样 10%（也可以传 OTel 的 Sampler）
 )
 ```
 
-注意：错误一定要全采，所以**实际中常用"全部 error + 10% 正常请求"**的混合策略：
-
-```python
-from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
-
-logfire.configure(
-    sampling=ParentBased(root=TraceIdRatioBased(0.1)),
-)
-```
+错误请求最好全部保留，所以实际中常用"全部 error + 10% 正常请求"的混合策略，Logfire 的尾部采样可以做到：先暂存 trace，出错或超时的才留下。采样 API 随 logfire 版本变化，动手前先读一下 Logfire 的 *Sampling* 文档，以你装的版本为准。
 
 ### 13.2 字段脱敏
 
-Logfire 内置 scrubbing，能自动按 regex 把疑似 PII 字段（password / token / api_key…）打码：
+Logfire 自带 scrubbing，会按 regex 把疑似 PII 的字段（password / token / api_key…）打码，也可以加上项目自己的字段：
 
 ```python
 logfire.configure(
@@ -308,10 +331,10 @@ logfire.configure(
 
 ### 13.3 关掉模型内容只留指标
 
-最激进的做法——`include_content=False` 后只剩 token / latency / model_name，**zero PII 风险**，但事后没法复现 prompt：
+最彻底的做法是 `include_content=False`，只留下 token、latency、model_name。这样不会有 PII 泄露的风险，但事后也没法看到当时的 prompt：
 
 ```python
-from pydantic_ai.agent import InstrumentationSettings
+from pydantic_ai import InstrumentationSettings
 
 logfire.instrument_pydantic_ai(
     settings=InstrumentationSettings(include_content=False),
@@ -324,20 +347,20 @@ logfire.instrument_pydantic_ai(
 
 ## 14. 与 Pydantic Evals 联动
 
-之前 [02-evals.md](02-evals.md) 提过，跑 `dataset.evaluate(...)` 时如果开了 Logfire，每条 case 都会生成一条独立 trace。在 dashboard 用 SQL 查：
+[Pydantic Evals 评测框架](02-evals.md)里提过，跑 `dataset.evaluate(...)` 时如果开着 Logfire，每条 case 都会生成一条独立的 trace，可以在 dashboard 里用 SQL 查：
 
 ```sql
 -- 按 case 名看每次评测结果
 select
   attributes->>'case_name' as case_name,
   attributes->>'output' as output,
-  duration / 1e9 as seconds
+  duration as seconds
 from records
-where span_name = 'evaluation_case'
+where span_name = 'case: {case_name}'
 order by start_timestamp desc;
 ```
 
-这就把"评测分数 + 详细 trace"打通了——准确率掉了，点开就能看到具体哪条 case 模型说了什么。
+评测分数和 trace 这样就连起来了：准确率掉了，点开就能看到是哪条 case、模型具体说了什么。
 
 ---
 
@@ -353,6 +376,6 @@ order by start_timestamp desc;
 4. 工具里再加子 span
 5. 没 API Key 时用 `TestModel`
 
-跑完直接在 stdout 看到漂亮的 trace 树。
+跑完在 stdout 就能看到 trace 树。
 
-下一篇：[05-cli-harness.md](05-cli-harness.md) —— `clai` 命令行工具与 Pydantic AI Harness。
+下一篇：[clai 命令行与 Harness 工具集](05-cli-harness.md)。

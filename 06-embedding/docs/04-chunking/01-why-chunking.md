@@ -1,10 +1,10 @@
-# Chunking 为啥决定 RAG 上限
+# 为什么 Chunking 决定 RAG 的上限
 
-> **一句话**：用什么 embedding 模型、什么向量库、什么 prompt 都比不上 **chunking 策略**对 RAG 效果影响大——chunk 切错了，再好的模型也救不回来。
+> 在 RAG 里，chunking 策略对效果的影响常常不亚于换 embedding 模型、换向量库或改 prompt，而且 chunk 一旦切坏，后面用再好的模型也很难补回来。这篇先讲清楚为什么要切、切坏了是什么样、怎么判断切得好不好。
 
 ---
 
-## 1. Chunk 是啥
+## 1. 什么是 chunk
 
 ```
 原文档 (PDF, 5000 字)
@@ -21,28 +21,11 @@ chunk_3 (200 字) → embedding → 索引
 
 ---
 
-## 2. 为啥不直接整篇 embed
+## 2. 为什么不整篇做 embedding
 
-```
-方案 A：整篇 embed
-  长文档 → 1 个 vector
-  
-问题：
-  1. 信息密度低（5000 字塞 1 个 vec → 关键信息被稀释）
-  2. 长度限制（多数模型 max 512 / 2048 tokens）
-  3. 召回粒度太粗（找到整篇，但用户只关心其中一段）
-  4. context 给 LLM 浪费 token
-```
+最省事的做法是一篇文档只算一个向量，但这样有几个问题。一篇 5000 字的文档压成一个向量，关键句的信息会被大量无关内容稀释，和具体问题的相似度上不去。模型的输入长度也有上限，各家从几百到十几万 token 不等（见第 10 节），超长部分会被截掉。就算长度放得下，召回的粒度也太粗：用户只关心其中一段，检索却只能告诉你「在这篇里」，整篇塞给 LLM 又白白浪费上下文。
 
-```
-方案 B：chunk-level embed（主流）
-  长文档 → N 个 chunks → N 个 vectors
-  
-好处：
-  1. 信息密度高（200 字 1 个 vec → 精准）
-  2. 召回粒度细（"我要的那一段"）
-  3. LLM context 高效
-```
+主流做法是先把长文档切成 N 个 chunk，每个 chunk 各算一个向量。一个 200 字左右的 chunk 只讲一件事，向量更聚焦，召回能精确到「我要的那一段」，交给 LLM 的上下文也更省。
 
 ---
 
@@ -85,11 +68,7 @@ chunk_2: "| Enterprise | Contact sales |"
 
 ## 4. 衡量 chunking 好坏
 
-3 个独立维度：
-
-1. **召回**：能不能把"答案所在的 chunk" 召回来
-2. **完整**：召回的 chunk 是否包含足够上下文回答问题
-3. **信噪比**：召回的 chunk 里有多少跟答案无关
+可以从三个互相独立的角度看。召回：答案所在的 chunk 能不能被找回来。完整：找回来的 chunk 有没有足够的上下文来回答问题。信噪比：chunk 里有多少内容和答案无关。
 
 ```
 理想 chunk：
@@ -100,18 +79,16 @@ chunk_2: "| Enterprise | Contact sales |"
 
 ---
 
-## 5. 大小 trade-off
+## 5. chunk 大小的取舍
 
 | Chunk size | 优 | 劣 |
 |------------|-----|-----|
 | 太小（< 100 字） | 信息密度高，召回准 | 上下文不足，LLM 难答 |
 | 中等（200-500 字） | 平衡 | 有时仍不够 |
-| 大（800-1500 字） | 上下文足 | 信息稀释，召回偏 |
+| 大（800-1500 字） | 上下文足 | 信息被稀释，召回偏 |
 | 太大（> 2000 字） | 几乎等于整篇 | 召回粒度太粗 |
 
-实践默认 **400-600 字**（约 200-400 tokens 英文 / 400-600 字中文）。
-
-但**没有金科玉律**——必须用 evalset 验证。
+常见的起点是中文每块 400–600 字，英文每块 200–400 tokens（大约 150–300 个单词）。这只是起点，没有标准答案，最后要用 evalset 验证。
 
 ---
 
@@ -131,13 +108,7 @@ chunks = [
 ]
 ```
 
-**作用**：
-
-- 让"跨边界"的语义在两个 chunk 都出现
-- 提高召回率
-- 代价：存储 / embed 成本增加 ~20%
-
-通常 overlap = 10-20% chunk_size。
+重叠的作用是让跨在边界上的内容在相邻两个 chunk 里都出现，从而提高召回率。代价是 chunk 数量和 embedding 成本按重叠比例上涨：上面 500 / 100 的设置每次只前进 400 个字符，chunk 数大约多出 25%。overlap 一般取 chunk_size 的 10–20%。
 
 ---
 
@@ -145,18 +116,17 @@ chunks = [
 
 | 方法 | 何时用 | 详见 |
 |------|--------|------|
-| 固定 char / token | 简单兜底 | [02-strategies.md](./02-strategies.md) |
+| 固定 char / token | 简单兜底 | [固定 vs 语义 vs 递归切分](./02-strategies.md) |
 | 递归切（按段落 / 句子）| 通用文本 | 同上 |
-| 语义切（按 embedding 相似度）| 高质量需求 | 同上 |
-| 结构感知（按 heading / table） | 文档明确结构 | [03-structure-aware.md](./03-structure-aware.md) |
-| Small-to-big（多粒度） | RAG 进阶 | [04-small-to-big.md](./04-small-to-big.md) |
+| 语义切（按 embedding 相似度）| 对质量要求高 | 同上 |
+| 结构感知（按 heading / table） | 文档结构明确 | [文档结构感知切分](./03-structure-aware.md) |
+| Small-to-big（多粒度） | RAG 进阶 | [多粒度切分：Small-to-Big / Parent Document](./04-small-to-big.md) |
 
 ---
 
 ## 8. demo：错切对比
 
 ```python
-# demos/chunking/01_why.py
 from openai import OpenAI
 import numpy as np
 
@@ -203,7 +173,7 @@ for label, chunks in [
     print()
 ```
 
-A 方案的 best chunk 可能是片段，意思不完整；B 方案 best chunk 是完整步骤。
+方案 A 排第一的 chunk 往往是个残缺片段，意思不完整；方案 B 排第一的是一个完整的操作步骤。
 
 ---
 
@@ -218,30 +188,31 @@ A 方案的 best chunk 可能是片段，意思不完整；B 方案 best chunk �
 论文搜索：按 section / paragraph
 ```
 
-详见 [03-structure-aware.md](./03-structure-aware.md)。
+按结构切的做法见[文档结构感知切分](./03-structure-aware.md)。
 
 ---
 
-## 10. 跟 embedding 模型 max_tokens 配合
+## 10. 和 embedding 模型的输入上限配合
 
 ```python
-# 模型 max_tokens
-OPENAI_EMBEDDING_MAX = 8191  # text-embedding-3-*
-BGE_MAX = 512
+# 各模型单条输入上限（tokens）
+OPENAI_EMBEDDING_MAX = 8191      # text-embedding-3-*
+BGE_MAX = 512                    # bge-large-zh-v1.5 等
 BGE_M3_MAX = 8192
-COHERE_MAX = 512
+QWEN3_EMBEDDING_MAX = 32_768     # Qwen3-Embedding，32k
+COHERE_V3_MAX = 512              # embed-*-v3.0；embed-v4.0 / v5.0 是 128k
 
 # 你的 chunk size 不能超过模型上限
 chunk_size_tokens = min(your_target, model_max - safety_margin)
 ```
 
-不要"勉强不切"喂超长——大多模型会**截断**（你后面那段没被 embed）。
+上限只是不能超过的天花板，chunk 该切多大还是由检索效果决定（见第 5 节），对长上下文模型来说，效果最好的大小往往远小于上限。另外别图省事把超长文本整段喂进去：OpenAI 的接口超长会直接报错，sentence-transformers 这类本地模型则会静默截断，超出部分根本没有被 embed。
 
 ---
 
 ## 11. chunk 元数据
 
-每个 chunk 不只是 text，还要带元数据：
+每个 chunk 除了文本，还要带上元数据：
 
 ```python
 {
@@ -256,25 +227,19 @@ chunk_size_tokens = min(your_target, model_max - safety_margin)
 }
 ```
 
-帮 LLM / 前端做：
-
-- 显示引用
-- 跳到原文
-- 加上下文（找 chunk_idx-1 和 +1 一起给 LLM）
-
-详见 [05-metadata.md](./05-metadata.md)。
+有了这些字段，前端可以显示引用、跳回原文，也可以把相邻的 chunk_idx-1 和 +1 一起交给 LLM 补上下文。字段怎么设计见[Chunk Metadata 设计](./05-metadata.md)。
 
 ---
 
 ## 12. 实战 checklist
 
-实施 chunking 前问自己：
+动手切之前，先把这几件事想清楚：
 
 - [ ] 文档类型（PDF / Markdown / HTML / 表格）？
 - [ ] 是否有明显结构（heading / 章节 / 段落）？
 - [ ] 单个 chunk 上限多少？
 - [ ] 重叠多少？
-- [ ] 用什么 embed 模型 → max_tokens 多少？
+- [ ] 用什么 embedding 模型，单条输入上限多少？
 - [ ] chunk metadata 怎么设计？
 - [ ] 怎么测好坏（evalset）？
 
@@ -282,7 +247,7 @@ chunk_size_tokens = min(your_target, model_max - safety_margin)
 
 ## 13. 下一步
 
-- 📖 具体切分策略 → [02-strategies.md](./02-strategies.md)
-- 📖 结构感知（PDF / MD / 表格）→ [03-structure-aware.md](./03-structure-aware.md)
-- 📖 多粒度（small-to-big）→ [04-small-to-big.md](./04-small-to-big.md)
-- 📖 metadata 设计 → [05-metadata.md](./05-metadata.md)
+- 具体切分策略：[固定 vs 语义 vs 递归切分](./02-strategies.md)
+- PDF / Markdown / 表格怎么切：[文档结构感知切分](./03-structure-aware.md)
+- 多粒度切分：[多粒度切分：Small-to-Big / Parent Document](./04-small-to-big.md)
+- metadata 设计：[Chunk Metadata 设计](./05-metadata.md)

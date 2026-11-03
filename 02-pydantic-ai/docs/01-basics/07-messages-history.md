@@ -1,6 +1,8 @@
 # Pydantic AI 07：消息与对话历史（Messages & History）
 
-> **一句话**：Pydantic AI 把对话历史抽象成 `ModelMessage` 列表，每条消息由若干 `Part` 组成，**可序列化、可持久化、可回放**，多轮聊天只要把上次 `result.new_messages()` 喂进下一次 `run`。
+> Pydantic AI 把对话历史表示成 `ModelMessage` 列表，每条消息由若干 `Part` 组成，能序列化、存库、回放。多轮聊天时把 `conversation=result.conversation` 传回去（或者把消息列表传给 `message_history`），存到哪里由你决定。
+
+以 `pydantic-ai 2.64.0` 为准。V2 废弃了 `RetryPromptPart`，`result.usage()` 改成属性 `result.usage`。
 
 ---
 
@@ -18,21 +20,21 @@ while True:
     history += f"AI: {resp}\n"
 ```
 
-问题：
+这种写法的问题：
 
 1. 模型分不清谁说的（要靠 prefix 约定）
-2. **工具调用历史**怎么塞进去？字符串拼不出 JSON 结构
+2. 工具调用的历史没法放进去，字符串拼不出 JSON 结构
 3. 切换模型时格式全乱（OpenAI / Anthropic 消息格式不同）
 4. 想存 DB / Redis：纯字符串没结构，回放 / 审计困难
 
-Pydantic AI 把对话建模成**强类型对象**：
+Pydantic AI 把对话建模成强类型对象：
 
 ```
 ModelMessage = ModelRequest | ModelResponse
    │
-   ├── ModelRequest  → parts: SystemPromptPart / UserPromptPart / ToolReturnPart / RetryPromptPart
-   │
-   └── ModelResponse → parts: TextPart / ToolCallPart / ThinkingPart
+   ├── ModelRequest  → parts: SystemPromptPart / UserPromptPart / ToolReturnPart / RetryFeedbackPart ...
+   │                   （还有一个 instructions 字段：这次请求用的 instructions）
+   └── ModelResponse → parts: TextPart / ToolCallPart / ThinkingPart / FilePart / NativeToolCallPart ...
 ```
 
 ---
@@ -43,20 +45,26 @@ ModelMessage = ModelRequest | ModelResponse
 |----|------|--------|
 | `ModelRequest` | 发给模型的一轮输入 | 历史 / 当前请求 |
 | `ModelResponse` | 模型的一轮回复 | 历史 |
-| `SystemPromptPart` | 系统提示 | `ModelRequest` |
+| `SystemPromptPart` | 系统提示（`system_prompt=` 产生的） | `ModelRequest` |
 | `UserPromptPart` | 用户消息（可含多模态） | `ModelRequest` |
 | `TextPart` | 模型文本输出 | `ModelResponse` |
 | `ToolCallPart` | 模型发起的工具调用 | `ModelResponse` |
-| `ToolReturnPart` | 工具返回结果 | `ModelRequest` |
-| `RetryPromptPart` | 校验失败后告诉模型 retry | `ModelRequest` |
-| `ThinkingPart` | 思维链（Claude/o1 等） | `ModelResponse` |
+| `ToolReturnPart` | 工具返回结果；被要求重试时是 `outcome="retried"` | `ModelRequest` |
+| `RetryFeedbackPart` | 输出校验失败等「告诉模型改正」的反馈（V2） | `ModelRequest` |
+| `ThinkingPart` | 思维链（Claude / o 系列 / 千问思考模式） | `ModelResponse` |
+| `ModelSettingsDeltaPart` 等 | 记录中途变化（如思考强度、工具可用性、能力加载） | `ModelRequest` |
+| `RetryPromptPart` | 已废弃；旧历史反序列化仍兼容 | — |
 
-一次 Agent run 完，`result.all_messages()` 大致长这样：
+> V2 的一处重要变化：`RetryPromptPart` 被废弃。模型被要求重试时，回到消息历史里的是那次工具调用自己的 `ToolReturnPart(outcome='retried')`，或者一个 `RetryFeedbackPart`。重试本身照常工作，但检查消息里 `isinstance(part, RetryPromptPart)` 的代码（尤其是测试辅助函数）不再匹配，要改认新部件。
+
+`instructions` 没有对应的 part，它是 `ModelRequest.instructions` 字段。所以用 `message_history` 续聊时旧的 instructions 不会被重复发送，而 `system_prompt`（`SystemPromptPart`）会留在历史里。
+
+一次 Agent run 完，`result.all_messages()` 大致长这样（`instructions` 给了的话挂在第一个 `ModelRequest` 上）：
 
 ```python
 [
-    ModelRequest(parts=[SystemPromptPart('...'), UserPromptPart('北京天气')]),
-    ModelResponse(parts=[ToolCallPart(tool_name='get_weather', args={'city':'北京'})]),
+    ModelRequest(parts=[UserPromptPart('北京天气')], instructions='你是一位天气助手'),
+    ModelResponse(parts=[ToolCallPart(tool_name='get_weather', args={'city': '北京'})]),
     ModelRequest(parts=[ToolReturnPart(tool_name='get_weather', content='晴 26°C')]),
     ModelResponse(parts=[TextPart('北京今天晴，26 度。')]),
 ]
@@ -64,78 +72,92 @@ ModelMessage = ModelRequest | ModelResponse
 
 ---
 
-## 3. 拿到消息：4 个 API
+## 3. 拿到消息：几个 API
 
 ```python
 r = agent.run_sync("hi")
 
 r.output              # 最终结果
-r.all_messages()      # list[ModelMessage]，含 system / user / 工具调用全过程
+r.all_messages()      # list[ModelMessage]，含用户 / 工具调用全过程（传入的历史也算）
 r.new_messages()      # 本次 run 新增的（不含传入的 message_history）
 r.all_messages_json() # bytes，JSON
 r.new_messages_json() # bytes，JSON
+r.conversation        # Conversation：消息 + 累计用量 + conversation_id
+r.run_id, r.conversation_id   # 关联日志 / trace 用
 ```
 
-**关键区分**：
+两者的用途：
 
-- `all_messages()`：写日志、审计、回放
-- `new_messages()`：作为下一轮 `message_history` 传入（只追加新增）
+- `all_messages()`：写日志、审计、回放、存库
+- `new_messages()`：只追加新增的部分（比如你自己每轮存增量）
 
 ---
 
-## 4. 多轮对话：`message_history` 参数
+## 4. 多轮对话：`conversation` 与 `message_history`
+
+接上一轮有两种写法：
 
 ```python
 from pydantic_ai import Agent
 
-agent = Agent("openai:gpt-4o-mini", system_prompt="你是一位段子手。")
+agent = Agent("openai-chat:qwen-flash", instructions="你是一位段子手。")
 
-# 第一轮
 r1 = agent.run_sync("讲个 Python 笑话")
-print(r1.output)
 
-# 第二轮，把上一轮的消息传进去
-r2 = agent.run_sync("解释一下笑点", message_history=r1.new_messages())
-print(r2.output)
+# 推荐：传 Conversation（带着累计用量，UsageLimits 管的是整段对话的总量）
+r2 = agent.run_sync("解释一下笑点", conversation=r1.conversation)
 
-# 第三轮，继续累加
+# 也可以：只传消息
 r3 = agent.run_sync("再讲个类似的", message_history=r2.all_messages())
-print(r3.output)
 ```
 
-注意：
-
-- **`message_history` 传 `new_messages()` 还是 `all_messages()` 都行**，但 `all_messages()` 会把 system 重复
-- 标准做法：第二轮起统一用 `r_prev.new_messages()`，第一轮自己注入 system
-- **Pydantic AI 会自动去重 system**（同一份 system_prompt 不会重复发送）
+- `message_history` 传 `new_messages()` 还是 `all_messages()`，结果差别很大：`all_messages()` 才是到目前为止的完整对话，只传 `new_messages()` 会丢掉更早的轮次。一般每轮传上一轮的 `all_messages()`，或直接传 `conversation`；
+- 传了 `message_history` 时，agent 用当前的 `instructions`，历史里旧的 instructions 不再发送（`system_prompt` 则保留）；
+- `run_sync` 内部自己开事件循环，在 async 代码或 async 工具里要用 `await agent.run(...)`。
 
 ---
 
 ## 5. 序列化与持久化
 
-存数据库 / Redis 时把消息转 JSON：
+Pydantic AI 有意不替你选数据库，只提供一个保真的序列化边界：
 
 ```python
+from pydantic_ai import Agent, ConversationTypeAdapter
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 
-# 序列化
-data: bytes = ModelMessagesTypeAdapter.dump_json(r1.all_messages())
-# 存到 DB / Redis / 文件
-db.set("conv:1", data)
+# A. 存整段对话（消息 + 累计用量 + conversation_id）
+result = agent.run_sync("Tell me a joke.")
+stored = ConversationTypeAdapter.dump_json(result.conversation)        # 存进 jsonb 列，用 result.conversation_id 做 key
+conversation = ConversationTypeAdapter.validate_json(stored)
+result = agent.run_sync("Explain?", conversation=conversation)
+print(result.usage.requests)     # 2 —— 用量接着上一次往下数
 
-# 反序列化
-raw = db.get("conv:1")
-messages = ModelMessagesTypeAdapter.validate_json(raw)
-
-# 继续对话
-r2 = agent.run_sync("继续", message_history=messages)
+# B. 只存消息
+data: bytes = ModelMessagesTypeAdapter.dump_json(result.all_messages())
+messages = ModelMessagesTypeAdapter.validate_json(data)
+agent.run_sync("继续", message_history=messages)
 ```
 
-`ModelMessagesTypeAdapter` 是 Pydantic 的 `TypeAdapter`，比 `json.dump` 强：
+`ModelMessagesTypeAdapter` 是 Pydantic 的 `TypeAdapter`，比 `json.dump` 多做了几件事：
 
 - 自动处理 datetime / Enum / bytes
 - 校验反序列化结果是合法 ModelMessage
-- 跨版本兼容性最好
+- V1 存下来的历史在 V2 里仍然能反序列化
+
+两个保真度上的细节：工具返回值里的 `datetime`、`UUID`、`Decimal` 这类没有 JSON 原生形式的值，存回来会变成字符串；UI 适配器（Vercel AI、AG-UI）的消息格式装不下 Pydantic AI 的全部字段，所以官方建议存 Pydantic AI 自己的格式，到边界上再转换。对话很长时，每轮重写整个对话太大，可以只追加每次运行的 `new_messages()`。
+
+### 持久化指的是哪件事
+
+官方用一张表把四个常被混在一起的需求拆开：
+
+| 你想要的 | 用什么 | 在哪 |
+|---------|--------|------|
+| 存下一段对话，以后接着聊 | 存 `Conversation`，放你自己的数据库 | 核心 |
+| 每次运行做了什么的日志，以及能续跑、能分叉的快照 | `StepPersistence` | harness（见[Capabilities（能力）与 ModelProfile](../03-advanced/06-capabilities.md)） |
+| agent 跨对话记住某个人的偏好 | `Memory` | harness |
+| 进程在工具调用中途挂掉，重启后重放已完成的步骤 | 持久执行（Temporal / DBOS / Prefect 等） | 核心 |
+
+大多数人说的给 agent 加记忆，其实是第一行：agent 对当前对话的记忆就是消息历史，不需要另一套记忆系统。
 
 ---
 
@@ -150,7 +172,7 @@ conn = sqlite3.connect("chat.db")
 conn.execute("CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, messages BLOB)")
 conn.commit()
 
-agent = Agent("openai:gpt-4o-mini", system_prompt="你是一个友好的助手。")
+agent = Agent("openai-chat:qwen-flash", instructions="你是一个友好的助手。")
 
 def chat(conv_id: str, prompt: str) -> str:
     row = conn.execute("SELECT messages FROM conversations WHERE id=?", (conv_id,)).fetchone()
@@ -171,36 +193,58 @@ print(chat("u1", "我叫 Ethan"))
 print(chat("u1", "我刚刚说我叫什么？"))  # 应该记得名字
 ```
 
-要点：
-
 - 每条 conversation 一行，存全量 messages
 - 也可以拆表：messages 一行一条，方便分页（牺牲一些写入便利性）
+
+### 客户端送来的历史不可信
+
+Pydantic AI 的服务端是无状态的：每次运行都由请求里带来的 `message_history`（以及延迟工具的结果）重建。框架不签名、也不校验工具调用、工具结果和审批，客户端完全可以伪造一次审批，或者塞进模型从没发出过的工具调用。官方明确说这是有意的设计，应对办法是：
+
+- 在传输层做鉴权，把每个通过鉴权的调用方都当成「能提交任意历史」；
+- 按调用方权限构建工具集；
+- 高风险操作在服务端重新校验，**不要把历史里出现过审批当成授权凭据**；
+- 来自浏览器的历史，传给 agent 之前先 `sanitize_messages(...)`（去掉客户端塞进来的系统提示等）：
+
+```python
+from pydantic_ai import ModelMessagesTypeAdapter
+from pydantic_ai.messages import sanitize_messages
+
+loaded = ModelMessagesTypeAdapter.validate_python(request_json["message_history"])
+result = agent.run_sync("Tell me a different joke.", message_history=sanitize_messages(loaded))
+```
+
+LangChain 的状态存在服务端 checkpointer 里，客户端只传 `thread_id`，没有这个问题。两种设计各有代价，这是其中实打实的一项。
 
 ---
 
 ## 7. Token 计数
 
-`r.usage()` 拿 token 用量：
+`r.usage` 拿 token 用量（现在是属性，不再是方法）：
 
 ```python
 r = agent.run_sync("hi")
-print(r.usage())
-# Usage(requests=1, request_tokens=20, response_tokens=8, total_tokens=28)
+print(r.usage)
+# RunUsage(input_tokens=20, output_tokens=8, requests=1)
 ```
 
-`message_history` 越长，下一次 `request_tokens` 越多。**生产环境必须做截断**：
+`message_history` 越长，下一次的 `input_tokens` 越多，生产环境必须控制历史长度。最简单的是自己裁；V2 里推荐用 `ProcessHistory` capability 在发给模型前改写历史：
 
 ```python
-def trim(messages, keep_last=10):
-    # 保留 system + 最近 N 条
-    sys_msgs = [m for m in messages if any(
-        p.__class__.__name__ == "SystemPromptPart" for p in m.parts
-    )]
-    others = [m for m in messages if m not in sys_msgs]
-    return sys_msgs + others[-keep_last:]
+from pydantic_ai import Agent, ModelMessage
+from pydantic_ai.capabilities import ProcessHistory
+
+def keep_recent(messages: list[ModelMessage]) -> list[ModelMessage]:
+    return messages[-6:]
+
+agent = Agent("openai:gpt-6.1-sol", capabilities=[ProcessHistory(keep_recent)])
 ```
 
-更进一步可以用 LLM 做摘要 + 滚动窗口（参考 LangChain 的 `ConversationSummaryBufferMemory`）。
+处理器可以同步也可以异步，可以接 `RunContext`；处理结果会替换掉 state 里的历史。裁剪时要保证剩下的历史合法，工具调用和它的结果必须成对，否则 provider 会拒绝（下面的 `repair_messages` 就是修这个的）。更完整的上下文压缩（按 token 摘要、清理旧工具结果）有现成的 capability，见[Capabilities（能力）与 ModelProfile](../03-advanced/06-capabilities.md)。
+
+```python
+from pydantic_ai.messages import repair_messages
+runnable = repair_messages(stored)     # 给没有结果的工具调用补一个「被中断」的返回，删掉孤立的返回
+```
 
 ---
 
@@ -209,23 +253,21 @@ def trim(messages, keep_last=10):
 不通过 `run` 也能手工构造消息送进去：
 
 ```python
-from pydantic_ai.messages import ModelRequest, UserPromptPart, SystemPromptPart
+from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
 
 history = [
-    ModelRequest(parts=[
-        SystemPromptPart(content="你是一位 SQL 专家。"),
-        UserPromptPart(content="先前我说要用 PostgreSQL"),
-    ]),
+    ModelRequest(parts=[UserPromptPart(content="先前我说要用 PostgreSQL")]),
+    ModelResponse(parts=[TextPart(content="好的，我会用 PostgreSQL 语法。")]),
 ]
 
 r = agent.run_sync("写一个查询所有用户的 SQL", message_history=history)
 ```
 
-**注意**：通常你不需要这么写，但下面场景有用：
+平时用不上，下面几种场景会用到：
 
 - 从其他系统（LangChain / 自有 ORM）迁移历史进来
 - 单元测试时构造特定状态
-- "假装 AI 之前说过 XX" 来引导后续对话
+- 伪造一段 AI 之前说过的话，引导后续对话
 
 ---
 
@@ -240,43 +282,43 @@ for msg in r.all_messages():
         if isinstance(part, ToolCallPart):
             print(f"调用工具：{part.tool_name}({part.args})")
         elif isinstance(part, ToolReturnPart):
-            print(f"工具返回：{part.content}")
+            print(f"工具返回：{part.content}（outcome={part.outcome}）")
 ```
 
-适合做**审计日志 / 调试 / Logfire trace 追踪**。
+可以用来做审计日志、调试，或配合 Logfire trace 排查。`part.outcome` 能告诉你这次返回是正常的（`"success"`）、被要求重试的（`"retried"`），还是被拒绝 / 被中断的。
 
 ---
 
 ## 10. vs LangChain
 
-| 任务 | LangChain | Pydantic AI |
-|------|-----------|-------------|
+| 任务 | LangChain 1.x | Pydantic AI |
+|------|---------------|-------------|
 | 消息类 | `HumanMessage` / `AIMessage` / `ToolMessage` | `ModelRequest` / `ModelResponse` 含多种 Part |
-| 多轮历史 | `messages=[HumanMessage(...), AIMessage(...)]` | `message_history=r.new_messages()` |
-| 持久化 | 手写 `model_dump` / `model_validate` | `ModelMessagesTypeAdapter.dump_json/validate_json` |
-| 内置 Memory | `ConversationBufferMemory` 等一打 | 没有，**鼓励你自己写**（更简单） |
-| Token 计数 | `model.get_num_tokens(...)` | `r.usage()` |
+| 多轮历史 | checkpointer + `thread_id`（状态在服务端） | `conversation=` / `message_history=`（状态由你保存） |
+| 持久化 | `InMemorySaver` / `SqliteSaver` / `PostgresSaver` | `ConversationTypeAdapter` 自己存；或 harness 的 `StepPersistence` |
+| 跨对话记忆 | Store | harness 的 `Memory` |
+| 裁剪历史 | middleware（摘要 / 裁剪） | `ProcessHistory` capability / 压缩 capability |
+| Token 计数 | `usage_metadata` | `result.usage` |
 
-哲学差异：LangChain 提供"开箱即用的 Memory 类"，Pydantic AI 让你**显式管理 messages 列表**，简单但你要自己写存取。对长期项目反而清晰。
+思路上的差别：LangChain 把对话状态放进服务端 checkpointer；Pydantic AI 让你自己显式管理 messages 列表或 Conversation，概念简单，但存取要自己写，还要把客户端送来的历史当成不可信输入。
 
 LangChain 等价：
 
 ```python
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain.agents import create_agent
+from langgraph.checkpoint.memory import InMemorySaver
 
-messages = []
-messages.append(HumanMessage("我叫 Ethan"))
-ai = model.invoke(messages)
-messages.append(ai)
-messages.append(HumanMessage("我叫什么？"))
-print(model.invoke(messages).content)
+agent = create_agent("openai:gpt-6.1-sol", tools=[], checkpointer=InMemorySaver())
+cfg = {"configurable": {"thread_id": "1"}}
+agent.invoke({"messages": [{"role": "user", "content": "我叫 Ethan"}]}, cfg)
+print(agent.invoke({"messages": [{"role": "user", "content": "我叫什么？"}]}, cfg)["messages"][-1].content)
 ```
 
 Pydantic AI 等价：
 
 ```python
 r1 = agent.run_sync("我叫 Ethan")
-r2 = agent.run_sync("我叫什么？", message_history=r1.new_messages())
+r2 = agent.run_sync("我叫什么？", conversation=r1.conversation)
 print(r2.output)
 ```
 
@@ -286,13 +328,15 @@ print(r2.output)
 
 | 现象 | 原因 | 解法 |
 |------|------|------|
-| 模型不记得上文 | 没传 `message_history` | 每次都传上一轮 `r.new_messages()` |
-| `message_history` 越来越长，最后 OOM | 没截断 | 加滚动窗口或定期摘要 |
-| 切了模型后历史报错 | 不同 provider 的工具调用 ID 不兼容 | 启动新会话或丢掉工具相关消息 |
-| `all_messages()` 里 system 重复 | 把 system 也拼到 history 又传 | 用 `new_messages()`，让 agent 自己处理 system |
-| JSON 序列化里有 `<bytes>` 字段 | 多模态图片用 bytes | `ModelMessagesTypeAdapter` 已处理，自己 `json.dumps` 不行 |
-| 复用 `r.all_messages()` 作为新轮历史，token 翻倍 | system + 历史重复 | 用 `r.new_messages()` 接续 |
-| 工具调用 ID 不匹配报错 | 手动改了 messages 但 ID 没对上 | 不要乱删 `ToolCallPart` / `ToolReturnPart`，要删一起删 |
+| 模型不记得上文 | 没传 `conversation` / `message_history` | 每次都传上一轮的 `conversation`（或 `all_messages()`） |
+| 只传 `new_messages()` 后模型只记得上一轮 | `new_messages()` 只含本轮新增 | 续聊用 `all_messages()` 或 `conversation` |
+| 测试里 `isinstance(part, RetryPromptPart)` 找不到了 | V2 废弃了它 | 认 `ToolReturnPart(outcome="retried")` / `RetryFeedbackPart` |
+| `message_history` 越来越长，最后超窗口 | 没截断 | `ProcessHistory` / 压缩 capability；注意保持工具调用与结果成对 |
+| 切了模型后历史报错 | 不同 provider 的工具调用 ID / 内置工具部件不兼容 | 启动新会话，或 `repair_messages` + 过滤 provider 专属部件 |
+| 历史报「工具调用没有对应结果」 | 取消 / 崩溃 / 手工裁剪留下悬空调用 | `repair_messages(history)` |
+| 工具里 `run_sync` 报 `event loop is already running` | 工具跑在事件循环里 | `await agent.run(...)` |
+| 工具返回的 `datetime` 存回来变字符串 | JSON 没有这些类型 | 接受它，或自己定义序列化 |
+| 把浏览器送来的历史直接喂给 agent | 客户端能伪造审批 / 系统提示 | `sanitize_messages` + 服务端重新校验高风险操作 |
 
 ---
 
@@ -301,30 +345,30 @@ print(r2.output)
 ```python
 from pydantic_ai import Agent
 
-agent = Agent("openai:gpt-4o-mini", system_prompt="你是一位友好的助手。")
+agent = Agent("openai-chat:qwen-flash", instructions="你是一位友好的助手。")
 
-messages = []
+conversation = None
 while True:
     user = input(">>> ")
     if user.lower() in {"exit", "quit"}:
         break
-    r = agent.run_sync(user, message_history=messages)
+    r = agent.run_sync(user, conversation=conversation) if conversation else agent.run_sync(user)
     print(r.output)
-    messages = r.all_messages()  # 累积
+    conversation = r.conversation     # 累积（含用量）
 ```
 
 加持久化：
 
 ```python
-import json, pathlib
-from pydantic_ai.messages import ModelMessagesTypeAdapter
+import pathlib
+from pydantic_ai import ConversationTypeAdapter
 
-PATH = pathlib.Path("history.json")
-messages = ModelMessagesTypeAdapter.validate_json(PATH.read_bytes()) if PATH.exists() else []
+PATH = pathlib.Path("conversation.json")
+conversation = ConversationTypeAdapter.validate_json(PATH.read_bytes()) if PATH.exists() else None
 
 # ... 同上 ...
 
-PATH.write_bytes(ModelMessagesTypeAdapter.dump_json(messages))
+PATH.write_bytes(ConversationTypeAdapter.dump_json(conversation))
 ```
 
 ---
@@ -333,6 +377,4 @@ PATH.write_bytes(ModelMessagesTypeAdapter.dump_json(messages))
 
 完整可运行代码：[`demos/basics/07_messages_history.py`](../../demos/basics/07_messages_history.py)
 
-至此 **01-basics 七篇全部完成**！
-
-接下来进入 [02-tools/01-function-tools.md](../02-tools/01-function-tools.md) —— 工具系统。
+基础篇到这里结束。下一部分讲工具系统，从 [Pydantic AI 02-01：Function Tools 函数工具](../02-tools/01-function-tools.md) 开始。

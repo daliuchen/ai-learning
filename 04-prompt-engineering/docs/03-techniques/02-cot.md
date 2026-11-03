@@ -1,6 +1,6 @@
 # PE Technique 02：Chain-of-Thought（CoT）
 
-> **一句话**：CoT = 让模型在给最终答案前"先思考"。最简单的写法是"let's think step by step"，更稳的是"让模型把推理写到 `<thinking>` 里"。CoT 对推理任务能涨 10-30 分，但**对简单任务是浪费**——本篇讲怎么决定什么时候用、怎么用得有效。
+> CoT 就是让模型在给出最终答案之前先把推理写出来。最简单的写法是在 prompt 末尾加一句 "let's think step by step"，更稳的写法是让模型把推理放进 `<thinking>` 标签。多步推理的任务上提升明显，简单任务上却只是白花 token。这篇讲什么时候该用、怎么用才有效。
 
 ---
 
@@ -18,24 +18,24 @@
   → 女生 13, 男生 17   ← 对
 ```
 
-CoT 把"一次性出答案"改成"先列推理步骤再总结答案"，让模型用更多 token 算出来。
+CoT 把一次性给答案改成先列推理步骤、再总结答案，模型用更多 token 把题算出来。
 
 ---
 
 ## 2. CoT 的三种写法
 
-### 2.1 最简（口诀型）
-在 prompt 末尾加：
+### 2.1 最简写法
+在 prompt 末尾加一句：
 
 ```
 请一步步思考。
 Let's think step by step.
 ```
 
-适合：简单加入，零改动；不在乎输出多了一段推理。
+几乎不用改 prompt，适合不在乎输出里多一段推理的场景。
 
-### 2.2 结构化（推荐）
-让模型把思考放进特定容器：
+### 2.2 结构化写法（推荐）
+让模型把思考放进指定的标签：
 
 ```
 回答之前，请按以下步骤思考：
@@ -51,35 +51,43 @@ Let's think step by step.
 </answer>
 ```
 
-好处：
-- 你能**程序提取** answer
-- 推理过程对调试有用，不行时回看
-- 给思考"显式空间"，比无结构 step by step 效果好
+这样做有三个好处：程序可以直接提取 `<answer>`；推理过程留着，出错时可以回看；给思考一个明确的位置，效果比无结构的 step by step 好。
 
 ### 2.3 模型内置 thinking
-Claude 4.x 的 **extended thinking** 模式、GPT-5 的 **reasoning** 模式——模型在 API 层自带 thinking token，输出里不会泄漏（或单独分开）。
+Claude 的 adaptive thinking（4.6 起的写法，5.x 家族默认开启）、GPT-6 的 reasoning、Gemini 3+ 的 thinking，都是在 API 层自带思考 token，不会混进正文（或者单独返回）。现在的主流模型默认就在思考，多数时候不必再写 CoT prompt，调 effort 就行。
 
 ```python
-# Claude extended thinking
+# Claude adaptive thinking：深浅用 effort 控（旧的 budget_tokens 在 4.7+/5.x 上返回 400）
 resp = client.messages.create(
-    model="claude-sonnet-4-6",
-    thinking={"type": "enabled", "budget_tokens": 5000},
-    max_tokens=1000,
+    model="claude-sonnet-5-5",
+    thinking={"type": "adaptive", "display": "summarized"},   # display 默认 omitted（thinking 文本为空）
+    output_config={"effort": "medium"},                        # low | medium | high | xhigh | max
+    max_tokens=4000,
     messages=[{"role": "user", "content": "..."}],
 )
-# resp.content 包含 thinking 块（如果你想看）+ text 块
+# resp.content 包含 thinking 块（摘要）+ text 块
 ```
 
 ```python
-# GPT-5 reasoning
-resp = client.chat.completions.create(
-    model="gpt-5",
-    reasoning_effort="medium",
-    messages=[...],
+# GPT-6 reasoning
+resp = client.responses.create(
+    model="gpt-6.1-terra",
+    reasoning={"effort": "medium"},
+    input=[...],
+)
+
+# Gemini 3+ thinking
+from google.genai import types
+resp = gclient.models.generate_content(
+    model="gemini-3.8-flash",
+    contents="...",
+    config=types.GenerateContentConfig(
+        thinking_config=types.ThinkingConfig(thinking_level="medium"),
+    ),
 )
 ```
 
-这种"内置 thinking"比手写 CoT prompt 通常**更好**——专门训练过，效率更高。
+内置 thinking 是专门训练过的，通常比手写的 CoT prompt 效果更好、效率更高。
 
 ---
 
@@ -87,47 +95,46 @@ resp = client.chat.completions.create(
 
 | 任务 | 用 CoT？ |
 |------|---------|
-| 多步算术 / 数学 | ✅ 强推荐（或 Program of Thoughts） |
-| 多步推理（逻辑、规划） | ✅ |
-| 复杂多类别分类（10+ 类） | ⚠️ 边界判断时有帮助 |
-| 长文档总结 / 提取 | ⚠️ 看复杂度 |
-| 简单分类（< 5 类） | ❌ 浪费 token |
-| 翻译 / 改写 | ❌ |
-| 单词填空 / 简短问答 | ❌ |
-| 创意生成 | ❌（CoT 让输出僵化） |
+| 多步算术 / 数学 | 强烈推荐（或用 Program of Thoughts） |
+| 多步推理（逻辑、规划） | 用 |
+| 复杂多类别分类（10+ 类） | 看情况，边界判断时有帮助 |
+| 长文档总结 / 提取 | 看复杂度 |
+| 简单分类（< 5 类） | 不用，浪费 token |
+| 翻译 / 改写 | 不用 |
+| 单词填空 / 简短问答 | 不用 |
+| 创意生成 | 不用（CoT 会让输出变僵） |
 
-判断标准：**人类做这件事会不会"先想想"**？需要 → CoT 有用；不需要 → 直接答更省。
+判断标准：人做这件事要不要先打草稿？要，CoT 就有用；不要，直接答更省。
 
 ---
 
 ## 4. CoT 的代价
 
-| 代价 | 量级 |
+| 代价 | 量级（经验值） |
 |------|------|
-| Token 成本 | 通常 +200-2000 tokens (3-10x 简单回答) |
-| 延迟 | 推理 token 也要生成，慢 1-5x |
-| 输出处理 | 要程序提取答案部分 |
-| Streaming 体验差 | 用户看到一大段 thinking 才看到答案 |
+| Token 成本 | 通常多 200-2000 tokens（是简单回答的 3-10 倍） |
+| 延迟 | 推理 token 也要生成，慢 1-5 倍 |
+| 输出处理 | 要用程序提取答案部分 |
+| 流式体验差 | 用户要先看一大段推理才看到答案 |
 
-**节流技巧**：
+省钱的办法：
 
-- 用 Claude extended thinking / GPT-5 reasoning（thinking 不计费 / 折扣）
-- 让 CoT 走 system，最终答案走 structured output（用 tool / response_format 强制 schema）
-- 高频任务先 zero-shot 试，跑得动就不上 CoT
+- 用内置 thinking，并按任务调低 effort。thinking token 照常计费，只是省了手写推理，简单任务把 effort 降到 low。
+- 推理放在 system 里引导，最终答案用 structured output 收口（tool 或 response_format 强制 schema）。
+- 高频任务先试 zero-shot，够用就不上 CoT。
 
 ---
 
 ## 5. CoT 进阶变体
 
 ### 5.1 Self-consistency CoT
-跑 N 次 CoT，投票选最常见答案。详 [09-self-consistency.md](./09-self-consistency.md)。
+同一个问题跑 N 次 CoT，投票取最常见的答案。见 [Self-Consistency 采样投票](./09-self-consistency.md)。
 
 ### 5.2 Tree of Thoughts (ToT)
-不是一条思路走到底，而是分叉、评估、回溯。详 [04-advanced/03](../04-advanced/03-rag-prompting.md)（在 advanced 章用）。
+思路不再一条走到底，而是分叉、评估、回溯。它的调用次数是 CoT 的好几倍，日常任务很少值得，只在搜索空间大、单条推理容易走偏的题目上考虑。
 
 ### 5.3 Program of Thoughts (PoT)
-让模型不写"自然语言推理"，写**代码**——交给 Python 执行算。
-对数学 / 算术任务，**比 CoT 还好**：
+不让模型写自然语言推理，而是写代码，交给 Python 去算。数学和算术任务上，它比 CoT 还好：
 
 ```
 请写 Python 代码解决以下问题，不要直接回答。
@@ -144,7 +151,7 @@ def execute(code: str) -> str:
 ```
 
 ### 5.4 Plan-and-Solve
-明确分两步：先列计划，再按计划执行。
+明确分成两步：先列计划，再按计划执行。
 
 ```
 # 第一步: 不解决问题，先列计划
@@ -154,19 +161,28 @@ def execute(code: str) -> str:
 "按上述计划逐步解决，给出最终答案。"
 ```
 
-适合长链条任务。
+适合链条长的任务。
 
 ---
 
 ## 6. CoT 的常见坑
 
-### 6.1 CoT 也可能错
-模型胡乱推理一通然后给个错答案——你以为有 CoT 就稳了，其实没有。
+几个排查起来比较直接的问题：
 
-对策：CoT + self-consistency + 人工抽检。
+| 坑 | 排查 |
+|----|------|
+| 没有用程序提取 answer | 把推理当答案用，下游解析失败 |
+| `<thinking>` 内容泄漏给用户 | 在 UI 层过滤 |
+| 还在传 `budget_tokens` | Claude 4.7+/5.x 会返回 400，改用 `effort` |
+| CoT 太长超出 token 限制 | thinking 也占 max_tokens |
 
-### 6.2 CoT 在简单任务上反而变差
-模型"用力过猛"，把简单事想复杂了。研究称为"overthinking"。
+下面四个更容易被忽略，单独说一下。
+
+### 6.1 CoT 也会错
+模型可能胡乱推理一通，最后给个错答案。有了 CoT 并不等于稳了，最好再配上 self-consistency 和人工抽检。
+
+### 6.2 简单任务上反而变差
+模型用力过猛，把简单的事想复杂了，研究里叫 overthinking：
 
 ```
 问题：1 + 1 = ?
@@ -174,59 +190,59 @@ def execute(code: str) -> str:
 带 CoT: "首先我需要理解什么是 1 + 1...在十进制中...也许在二进制下...答案可能是 2 也可能是 10..."
 ```
 
-对策：仅复杂任务用 CoT；简单任务别加。
+所以只在复杂任务上用 CoT。
 
-### 6.3 CoT 让推理"显式化"反而被劫持
-prompt injection 看到 `<thinking>` 标签可以注入"忽略指令"。
+### 6.3 推理显式化后可能被劫持
+攻击者看到 `<thinking>` 标签，可以往里注入「忽略指令」之类的内容。对策是把 thinking 块当作不可信内容，最终行为交给结构化输出和 tool call 来约束。
 
-对策：thinking 块视为不可信，结构化输出 + tool call 强约束最终行为。
-
-### 6.4 模型内置 thinking 不要再加 "step by step"
-Claude extended thinking 已经会推理——再叠加 prompt 里的 "let's think step by step"，反而干扰内置 thinking 行为。
+### 6.4 开了内置 thinking 就别再写 "step by step"
+Claude 的内置 thinking 已经在推理，prompt 里再叠一句 "let's think step by step" 多半是多余的。想让它想得更深，先调高 effort；还不够，再用官方文档给的那种引导句，比如 "This task involves multistep reasoning. Think carefully before responding."。
 
 ---
 
 ## 7. 实战 demo
 
 ```python
-# demos/techniques/02_cot_compare.py
-"""对比 zero-shot / simple CoT / structured CoT / extended thinking"""
+"""对比 zero-shot / simple CoT / structured CoT / 调高 effort 的内置 thinking"""
+# 注意：Claude 5.x 默认就带 adaptive thinking，所以 zero-shot 也在"思考"；
+# 想看到 CoT prompt 本身的效果，用不带内置 thinking 的模型（如 Qwen flash / 老模型）对比更干净。
 import re
 import anthropic
 
 client = anthropic.Anthropic()
-PROBLEM = "一个班 30 人，男生比女生多 4 个，男女各几个？只返回最终数字 'M=X Y=Y' 不要别的。"
+PROBLEM = "一个班 30 人，男生比女生多 4 个，男女各几个？只返回最终数字 '男=X 女=Y' 不要别的。"
 
 def zero_shot():
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=50,
+        model="claude-haiku-5-5",
+        max_tokens=2000,  # 5.x 默认带 thinking，max_tokens 要给思考留空间
         messages=[{"role": "user", "content": PROBLEM}],
     )
-    return resp.content[0].text
+    return resp.content[-1].text
 
 def simple_cot():
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
+        model="claude-haiku-5-5",
+        max_tokens=4000,
         messages=[{"role": "user", "content": PROBLEM + "\n\n请一步步思考。"}],
     )
-    return resp.content[0].text
+    return resp.content[-1].text
 
 def structured_cot():
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
+        model="claude-haiku-5-5",
+        max_tokens=4000,
         system="""回答数学题时，先在 <thinking> 里推理，然后在 <answer> 里只放最终答案。""",
         messages=[{"role": "user", "content": PROBLEM}],
     )
-    return resp.content[0].text
+    return resp.content[-1].text
 
-def extended_thinking():
+def builtin_thinking():
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        thinking={"type": "enabled", "budget_tokens": 2000},
-        max_tokens=1000,
+        model="claude-sonnet-5-5",
+        thinking={"type": "adaptive"},
+        output_config={"effort": "high"},
+        max_tokens=4000,
         messages=[{"role": "user", "content": PROBLEM}],
     )
     for block in resp.content:
@@ -236,12 +252,12 @@ def extended_thinking():
 
 
 for name, fn in [("zero-shot", zero_shot), ("simple-cot", simple_cot),
-                  ("structured-cot", structured_cot), ("extended-thinking", extended_thinking)]:
+                  ("structured-cot", structured_cot), ("builtin-thinking", builtin_thinking)]:
     print(f"\n=== {name} ===")
     print(fn())
 ```
 
-观察：复杂数学题上后三个明显更稳。
+在复杂的数学题上，后三种写法明显更稳。
 
 ---
 
@@ -251,34 +267,22 @@ for name, fn in [("zero-shot", zero_shot), ("simple-cot", simple_cot),
 |------|-----------|--------|--------|
 | 简单 CoT | "请一步步推理" | 同 | 同 |
 | 结构化 CoT | 推荐 `<thinking>` `<answer>` XML | 推荐 markdown 标题分段 | 同 OpenAI |
-| 内置 thinking | extended thinking (Sonnet 4+) | reasoning effort (GPT-5+) | thinking_config (2.5+) |
-| Thinking 计费 | 计 token；缓存折扣 | 推理 token 单独计费 | 计 token |
+| 内置 thinking | adaptive thinking + `effort`（4.6+；5.x 默认开） | `reasoning.effort`（GPT-6 全系列） | `thinking_level`（3+，默认开） |
+| Thinking 计费 | 按输出 token 计 | 推理 token 计入输出 | 思考 token 计入 `max_output_tokens` 与计费 |
 
 ---
 
-## 9. 常见坑
+## 9. 下一步
 
-| 坑 | 排查 |
-|----|------|
-| **简单任务也加 CoT** | 浪费 + overthinking |
-| **不程序化提取 answer** | thinking 当 answer 用，下游解析挂 |
-| **CoT 没用 self-consistency** | 单次 CoT 也会错 |
-| **`<thinking>` 内容被泄漏到用户** | UI 层过滤 |
-| **同时用 extended thinking + prompt CoT** | 冲突，效果反而差 |
-| **CoT 长度爆炸超 token 限** | thinking 也吃 max_tokens |
-
----
-
-## 10. 下一步
-
-- 📖 角色 / 边界 → [03-role-prompting.md](./03-role-prompting.md)
-- 📖 任务拆解（CoT 的"工程化"版本） → [04-decomposition.md](./04-decomposition.md)
-- 📖 self-consistency → [09-self-consistency.md](./09-self-consistency.md)
-- 📖 Tool use（Program of Thoughts 的扩展） → [04-advanced/02-tool-use.md](../04-advanced/02-tool-use.md)
+- [Role Prompting 与角色边界](./03-role-prompting.md)
+- [Decomposition 任务拆解](./04-decomposition.md)：可以看作 CoT 的工程化版本
+- [Self-Consistency 采样投票](./09-self-consistency.md)
+- [Tool Use Prompting](../04-advanced/02-tool-use.md)：Program of Thoughts 的延伸
 
 ## 参考资料
 
 - "Chain-of-Thought Prompting Elicits Reasoning" (Wei et al. 2022): https://arxiv.org/abs/2201.11903
-- Claude Extended Thinking: https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
-- OpenAI Reasoning Models: https://platform.openai.com/docs/guides/reasoning
+- Claude Adaptive thinking: https://platform.claude.com/docs/en/build-with-claude/thinking
+- OpenAI Reasoning: https://developers.openai.com/api/docs/guides/reasoning
+- Gemini Thinking: https://ai.google.dev/gemini-api/docs/thinking
 - "Program of Thoughts" (Chen et al. 2022): https://arxiv.org/abs/2211.12588

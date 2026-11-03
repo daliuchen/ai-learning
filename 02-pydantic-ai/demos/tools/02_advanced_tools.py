@@ -45,7 +45,7 @@ class UserCtx:
 
 def pick_model():
     if os.getenv('OPENAI_API_KEY'):
-        return 'openai:gpt-4o-mini'
+        return 'openai-chat:qwen-flash'
     return TestModel()
 
 

@@ -1,6 +1,6 @@
-# EKB 03：技术栈全景——每个选择背后的理由
+# EKB 03：技术栈与选型理由
 
-> **一句话**：技术栈不是「挑最酷的」，而是「挑最适合这个场景的」。本篇把整个项目的选型一次性摊开，给出每个决策的**一句话理由**；完整的选型方法论和权衡在第 03 章展开。
+> 选技术栈看的是合不合适这个场景，不是够不够新。这篇把整个项目的选型一次摊开，每个决定配一两句理由；完整的选型方法和权衡放在第 03 章。
 
 ---
 
@@ -20,34 +20,34 @@ AI 服务层  FastAPI (Python)
 数据层    Postgres + pgvector  ← 文档 / chunk / 向量 / ACL / 日志
 ```
 
-一句话概括这套架构的取舍：**产品壳用 TS，AI 大脑用 Python，数据共享一个 Postgres**；无聊的 plumbing 借脚手架，可教的核心手写。
+这套架构的取舍是：产品外壳用 TS，AI 部分用 Python，两边共享一个 Postgres。枯燥的基础设施借脚手架，值得讲的核心逻辑自己写。
 
 ---
 
 ## 2. 逐层选择与理由
 
-### 2.1 向量库：pgvector（不是 Qdrant/Milvus）
+### 向量库：pgvector（不选 Qdrant/Milvus）
 
 | 候选 | 适合场景 |
 |------|----------|
-| **pgvector** ✅ | 几千~几万 chunk，已有/愿意用 Postgres |
+| pgvector（选用） | 几千到几万 chunk，已有或愿意用 Postgres |
 | Qdrant / Milvus | 百万级以上、需要独立扩缩容 |
 | 纯长上下文（无向量库） | 知识库小到能整个塞进窗口 |
 
-企业知识库通常几百~几千篇文档，切完也就**几千~几万 chunk**。这个规模 pgvector 绰绰有余，还能少维护一个组件、和业务数据同库（方便做 ACL join）。**别为了用网红向量库而用。** 详见 [03-selection/02-vector-db-pgvector](../03-selection/02-vector-db-pgvector.md)。
+企业知识库一般几百到几千篇文档，切完也就几千到几万个 chunk。这个规模 pgvector 绰绰有余，还能少运维一个组件，并且和业务数据同库，做 ACL join 很方便。不要因为某个向量库名气大就用它。详见[向量库选型](../03-selection/02-vector-db-pgvector.md)。
 
-### 2.2 检索：混合检索 + rerank + query 改写
+### 检索：混合检索 + rerank + query 改写
 
-企业知识库最大的痛：**员工的问法和文档的用词对不上**。员工问「钱能不能要回来」，文档写「退款流程」。
-- 纯向量检索会漏专有名词/缩写 → 加 **BM25 关键词**
-- 两路召回有噪声 → 加 **rerank** 精排
-- 口语化问题离文档表述远 → 加 **query 改写**
+企业知识库最头疼的是员工的问法和文档用词对不上。员工问「钱能不能要回来」，文档里写的是「退款流程」。三项增强各管一块：
+- 纯向量检索会漏掉专有名词和缩写，所以加 BM25 关键词检索
+- 两路召回都带噪声，所以加 rerank 精排
+- 口语化的问题离文档表述太远，所以加 query 改写
 
-这套是检索质量的分水岭，详见第 07 章。
+检索质量的高低基本由这一层决定，详见检索增强一章（从[为什么 RAG 的上限由检索决定](../07-retrieval/01-retrieval-is-key.md)开始）。
 
-### 2.3 生成框架：Pydantic AI（不是 LangChain）
+### 生成框架：Pydantic AI（不选 LangChain）
 
-企业知识库是个**相对定型的 pipeline**，不需要 LangChain 那种重编排。选 Pydantic AI 的关键理由：它的**结构化输出**能强制模型返回固定 schema：
+企业知识库的 pipeline 相对固定，用不上 LangChain 那种重型编排。选 Pydantic AI 主要是因为它的结构化输出能强制模型按固定 schema 返回：
 
 ```python
 from pydantic import BaseModel
@@ -58,39 +58,39 @@ class Answer(BaseModel):
     found: bool               # 是否真的找到了依据（没找到就 False）
 ```
 
-「答案 + 引用 + 是否找到」直接落在类型里，引用溯源和兜底逻辑天然成立。详见 [03-selection/04-framework-pydantic-ai](../03-selection/04-framework-pydantic-ai.md)。
+答案、引用、是否找到依据都写在类型里，引用溯源和兜底逻辑顺着类型就能实现。详见[生成框架选型](../03-selection/04-framework-pydantic-ai.md)。
 
-### 2.4 Embedding：可切换，中文优先
+### Embedding：可切换，中文优先
 
-中文为主的知识库，不要无脑默认 OpenAI。我们把 embedding 做成**可替换**的一层（中文 BGE / 商用 / OpenAI 都能插），既贴合中文场景，又是 06 手册「embedding 选型」的活教材。详见 [03-selection/03-embedding-selection](../03-selection/03-embedding-selection.md)。
+中文为主的知识库，不要不假思索地默认 OpenAI。我们把 embedding 做成可替换的一层，中文 BGE、商用 API、OpenAI 都能接进来。这样既照顾中文场景，也正好拿来演示 06 手册里讲的 embedding 选型。详见[Embedding 选型](../03-selection/03-embedding-selection.md)。
 
-### 2.5 前端：Next.js + SSE
+### 前端：Next.js + SSE
 
-问答页要**流式**（答案逐字蹦），用 SSE（Server-Sent Events）比 WebSocket 更轻、更适合「服务器单向推」。引用卡片用 React 组件渲染。详见第 09 章。
+问答页要流式输出，答案逐字出现。这种服务器单向推送的场景用 SSE（Server-Sent Events）比 WebSocket 更轻。引用卡片用 React 组件渲染。详见前端一章（从[流式回答的问答页](../09-frontend/01-qa-page-streaming.md)开始）。
 
-### 2.6 后端：FastAPI（Python）
+### 后端：FastAPI（Python）
 
-AI 那一层用 Python，能直接复用前 6 本手册的全部代码和生态（Pydantic AI、sentence-transformers、各种 embedding 库）。FastAPI 异步、自带 SSE 支持、和 Pydantic 天生一对。
+AI 层用 Python，可以直接复用前几本手册的代码和生态（Pydantic AI、sentence-transformers、各种 embedding 库）。FastAPI 是异步的，支持 SSE，和 Pydantic 也是一套体系。
 
 ---
 
-## 3. 为什么是「TS 壳 + Python 脑」的拆分
+## 3. 为什么拆成 TS 前端加 Python AI 服务
 
-很多人会问：为什么不全用一种语言？
+常有人问：为什么不全用一种语言？
 
 | 方案 | 问题 |
 |------|------|
 | 全 TS | AI 生态（embedding、rerank、Pydantic AI）在 Python 更成熟 |
-| 全 Python | 前端体验（流式 UI、组件）TS/React 更顺手 |
-| **TS 壳 + Python 脑** ✅ | 各用所长，且这就是**真实生产里的常见架构** |
+| 全 Python | 前端体验（流式 UI、组件）用 TS/React 更顺手 |
+| TS 壳 + Python 脑（选用） | 两边各用所长，生产里也很常见 |
 
-这个拆分本身就是可教的——它演示了「产品层和 AI 层职责分离」这个真实工程模式。
+这个拆分本身也值得讲，它演示了产品层和 AI 层职责分离的做法。
 
 ---
 
-## 4. 整个项目用到了前几本手册的什么
+## 4. 项目用到了前几本手册的哪些内容
 
-这本手册是前 7 本的「综合实战」，对应关系：
+这本手册把前 7 本串起来用，对应关系如下：
 
 | 本项目环节 | 来自哪本手册 |
 |-----------|-------------|
@@ -101,7 +101,7 @@ AI 那一层用 Python，能直接复用前 6 本手册的全部代码和生态�
 | Pydantic AI Agent、结构化输出 | 02 Pydantic AI |
 | 答案 prompt、引用约束的措辞 | 04 Prompt Engineering |
 
-学完这本，你会发现前 7 本不是孤立的——它们本来就是为了拼成这样一个系统而存在的。
+做完这个项目再回头看，前 7 本讲的东西在这里都各有位置。
 
 ---
 
@@ -109,14 +109,14 @@ AI 那一层用 Python，能直接复用前 6 本手册的全部代码和生态�
 
 | 坑 | 后果 | 正确做法 |
 |----|------|----------|
-| 几千文档上 Milvus | 过度工程、多一个组件要运维 | pgvector 起步 |
-| 用 LangChain 编排定型 pipeline | 黑盒、调试难 | 自写薄检索层 + Pydantic AI 生成 |
-| 中文知识库默认 OpenAI embedding | 中文召回可能不如 BGE | embedding 做成可切换 |
-| 前后端用同一语言硬凑 | 某一层生态吃亏 | TS 壳 + Python 脑 |
+| 几千篇文档上 Milvus | 过度工程，多一个组件要运维 | 从 pgvector 起步 |
+| 用 LangChain 编排固定 pipeline | 黑盒，难调试 | 自写薄检索层 + Pydantic AI 生成 |
+| 中文知识库不评估就默认 OpenAI embedding | 中文召回未必是候选里最好的 | embedding 做成可切换，用评估集比 |
+| 前后端硬凑同一种语言 | 总有一层的生态吃亏 | TS 壳 + Python 脑 |
 
 ---
 
 ## 下一步
 
-- 选型怎么从头推导？→ [03-selection/01-selection-methodology](../03-selection/01-selection-methodology.md)
-- 怎么跟着学、需要什么环境 → [05-how-to-use](./05-how-to-use.md)
+- 选型怎么从头推导？→ [选型方法论](../03-selection/01-selection-methodology.md)
+- 怎么跟着学、需要什么环境 → [如何使用本手册](./05-how-to-use.md)

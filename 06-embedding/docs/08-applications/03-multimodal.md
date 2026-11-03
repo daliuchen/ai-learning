@@ -1,12 +1,12 @@
 # 多模态：图搜图 / 文搜图 / 图搜文
 
-> **一句话**：用 CLIP 类多模态模型，把图片和文本编码到同一向量空间，文字、图片当 query / doc 任意组合——电商商品搜索、图库管理、视频帧检索都用这套。
+> 用 CLIP 一类的多模态模型把图片和文本编码进同一个向量空间以后，query 和文档可以是文字也可以是图片，随意组合。这篇用商品搜索做例子，把文搜图、图搜图、图文混合查询和视频帧检索各写一遍。
 
 ---
 
 ## 1. CLIP 基础回顾
 
-详见 [01-foundations/06-multimodal.md](../01-foundations/06-multimodal.md)。
+原理在[多模态 Embedding：CLIP 原理](../01-foundations/06-multimodal.md)里讲过，这里只回顾用法：
 
 ```python
 embed_text("a red sneaker")  → vec
@@ -94,7 +94,7 @@ client.upsert("products", points=points)
 ```python
 def search_by_text(query, top_k=5):
     q_vec = embed_text(query)
-    hits = client.search("products", query_vector=q_vec.tolist(), limit=top_k)
+    hits = client.query_points("products", query=q_vec.tolist(), limit=top_k).points
     return [(h.payload, h.score) for h in hits]
 
 
@@ -111,14 +111,14 @@ for p, score in results:
 ```python
 def search_by_image(image_path, top_k=5):
     q_vec = embed_image(image_path)
-    hits = client.search("products", query_vector=q_vec.tolist(), limit=top_k)
+    hits = client.query_points("products", query=q_vec.tolist(), limit=top_k).points
     return [(h.payload, h.score) for h in hits]
 
 
 results = search_by_image("user_uploaded.jpg")
 ```
 
-电商常用："用图找同款"。
+电商里"拍照找同款"就是这个做法。
 
 ---
 
@@ -135,7 +135,7 @@ def search_with_text_and_image(text, image_path, top_k=5, alpha=0.5):
     combined = alpha * t_vec + (1 - alpha) * i_vec
     combined /= np.linalg.norm(combined)
     
-    hits = client.search("products", query_vector=combined.tolist(), limit=top_k)
+    hits = client.query_points("products", query=combined.tolist(), limit=top_k).points
     return [(h.payload, h.score) for h in hits]
 
 
@@ -147,7 +147,7 @@ results = search_with_text_and_image("red color", "user_pic.jpg")
 
 ## 7. 双向量：图 + 标题分开
 
-CLIP 文本能力弱，把"商品标题"用文本 embedding 单独做更准：
+CLIP 的文本理解比较弱，商品标题单独用文本 embedding 模型来编码会更准：
 
 ```python
 client.create_collection(
@@ -171,8 +171,8 @@ for p in products:
 
 
 # 查（按 query 类型选向量）
-text_hits = client.search("products_v2", query_vector=("text", embed_openai(query).tolist()))
-image_hits = client.search("products_v2", query_vector=("image", embed_text(query).tolist()))
+text_hits = client.query_points("products_v2", query=embed_openai(query).tolist(), using="text").points
+image_hits = client.query_points("products_v2", query=embed_text(query).tolist(), using="image").points
 
 # RRF 融合
 ```
@@ -181,7 +181,7 @@ image_hits = client.search("products_v2", query_vector=("image", embed_text(quer
 
 ## 8. zero-shot 分类
 
-不用训练，CLIP 直接给图分类：
+CLIP 不用训练就能直接给图片分类：
 
 ```python
 def classify_image(image_path, labels):
@@ -195,14 +195,24 @@ def classify_image(image_path, labels):
 cat_or_dog = classify_image("photo.jpg", ["cat", "dog", "neither"])
 ```
 
-适合：内容审核、商品 tag 自动打标、视频内容分类。
+适合内容审核、商品自动打标、视频内容分类这类任务。
 
 ---
 
 ## 9. 视频帧检索
 
 ```python
+import uuid
 import cv2
+
+
+def embed_pil_image(img):
+    """同 embed_image，只是直接接收 PIL 图片"""
+    x = preprocess(img).unsqueeze(0)
+    with torch.no_grad():
+        feat = model.encode_image(x)
+        feat /= feat.norm(dim=-1, keepdim=True)
+    return feat[0].numpy()
 
 
 def extract_keyframes(video_path, every_sec=5):
@@ -225,20 +235,21 @@ def extract_keyframes(video_path, every_sec=5):
     return frames
 
 
+# 先建 "videos" collection（size=DIM，COSINE），同第 2 节
 def index_video(video_path, video_id):
     frames = extract_keyframes(video_path)
     for f in frames:
         img = Image.fromarray(cv2.cvtColor(f["frame"], cv2.COLOR_BGR2RGB))
         vec = embed_pil_image(img)
         client.upsert("videos", points=[PointStruct(
-            id=hash((video_id, f["time_sec"])),
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{video_id}#{f['time_sec']}")),  # Qdrant 的 id 只接受非负整数或 UUID
             vector=vec.tolist(),
             payload={"video_id": video_id, "time_sec": f["time_sec"]},
         )])
 
 
-# 文字搜视频片段
-hits = client.search("videos", query_vector=embed_text("有人跳舞").tolist(), limit=5)
+# 文字搜视频片段（ViT-B-32 是英文 CLIP，query 用英文；中文 query 要换中文或多语言 CLIP）
+hits = client.query_points("videos", query=embed_text("a person dancing").tolist(), limit=5).points
 for h in hits:
     print(f"video={h.payload['video_id']}  time={h.payload['time_sec']}s")
 ```
@@ -248,7 +259,6 @@ for h in hits:
 ## 10. 完整 demo
 
 ```python
-# demos/applications/03_multimodal.py
 import torch
 import open_clip
 from PIL import Image
@@ -308,12 +318,14 @@ for query in ["a kitten", "a vehicle", "a puppy"]:
 ## 11. 模型选型
 
 ```
-通用图文：CLIP ViT-L/14 / SigLIP（最强）
-中文：Chinese-CLIP / Jina-CLIP
-长描述：jina-clip-v1
-代码截图：CLIP 一般，专模型可考虑
-医疗 / 卫星 / 遥感：domain-specific CLIP（如 RemoteCLIP）
+通用图文（开源）：OpenCLIP ViT-L/14、SigLIP 2 等
+中文：Chinese-CLIP，或多语言的 jina-clip-v2
+长描述 / 多语言文本：jina-clip-v2（文本侧支持 8k token）
+截图、PDF 页这类图文混排：qwen3-vl-embedding、Cohere embed-v5.0 等新一代多模态 embedding
+医疗 / 卫星 / 遥感：领域专用 CLIP（如 RemoteCLIP）
 ```
+
+这里不排名次。多模态榜单变化快，各模型擅长的图片类型也不同，拿自己的图片和 query 建一个小 evalset 比一下再定。
 
 ---
 
@@ -321,15 +333,15 @@ for query in ["a kitten", "a vehicle", "a puppy"]:
 
 | 坑 | 解 |
 |----|----|
-| CLIP 数字 / 计数弱 | 别期望区分"3 只猫"和"5 只猫" |
-| 中文用英文 CLIP | 用 Chinese-CLIP / 多语言 CLIP |
-| 用 OpenAI text embedding 比 CLIP 图 | 模态不一致，无效 |
-| OCR-heavy 图（文档截图）| CLIP 弱，先 OCR 再用文本 embed |
+| CLIP 对数字和计数不敏感 | 别指望它分清"3 只猫"和"5 只猫" |
+| 中文场景用了英文 CLIP | 换 Chinese-CLIP 或多语言 CLIP |
+| 拿 OpenAI 文本 embedding 去和 CLIP 图片向量比 | 两者不在同一个空间，比了也没意义 |
+| 文字很多的图（文档截图）| CLIP 处理不好，先 OCR 再用文本 embedding |
 
 ---
 
 ## 13. 下一步
 
-- 📖 推荐系统 → [04-recommendation.md](./04-recommendation.md)
-- 📖 去重 / 聚类 → [05-deduplication.md](./05-deduplication.md)
-- 📖 基础原理 → [01-foundations/06-multimodal.md](../01-foundations/06-multimodal.md)
+- 推荐系统：[用 Embedding 做推荐系统](./04-recommendation.md)
+- 去重和聚类：[用 Embedding 做去重、聚类与异常检测](./05-deduplication.md)
+- 多模态的基础原理：[多模态 Embedding：CLIP 原理](../01-foundations/06-multimodal.md)

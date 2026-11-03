@@ -19,30 +19,33 @@ import os
 from dotenv import load_dotenv
 
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import Thinking
 from pydantic_ai.messages import TextPart, ThinkingPart
 from pydantic_ai.models.test import TestModel
 
 load_dotenv()
 
 
-def pick_thinking_model() -> str | TestModel:
-    """thinking 任务首选支持的型号"""
+def thinking_agent_kwargs() -> dict:
+    """返回「启用 thinking 的 Agent」所需参数：统一设置优先，千问走 extra_body。"""
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-7-sonnet-latest"
+        # 统一 Thinking capability：自动翻译成各家 provider 的原生格式
+        return {"model": "anthropic:claude-sonnet-4-5", "capabilities": [Thinking(effort="high")]}
     if os.getenv("OPENAI_API_KEY"):
-        # o-series / gpt-5 系列才支持 reasoning
-        return "openai:o4-mini"
-    if os.getenv("GEMINI_API_KEY"):
-        return "google-gla:gemini-2.0-flash-thinking-exp"
+        # 千问（OpenAI 兼容端点）的混合推理模型：靠 extra_body 打开，思考内容以 ThinkingPart 返回
+        return {
+            "model": "openai-chat:qwen-flash",
+            "model_settings": {"extra_body": {"enable_thinking": True}},
+        }
     print("[warn] 未检测到支持 thinking 的 API key，使用 TestModel。\n")
-    return TestModel()
+    return {"model": TestModel()}
 
 
 def pick_normal_model() -> str | TestModel:
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-5-haiku-latest"
+        return "anthropic:claude-haiku-4-5"
     return TestModel()
 
 
@@ -69,11 +72,9 @@ def extract_parts(result) -> tuple[str, str]:
 # ----------------------------------------------------------------------------
 def demo_with_thinking() -> None:
     print("===== 1) 启用 Thinking =====")
-    model = pick_thinking_model()
     agent = Agent(
-        model,
-        model_settings={"thinking": "high"},
-        system_prompt="你是一位严谨的数学老师。",
+        instructions="你是一位严谨的数学老师。",
+        **thinking_agent_kwargs(),
     )
     try:
         result = agent.run_sync(HARD_QUESTION)
@@ -87,7 +88,7 @@ def demo_with_thinking() -> None:
         # 只打前 300 字，避免刷屏
         print(f"[思考片段] {thinking[:300]}...\n")
     print(f"[最终回答] {answer or result.output}")
-    print(f"[usage] {result.usage()}\n")
+    print(f"[usage] {result.usage}\n")
 
 
 # ----------------------------------------------------------------------------
@@ -96,14 +97,14 @@ def demo_with_thinking() -> None:
 def demo_without_thinking() -> None:
     print("===== 2) 不启用 Thinking 对比 =====")
     model = pick_normal_model()
-    agent = Agent(model, system_prompt="你是一位严谨的数学老师。")
+    agent = Agent(model, instructions="你是一位严谨的数学老师。")
     try:
         result = agent.run_sync(HARD_QUESTION)
     except Exception as e:
         print(f"[skip] {e}")
         return
     print(f"[回答] {result.output}")
-    print(f"[usage] {result.usage()}\n")
+    print(f"[usage] {result.usage}\n")
 
 
 # ----------------------------------------------------------------------------
@@ -124,9 +125,9 @@ def demo_anthropic_native() -> None:
         anthropic_thinking={"type": "enabled", "budget_tokens": 2048},
     )
     agent = Agent(
-        "anthropic:claude-3-7-sonnet-latest",
+        "anthropic:claude-sonnet-4-5",
         model_settings=settings,
-        system_prompt="你是一位严谨的数学老师。",
+        instructions="你是一位严谨的数学老师。",
     )
     try:
         result = agent.run_sync("用反证法证明 √2 是无理数")
@@ -138,7 +139,7 @@ def demo_anthropic_native() -> None:
     if thinking:
         print(f"[思考片段] {thinking[:300]}...\n")
     print(f"[最终回答] {answer or result.output}")
-    print(f"[usage] {result.usage()}\n")
+    print(f"[usage] {result.usage}\n")
 
 
 def main() -> None:

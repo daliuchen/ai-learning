@@ -1,10 +1,10 @@
 # Triage Pattern：分流模式
 
-> **一句话**：一个 "Triage Agent" 不干活，只负责把用户路由给对应专家——是 handoffs 最经典的用法，OpenAI 招牌 demo。
+> Triage Agent 自己不处理业务，只负责把用户转给对应的专家。这是 handoffs 最常见的用法，也是 OpenAI 官方示例里出现最多的结构。
 
 ---
 
-## 1. Pattern 描述
+## 1. 结构
 
 ```
 User
@@ -15,26 +15,15 @@ Triage Agent（只判断主题）
  └─ handoff → Sales Agent（专家 3）
 ```
 
-特点：
-
-- Triage 只懂分类，不懂业务
-- 每个专家有自己的 instructions / tools
-- 单一入口、多专家分流
+Triage 只管分类，不懂业务；每个专家有自己的 instructions 和 tools。对用户来说只有一个入口，背后是多个专家。
 
 ---
 
-## 2. 啥时候用
+## 2. 什么时候用
 
-✅ 适合：
+适合的场景：客服和帮助中心、写作/代码/翻译这类多领域助手、HR/IT/Finance 的内部知识库。
 
-- 客服 / 帮助中心（典型）
-- 多领域助手（写作 / 代码 / 翻译）
-- 内部知识库（HR / IT / Finance）
-
-❌ 不适合：
-
-- 任务需要多专家**协作**（用 multi-agent 编排，详见 [04-complex-multi-agent.md](./04-complex-multi-agent.md)）
-- 流程有严格步骤（用 LangGraph）
+不适合的场景有两种。一是任务需要几个专家协作完成，这时该用多 Agent 编排（见 [复杂多 Agent 协作](./04-complex-multi-agent.md)）；二是流程有严格的步骤顺序，这种用 LangGraph 更合适。
 
 ---
 
@@ -113,6 +102,8 @@ triage = Agent(
 )
 ```
 
+> 给每个专家设 `handoff_description`（如 `Agent(name="Billing", handoff_description="账单、退款、订阅、发票", ...)`），SDK 会把它追加到 `transfer_to_billing` 的工具描述里，Triage 的 instructions 就能写短一些。instructions 开头再拼上 `RECOMMENDED_PROMPT_PREFIX`（在 `agents.extensions.handoff_prompt` 里）会更稳。
+
 ---
 
 ## 4. 使用 + Session 续接
@@ -152,13 +143,13 @@ asyncio.run(chat())
 [Support] 您是登录时报什么错？...
 ```
 
-每轮 Triage 重新分流，session 把历史给到专家。
+每一轮都由 Triage 重新分流，session 负责把历史带给专家。如果希望用户追问时直接留在专家那里，改成 `Runner.run(last_agent, ...)` 就行，见 [Handoffs 概念：与 Tool、Sub-Agent 的区别](./01-handoffs-concept.md) 第 9 节。
 
 ---
 
-## 5. Triage 的 instruction 怎么写
+## 5. Triage 的 instructions 怎么写
 
-通用模板：
+一个通用模板：
 
 ```
 你是 [组织名] 的分流员。
@@ -178,22 +169,22 @@ asyncio.run(chat())
 
 ---
 
-## 6. Triage 的 model 选择
+## 6. Triage 用什么模型
 
-通常 Triage 用 **mini / haiku 级别模型**就够，因为只做分类。专家 Agent 用更强的模型。
+Triage 只做分类，一般用 gpt-6-luna、claude-haiku 这一级的小模型就够了，专家再用强一些的模型。
 
 ```python
-triage = Agent(name="Triage", instructions="...", model="gpt-4o-mini")
-billing = Agent(name="Billing", instructions="...", model="gpt-4o")
+triage = Agent(name="Triage", instructions="...", model="gpt-6-luna")
+billing = Agent(name="Billing", instructions="...", model="gpt-6.1-sol")
 ```
 
-省钱 + Triage 反应快。
+这样既省钱，Triage 的响应也快。
 
 ---
 
-## 7. Default fallback
+## 7. 兜底
 
-不知道转哪 → 让 Triage 自己回答兜底：
+判断不了该转给谁时，让 Triage 自己回答：
 
 ```python
 triage = Agent(
@@ -209,9 +200,9 @@ triage = Agent(
 
 ---
 
-## 8. Triage 也带 guardrails
+## 8. 给 Triage 加 guardrails
 
-入口加守卫拦 PII / 越权请求：
+在入口加守卫，拦下 PII 或越权请求。input guardrail 只对链上第一个 agent 生效，Triage 正好是入口。它默认和 Triage 的第一次模型调用并行执行；如果希望被拦下的输入完全不触发模型和工具，用 `@input_guardrail(run_in_parallel=False)`：
 
 ```python
 from agents import input_guardrail, GuardrailFunctionOutput
@@ -220,8 +211,8 @@ from agents import input_guardrail, GuardrailFunctionOutput
 @input_guardrail
 async def block_pii(ctx, agent, user_input):
     if "身份证号" in user_input:
-        return GuardrailFunctionOutput(tripwire_triggered=True)
-    return GuardrailFunctionOutput()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+    return GuardrailFunctionOutput(output_info=None)
 
 
 triage = Agent(
@@ -232,31 +223,28 @@ triage = Agent(
 )
 ```
 
-详见 [04-guardrails/01-input-guardrails.md](../04-guardrails/01-input-guardrails.md)。
+详见 [Input Guardrails：输入守卫](../04-guardrails/01-input-guardrails.md)。
 
 ---
 
-## 9. handoff 回 Triage？
+## 9. 专家能转回 Triage 吗
 
-如果专家不能处理，要回 Triage 让它重新分流？
+专家处理不了时，可以转回 Triage 重新分流：
 
 ```python
 billing = Agent(
     name="Billing",
     instructions="如果用户问的不是账单，handoff 回 Triage",
-    handoffs=["Triage"],  # ⚠️ 名字字符串
 )
+triage = Agent(name="Triage", instructions="分流", handoffs=[billing])
+billing.handoffs.append(triage)     # 循环引用：先建好两个 Agent，再互相挂（handoffs 必须是 Agent / Handoff 对象，不能写名字字符串）
 ```
 
-但**别玩**：
-
-- 容易循环
-- 用户体验差（一直转）
-- 更好的做法：Triage 入口判得准 + 专家有"对不起这个我处理不了"兜底
+但我不建议这么做。这样很容易形成循环，用户也会被转来转去。更好的办法是让 Triage 在入口就判断准，同时给专家写好“这个我处理不了”的兜底回复。
 
 ---
 
-## 10. 监控 / 评测分流准确率
+## 10. 监控和评测分流准确率
 
 ```python
 # 灰度阶段记录
@@ -273,14 +261,13 @@ async def chat_with_logging(user_id: str, msg: str):
     return log
 ```
 
-事后人工 / LLM 抽样标 "应该转去哪" → 算 Triage 准确率。详见 [07-production/05-evals.md](../07-production/05-evals.md)。
+事后用人工或 LLM 抽样标注“应该转去哪”，就能算出 Triage 的准确率。详见 [评测：把 Prompt Engineering 手册的评测集用到 Agent 上](../07-production/05-evals.md)。
 
 ---
 
 ## 11. 完整 demo
 
 ```python
-# demos/handoffs/02_triage.py
 import asyncio
 from agents import Agent, Runner, function_tool, SQLiteSession
 
@@ -298,7 +285,7 @@ billing = Agent(
     name="Billing",
     instructions="处理账单，需要订单号",
     tools=[lookup_invoice, issue_refund],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -311,7 +298,7 @@ support = Agent(
     name="Support",
     instructions="处理技术问题，先 search_kb",
     tools=[search_kb],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -322,7 +309,7 @@ triage = Agent(
 - 技术 → Support
 - 闲聊 → 自己用一句话回应""",
     handoffs=[billing, support],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -346,6 +333,6 @@ asyncio.run(main())
 
 ## 12. 下一步
 
-- 📖 控制 handoff 时传啥信息 → [03-handoff-inputs.md](./03-handoff-inputs.md)
-- 📖 复杂多 Agent 编排 → [04-complex-multi-agent.md](./04-complex-multi-agent.md)
-- 📖 实战：完整客服 Triage → [08-practice/01-customer-triage.md](../08-practice/01-customer-triage.md)
+- 控制 handoff 时传哪些信息 → [Handoff Inputs & Filters：控制信息流](./03-handoff-inputs.md)
+- 更复杂的多 Agent 编排 → [复杂多 Agent 协作](./04-complex-multi-agent.md)
+- 实战：完整的客服 Triage → [实战 1：客服 Triage Agent](../08-practice/01-customer-triage.md)

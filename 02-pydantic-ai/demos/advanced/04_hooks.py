@@ -34,9 +34,9 @@ load_dotenv()
 
 def pick_model() -> str | TestModel:
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-5-haiku-latest"
+        return "anthropic:claude-haiku-4-5"
     print("[warn] 未检测到 API key，使用 TestModel（钩子仍会触发）。\n")
     return TestModel()
 
@@ -63,7 +63,7 @@ def build_hooks() -> Hooks:
         print(f"  [hook] before_run")
 
     @hooks.on.after_run
-    async def on_done(ctx: RunContext[None]) -> None:
+    async def on_done(ctx: RunContext[None], *, result):
         _audit_log.append(
             {
                 "kind": "run_end",
@@ -72,6 +72,7 @@ def build_hooks() -> Hooks:
             }
         )
         print(f"  [hook] after_run  total_tokens={ctx.usage.total_tokens}")
+        return result  # after_run 必须把结果原样（或改写后）返回
 
     # ----- 1.2 模型请求级：trace + token 预算 -----
     @hooks.on.before_model_request
@@ -99,14 +100,15 @@ def build_hooks() -> Hooks:
     # ----- 1.3 wrap_model_request：缓存 -----
     @hooks.on.model_request
     async def cache_request(ctx, *, request_context, handler):
-        try:
-            key_src = json.dumps(
-                [m.model_dump(mode="json") for m in request_context.messages],
-                default=str,
-                sort_keys=True,
-            )
-        except Exception:
-            key_src = str(request_context.messages)
+        # 缓存键只取「用户提示 + 工具返回」的内容：消息里带时间戳 / run_id，整条 dump 的话永远 MISS
+        key_src = json.dumps(
+            [
+                getattr(part, "content", None)
+                for msg in request_context.messages
+                for part in msg.parts
+            ],
+            default=str,
+        )
         key = hashlib.md5(key_src.encode()).hexdigest()
         if key in _response_cache:
             print(f"  [hook] cache HIT  key={key[:8]}")
@@ -126,7 +128,7 @@ def build_hooks() -> Hooks:
         return args
 
     @hooks.on.after_tool_execute
-    async def trace_tool_done(ctx, *, call, tool_def, result):
+    async def trace_tool_done(ctx, *, call, tool_def, args, result):
         print(f"  [hook] after_tool_execute   tool={call.tool_name}")
         return result
 
@@ -146,7 +148,7 @@ def demo_cached_runs() -> None:
     print("===== 1) 两次同 prompt，演示缓存 =====")
     model = pick_model()
     hooks = build_hooks()
-    agent = Agent(model, capabilities=[hooks], system_prompt="一句话回答。")
+    agent = Agent(model, capabilities=[hooks], instructions="一句话回答。")
 
     print("--- 第一次 ---")
     r1 = agent.run_sync("Python 的 GIL 是什么？")
@@ -164,7 +166,7 @@ def demo_tool_with_hooks() -> None:
     print("===== 2) 工具调用 + PII 脱敏 =====")
     model = pick_model()
     hooks = build_hooks()
-    agent = Agent(model, capabilities=[hooks], system_prompt="你是天气助手。")
+    agent = Agent(model, capabilities=[hooks], instructions="你是天气助手。")
 
     @agent.tool_plain
     def get_weather(city: str) -> str:

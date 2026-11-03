@@ -1,12 +1,12 @@
 # CE 09-01：实战 · 带长期记忆的客服 Agent
 
-> **一句话**：把前面学的「上下文分层」「记忆存取」「压缩」全串成一个能跑的东西——一个跨会话记得你是谁、记得你上次抱怨过啥的客服 Agent。核心不在模型多强，而在每一轮你往窗口里**装了什么**：system 规则 + 用户画像 + 召回的历史记忆 + 当前会话历史 + 当前 query，且每块都有 token 预算、超了就压。
+> 这一篇把前面讲过的上下文分层、记忆存取和压缩串起来，做一个能跑的客服 Agent：换了会话也记得你是谁，记得你上次抱怨过什么。每一轮往窗口里装的是 system 规则、用户画像、召回的历史记忆、当前会话历史和当前 query，每一块都有 token 预算，超了就压缩。
 
 ---
 
 ## 1. 整体架构
 
-一个生产级客服 Agent，「记忆」其实是两条管线：**写入管线**（每轮把新事实沉淀到长期记忆）和**读取管线**（每轮把相关记忆召回进窗口）。中间夹着一个会话历史的压缩阀门。
+生产环境里的客服 Agent，记忆其实是两条管线：写入管线每轮把新事实沉淀进长期记忆，读取管线每轮把相关记忆召回到窗口里。中间还有一个控制会话历史长度的压缩环节。
 
 ```
                       ┌─────────────────────────────────────────┐
@@ -27,29 +27,29 @@
                     extract_facts(对话片段)
 ```
 
-读取靠相关性召回（串 [04-memory](../04-memory/03-storage-recall.md)），写入靠每轮事实抽取，会话历史靠摘要压缩（串 [05-compaction](../05-compaction/02-summarization.md)），窗口组装靠分层 + 预算（串 [02-anatomy](../02-anatomy/06-structure.md)）。
+读取靠相关性召回（对应[记忆的存储与召回](../04-memory/03-storage-recall.md)），写入靠每轮的事实抽取，会话历史靠摘要压缩（对应[摘要式压缩](../05-compaction/02-summarization.md)），窗口组装靠分层加预算（对应[组织结构：分隔符、XML/Markdown 与顺序](../02-anatomy/06-structure.md)）。
 
 ---
 
 ## 2. 上下文构成与 token 预算
 
-模型每次只看得见这一轮 `build_context` 拼出来的东西。先把预算分配定下来（以 Claude 200K 窗口、留 4K 给回复为例，实际给上下文约 12K 才划算——多了慢且贵）：
+模型每次只能看到这一轮 `build_context` 拼出来的内容。先把预算分配定下来。现在的窗口有 1M，但也不要用满。下表五块合计约 9.2K，再给回复留 4K，单轮总量在 13K 左右，再往上加就又慢又贵。
 
 | 区块 | 内容 | 预算 | 超了怎么办 |
 |------|------|------|------------|
 | ① System 规则 | 客服身份、语气、能做不能做、安全边界 | ~800 tok | 固定，不动 |
 | ② 用户画像 | 姓名、等级、套餐、已知偏好（结构化） | ~400 tok | 只放字段，不放原文 |
-| ③ 召回记忆 | 向量检索 top-k 条历史事实 | ~1500 tok | 调小 k / 提高阈值 |
-| ④ 会话历史 | 最近 N 轮原文 + 更早的摘要 | ~6000 tok | 超阈值触发摘要压缩 |
+| ③ 召回记忆 | 向量检索 top-k 条历史事实 | ~1500 tok | 调小 k 或提高阈值 |
+| ④ 会话历史 | 最近 N 轮原文 + 更早的摘要 | ~6000 tok | 超过阈值时触发摘要压缩 |
 | ⑤ 当前 query | 用户这句话 | ~500 tok | 一般不动 |
 
-原则一脉相承：**重要信息靠头部**（system / 画像 / 记忆放前面，避免 lost in the middle），**会话历史靠尾部**（最近的最相关）。
+排列顺序沿用前面的原则：**重要信息放在头部，会话历史放在尾部**。system、画像、记忆放前面，避免 lost in the middle；最近的对话最相关，放在最后。
 
 ---
 
 ## 3. 核心代码：存储与召回层
 
-先搭一个最小可跑的向量记忆库。这里用 OpenAI embedding + 内存字典模拟向量库（生产替换成 Qdrant / pgvector 即可，接口一致）。
+先搭一个能直接跑的最小向量记忆库。这里用 OpenAI embedding 加内存字典模拟向量库，生产环境换成 Qdrant 或 pgvector 即可，接口一样。
 
 ```python
 # ✅ 长期记忆：向量存储 + 召回（内存模拟版，可直接跑）
@@ -88,13 +88,15 @@ class MemoryStore:
 memory = MemoryStore()
 ```
 
-`thresh` 是召回质量的命门：太低召回一堆无关事实污染上下文，太高漏召回。客服场景建议 0.2~0.3 起步，按 badcase 调。
+召回质量主要看 `thresh`。太低会召回一堆无关事实污染上下文，太高又会漏召回。客服场景建议从 0.2~0.3 起步，再根据 badcase 调整。
 
 ---
 
 ## 4. 核心代码：事实抽取（写入管线）
 
-不要把整段对话原样塞进长期记忆——那等于没压缩。每轮结束后用一次小模型调用，把对话**抽成原子事实**再写入。
+不要把整段对话原样存进长期记忆，那样等于没压缩。每轮结束后用小模型调用一次，把对话抽成原子事实再写入。
+
+下面几段代码调用 `gpt-6-luna`（以及第 6 节的 `gpt-6.1-sol`）时传了 `temperature`。GPT-6 系列带 reasoning，是否接受这个参数以 OpenAI 的模型页为准，不支持的话把它去掉即可。
 
 ```python
 # ✅ 每轮结束：从对话片段抽取可长期保留的事实
@@ -110,9 +112,8 @@ EXTRACT_PROMPT = """从下面这段客服对话中，抽取关于「用户」的
 def extract_facts(user_msg: str, assistant_msg: str) -> list[str]:
     turn = f"用户：{user_msg}\n客服：{assistant_msg}"
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[{"role": "user", "content": EXTRACT_PROMPT.format(turn=turn)}],
-        response_format={"type": "json_object"} if False else None,
         temperature=0,
     )
     raw = resp.choices[0].message.content.strip()
@@ -125,27 +126,27 @@ def extract_facts(user_msg: str, assistant_msg: str) -> list[str]:
         return []
 ```
 
-用 `gpt-4o-mini` 这类便宜模型抽取，`temperature=0` 求稳定。抽取出来的事实如「用户用的是企业版套餐」「上次反馈导出 Excel 乱码」会进 `memory.write`，下次相关问题来时被召回。
+抽取用 `gpt-6-luna` 这类便宜的模型就够了。抽出来的事实，比如「用户用的是企业版套餐」「上次反馈导出 Excel 乱码」，会通过 `memory.write` 写入，下次有相关问题时被召回。
 
 ---
 
 ## 5. 核心代码：会话历史压缩
 
-单次会话聊久了，④ 区会撑爆预算。策略：**保留最近 N 轮原文，更早的滚动摘要成一段**（buffer + summary 混合）。
+一次会话聊久了，④ 区会超出预算。处理办法是保留最近 N 轮原文，更早的滚动摘要成一段，也就是 buffer 加 summary 的混合方式。
 
 ```python
 # ✅ 会话历史超阈值就摘要压缩
 def maybe_compress(history: list[dict], keep_recent: int = 6,
                    token_budget: int = 6000) -> tuple[str, list[dict]]:
     """返回 (历史摘要, 保留的最近原文)。"""
-    approx_tokens = sum(len(m["content"]) for m in history) // 2  # 中文粗估
+    approx_tokens = int(sum(len(m["content"]) for m in history) * 0.7)  # 中文粗估：o200k_base 下每字约 0.7 token
     if approx_tokens <= token_budget or len(history) <= keep_recent:
         return "", history
 
     old, recent = history[:-keep_recent], history[-keep_recent:]
     transcript = "\n".join(f'{m["role"]}: {m["content"]}' for m in old)
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[{"role": "user",
                    "content": f"用 5 句以内中文摘要这段客服对话，保留未解决的问题和关键结论：\n{transcript}"}],
         temperature=0,
@@ -153,13 +154,13 @@ def maybe_compress(history: list[dict], keep_recent: int = 6,
     return resp.choices[0].message.content.strip(), recent
 ```
 
-注意：被摘要掉的轮次里，重要事实应该已经在第 4 步进了长期记忆——所以摘要丢一点细节不致命，长期记忆是兜底。
+被摘要掉的那些轮次里，重要的事实在第 4 节的写入管线里已经进了长期记忆。所以摘要丢掉一些细节问题不大，长期记忆会兜底。
 
 ---
 
 ## 6. 核心代码：组装窗口 + 主循环
 
-把五块按预算和顺序拼起来，跑完整轮。
+按预算和顺序把五块拼起来，跑一轮完整的对话。
 
 ```python
 # ✅ 组装上下文 + 一轮完整对话
@@ -188,10 +189,10 @@ def build_context(user_id: str, query: str, history: list[dict]) -> list[dict]:
 
 def chat(user_id: str, query: str, history: list[dict]) -> str:
     messages = build_context(user_id, query, history)
-    resp = client.chat.completions.create(model="gpt-4o", messages=messages, temperature=0.3)
+    resp = client.chat.completions.create(model="gpt-6.1-sol", messages=messages, temperature=0.3)
     reply = resp.choices[0].message.content
 
-    # 更新短期历史 + 异步沉淀长期记忆
+    # 更新短期历史 + 沉淀长期记忆（示例里同步执行，生产放进后台任务，见第 7 节）
     history.append({"role": "user", "content": query})
     history.append({"role": "assistant", "content": reply})
     for fact in extract_facts(query, reply):              # 写入管线
@@ -206,7 +207,7 @@ h2: list[dict] = []
 print(chat("u_42", "上次那个问题修好了吗？", h2))         # 召回到「导出乱码」，答得上来
 ```
 
-第二个会话 `h2` 是空的短期历史，但因为长期记忆里有「导出 Excel 乱码」这条事实、且与「上次那个问题」语义相关被召回，Agent 才接得住——这就是分层记忆的价值。
+第二个会话的短期历史 `h2` 是空的。Agent 之所以还能接上话，是因为长期记忆里有「导出 Excel 乱码」这条事实，它和「上次那个问题」语义相关，被召回了。
 
 ---
 
@@ -214,12 +215,12 @@ print(chat("u_42", "上次那个问题修好了吗？", h2))         # 召回到
 
 | 优化 | 做法 |
 |------|------|
-| 召回更准 | 用 query 改写（把「上次那个问题」改写成更可检索的句子）再 embed |
-| 写入不重复 | 抽取后做语义去重 / 合并（「VIP 用户」别写两遍），或定期 dedup |
-| 记忆会过期 | 给事实加时间戳，召回时降权旧事实，矛盾事实以新覆旧 |
-| 抽取不阻塞 | `extract_facts` 放后台任务队列，不卡用户响应 |
-| 省 token | 画像 / system 用 prompt caching，固定前缀复用缓存 |
-| 防幻觉 | system 明确「记忆仅供参考，不确定就反问」，别让模型硬编历史 |
+| 召回更准 | 先做 query 改写（把「上次那个问题」改写成更容易检索的句子）再 embed |
+| 写入不重复 | 抽取后做语义去重或合并（「VIP 用户」别写两遍），或者定期 dedup |
+| 记忆会过期 | 给事实加时间戳，召回时给旧事实降权，矛盾的事实以新的为准 |
+| 抽取不阻塞 | `extract_facts` 放进后台任务队列，不拖慢用户的响应 |
+| 省 token | 固定的 SYSTEM 放最前、画像紧随其后，每轮会变的召回记忆和摘要放在后面，前缀稳定才能命中 prompt caching（OpenAI 自动缓存要求前缀至少 1,024 token） |
+| 防幻觉 | system 里写明「记忆仅供参考，不确定就反问」，别让模型硬编历史 |
 
 ---
 
@@ -227,25 +228,25 @@ print(chat("u_42", "上次那个问题修好了吗？", h2))         # 召回到
 
 | 坑 | 后果 | 解法 |
 |----|------|------|
-| 把整段对话写进长期记忆 | 库膨胀、召回全是噪声 | 只写抽取后的原子事实 |
-| 召回全量倒进窗口 | token 爆 + 稀释关键信息 | top-k + 阈值过滤 |
-| 摘要时把未解决问题丢了 | Agent「失忆」用户的诉求 | 摘要 prompt 显式要求保留未决项 |
-| 记忆放窗口中间 | lost in the middle，模型忽略 | 记忆 / 画像放 system 头部 |
-| 不区分会话级 / 用户级 | 张三的事实召回给李四 | 召回严格按 `user_id` 隔离 |
-| 抽取用大模型且同步 | 每轮慢一倍、贵一倍 | 小模型 + 异步 |
+| 把整段对话写进长期记忆 | 库越来越大，召回全是噪声 | 只写抽取后的原子事实 |
+| 召回结果全部倒进窗口 | token 超支，关键信息被稀释 | top-k 加阈值过滤 |
+| 摘要时把未解决的问题丢了 | Agent 忘了用户的诉求 | 摘要 prompt 里明确要求保留未解决的事项 |
+| 记忆放在窗口中间 | lost in the middle，模型忽略 | 记忆和画像放在 system 头部 |
+| 不区分会话级和用户级 | 张三的事实被召回给了李四 | 召回严格按 `user_id` 隔离 |
+| 用大模型同步做抽取 | 每轮明显变慢、变贵 | 换小模型，改成异步 |
 
 ---
 
 ## 9. 下一步
 
-- 📖 短期 vs 长期记忆的分层原理 → [04-memory/01-short-vs-long.md](../04-memory/01-short-vs-long.md)
-- 📖 长期记忆的存取与召回细节 → [04-memory/03-storage-recall.md](../04-memory/03-storage-recall.md)
-- 📖 会话历史的摘要压缩策略 → [05-compaction/01-summary-compaction.md](../05-compaction/02-summarization.md)
-- 📖 上下文窗口的分块组装 → [02-anatomy/01-context-blocks.md](../02-anatomy/06-structure.md)
-- 📖 下一个实战：长文档问答 → [02-long-doc-qa.md](./02-long-doc-qa.md)
+- 短期记忆和长期记忆的分层原理：[短期记忆 vs 长期记忆](../04-memory/01-short-vs-long.md)
+- 长期记忆存取与召回的细节：[记忆的存储与召回](../04-memory/03-storage-recall.md)
+- 会话历史的摘要压缩策略：[摘要式压缩](../05-compaction/02-summarization.md)
+- 上下文窗口的分块组装：[组织结构：分隔符、XML/Markdown 与顺序](../02-anatomy/06-structure.md)
+- 下一个实战：[长文档问答的上下文工程](./02-long-doc-qa.md)
 
 ## 参考资料
 
 - Anthropic, "Effective context engineering for AI agents": https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
-- OpenAI Embeddings 文档：https://platform.openai.com/docs/guides/embeddings
+- OpenAI Embeddings 文档：https://developers.openai.com/api/docs/guides/embeddings
 - Letta / MemGPT 分层记忆：https://github.com/letta-ai/letta

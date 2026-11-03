@@ -1,6 +1,6 @@
 # 多粒度切分：Small-to-Big / Parent Document
 
-> **一句话**：**用小 chunk 做召回（信息密度高、检索准），用大 chunk 给 LLM（上下文足、答案对）**——多粒度策略是 RAG 进阶最有效的优化之一。
+> 召回用小 chunk，因为信息密度高、检索准；交给 LLM 的用大 chunk，因为上下文完整、答案才对。这种多粒度的做法几乎不增加 embed 费用，代价主要是向量数变多，是我认为 RAG 进阶阶段最值得先做的一项优化。
 
 ---
 
@@ -18,7 +18,7 @@ chunk_size=1000：
 
 ---
 
-## 2. Small-to-Big 解法
+## 2. Small-to-Big 的做法
 
 ```
 1. 索引阶段：
@@ -114,8 +114,9 @@ def retrieve(query, top_k=5):
 ## 4. 用 LangChain 的 ParentDocumentRetriever
 
 ```python
-from langchain.retrievers import ParentDocumentRetriever
-from langchain.storage import InMemoryStore
+# langchain 1.x：这类老的链和检索器已搬到 langchain-classic（pip install langchain-classic）
+from langchain_classic.retrievers import ParentDocumentRetriever
+from langchain_core.stores import InMemoryStore
 from langchain_chroma import Chroma
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -154,9 +155,8 @@ results = retriever.invoke("如何取消订阅")
 ## 5. LlamaIndex 的等价用法
 
 ```python
-from llama_index.core.node_parser import SentenceSplitter
-from llama_index.core import VectorStoreIndex, Document
-from llama_index.core.node_parser import HierarchicalNodeParser
+from llama_index.core import VectorStoreIndex, Document, StorageContext
+from llama_index.core.node_parser import HierarchicalNodeParser, get_leaf_nodes
 
 
 # 多粒度切
@@ -167,6 +167,11 @@ parser = HierarchicalNodeParser.from_defaults(
 
 
 nodes = parser.get_nodes_from_documents([Document(text=my_long_text)])
+
+# 所有层级的 node 进 docstore，只有最底层的叶子 node 建向量索引
+storage_context = StorageContext.from_defaults()
+storage_context.docstore.add_documents(nodes)
+vector_index = VectorStoreIndex(get_leaf_nodes(nodes), storage_context=storage_context)
 
 
 # 用 AutoMergingRetriever：召回小 node，自动合并到 parent
@@ -180,7 +185,7 @@ retriever = AutoMergingRetriever(vector_index.as_retriever(), storage_context, v
 
 ## 6. Sentence Window
 
-变种：召回单句，给 LLM 时附带前后窗口：
+这是 small-to-big 的一个变种：召回时只匹配单句，交给 LLM 时带上前后几句作为窗口。
 
 ```python
 def index_with_window(sentences, window=2):
@@ -199,7 +204,7 @@ for h in hits:
     print(h.payload["context"])  # 给 LLM 的是 window
 ```
 
-LlamaIndex 内置 `SentenceWindowNodeParser`：
+LlamaIndex 内置了 `SentenceWindowNodeParser`：
 
 ```python
 from llama_index.core.node_parser import SentenceWindowNodeParser
@@ -242,25 +247,23 @@ nodes = parser.get_nodes_from_documents([Document(text=my_text)])
 ## 8. 性能 / 成本影响
 
 ```
-单粒度（500 字 chunk）：
-  embed cost: N tokens
+单粒度（500 字 chunk，共 N 块）：
+  embed cost: T tokens（整个语料过一遍）
   存储: N vec
-  
-Small-to-Big（200 子 + 1000 parent）：
-  embed cost: N * 1.0  (只 embed 小，不变)
-  存储: N vec  (子) + parent text (小数据)
-  Recall@5: 提升 5-10%
-  LLM 答案质量：提升 10-15%
+
+Small-to-Big（200 字子块 + 1000 字 parent）：
+  embed cost: 约 T tokens  (只 embed 子块，语料还是过一遍，overlap 会多一点)
+  存储: 约 2.5N vec  (500 / 200 = 2.5) + parent text（只存文本，不 embed）
+  Recall@5: 通常有提升，幅度看语料，用自己的 evalset 测
 ```
 
-**成本几乎不变，质量提升明显**——性价比最高的优化之一。
+embed 的 token 费用基本不变，多出来的是向量库里约 2.5 倍的向量数，存储和索引内存跟着涨。在我知道的 RAG 优化里，它的性价比排得很靠前。
 
 ---
 
 ## 9. 完整 demo
 
 ```python
-# demos/chunking/04_small_to_big.py
 import uuid
 import numpy as np
 from openai import OpenAI
@@ -375,15 +378,15 @@ def get_parent(parent_id):
 
 | 坑 | 解 |
 |----|----|
-| 子 chunk 全在同 parent | 给 LLM 重复 → 去重 parent_id |
-| parent 太长撑爆 LLM context | 控制 parent 大小（500-1500 字）|
-| parent_store 数据丢了 | 跟向量库一起备份 |
-| metadata 没塞 parent_id | 重建索引 |
+| 召回的子 chunk 都属于同一个 parent | 交给 LLM 的内容会重复，按 parent_id 去重 |
+| parent 太长，超出 LLM context | 把 parent 控制在 500-1500 字 |
+| parent_store 的数据丢了 | 和向量库一起备份 |
+| metadata 里没写 parent_id | 只能重建索引 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 chunk metadata 设计 → [05-metadata.md](./05-metadata.md)
-- 📖 检索阶段配合 → [05-retrieval/05-rerank-pipeline.md](../05-retrieval/05-rerank-pipeline.md)
-- 📖 完整 RAG 实战 → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
+- chunk 的 metadata 怎么设计：[Chunk Metadata 设计](./05-metadata.md)
+- 检索阶段怎么配合：[重排 Pipeline：召回 → 精排](../05-retrieval/05-rerank-pipeline.md)
+- 完整 RAG 实战：[完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)

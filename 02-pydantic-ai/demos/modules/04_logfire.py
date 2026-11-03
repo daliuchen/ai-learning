@@ -48,7 +48,7 @@ logfire.instrument_pydantic_ai()
 # =====================================================================
 def build_agent() -> Agent:
     if os.getenv("OPENAI_API_KEY"):
-        model: str | TestModel = "openai:gpt-4o-mini"
+        model: str | TestModel = "openai-chat:qwen-flash"
     else:
         print("[info] OPENAI_API_KEY 未设置，fallback 到 TestModel")
         model = TestModel(
@@ -57,7 +57,7 @@ def build_agent() -> Agent:
 
     agent = Agent(
         model,
-        system_prompt=(
+        instructions=(
             "你是电商客服小助手。用户问订单情况时，"
             "调用 lookup_order 查订单状态，然后用中文简短回复。"
         ),

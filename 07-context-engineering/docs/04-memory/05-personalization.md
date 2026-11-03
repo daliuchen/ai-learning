@@ -1,12 +1,12 @@
 # CE 04-05：用户画像与个性化上下文
 
-> **一句话**：个性化的本质是「把『这个用户是谁、偏好什么』持续、精炼地注入每次的上下文窗口」。它由一个随会话演进的 user profile 驱动——构建它、更新它、按预算注入它。同时三条红线不能碰：别注入隐私敏感的东西、别让画像无限膨胀、别把 A 的画像泄漏给 B。
+> 个性化做的事情，就是把「这个用户是谁、偏好什么」持续而精炼地放进每次调用的上下文窗口。驱动它的是一份随会话演进的 user profile：先构建，再不断更新，按预算注入。同时有三件事不能做：注入隐私敏感信息，让画像无限膨胀，把 A 的画像泄漏给 B。
 
 ---
 
-## 1. 个性化 = 持续注入「你是谁」
+## 1. 个性化就是持续告诉模型「你是谁」
 
-无个性化的助手每次都像第一次见你。个性化助手则在每次窗口里都带上一小段「关于你」的上下文：
+没有个性化的助手，每次都像第一次见你。有个性化的助手，每次窗口里都带着一小段关于你的上下文：
 
 ```
 # ❌ 无画像：每次从零开始
@@ -19,13 +19,13 @@ System: 你是一个助手。
 User: 推荐个餐厅   → 模型直接推上海的平价素食日料
 ```
 
-注意画像是**短期窗口里的一小块**，但它的来源是**长期记忆**（见 [01-short-vs-long.md](./01-short-vs-long.md)）——每次会话开始，把该用户的画像从存储里取出、压成一段，注入窗口。它跟「按 query 语义召回的记忆片段」（[03-storage-recall.md](./03-storage-recall.md)）互补：画像是**常驻的核心身份**，召回片段是**随话题变化的相关经历**。
+画像在短期窗口里只占一小块，但它来自长期记忆（见 [短期记忆 vs 长期记忆](./01-short-vs-long.md)）：每次会话开始，把该用户的画像从存储里取出来，压成一段，放进窗口。它和按 query 语义召回的记忆片段（[记忆的存储与召回](./03-storage-recall.md)）互相补充：画像是常驻的核心身份，召回片段是随话题变化的相关经历。
 
 ---
 
 ## 2. user profile 的构建
 
-画像不是一次写死的表单，是从交互里**逐步沉淀 + 主动询问**两条路汇合：
+画像不是一张一次填完的表单，它来自两条路：从交互里慢慢沉淀，以及主动询问。
 
 | 来源 | 例子 | 特点 |
 |------|------|------|
@@ -33,7 +33,7 @@ User: 推荐个餐厅   → 模型直接推上海的平价素食日料
 | 对话推断 | 用户多次问 Rust → 推断偏好 Rust | 需置信度，可能误判 |
 | 行为信号 | 总是跳过长解释 | 隐性，需聚合 |
 
-一个实用的 profile schema（结构化 + 可演进）：
+一个实用的 profile schema，有结构，也方便以后扩展：
 
 ```python
 from pydantic import BaseModel, Field
@@ -70,7 +70,7 @@ class UserProfile(BaseModel):
 
 ## 3. 画像的更新
 
-画像必须随交互演进，否则很快过时。更新有三种动作，分别对应 [06-forgetting.md](./06-forgetting.md) 会展开的「增 / 改 / 删」：
+画像不跟着交互更新，很快就会过时。更新动作分增、改、删三种，[记忆的遗忘与更新](./06-forgetting.md) 会详细展开。这里先看最常见的改：
 
 ```python
 def update_profile(profile: UserProfile, key: str, value: str) -> UserProfile:
@@ -84,13 +84,13 @@ update_profile(p, "verbosity", "detailed")
 update_profile(p, "verbosity", "concise")   # 覆盖，画像里只剩 concise
 ```
 
-更新时机延续 [03-storage-recall.md](./03-storage-recall.md) 的讨论：偏好类异步抽取即可，强约束（过敏、禁忌）热路径立即更新。
+更新时机沿用 [记忆的存储与召回](./03-storage-recall.md) 里的结论：偏好类异步抽取就够了，过敏、禁忌这类强约束要在热路径上立即更新。
 
 ---
 
 ## 4. 注入示例（端到端）
 
-把画像注入到一次真实调用里：
+把画像放进一次真实调用：
 
 ```python
 import anthropic
@@ -102,29 +102,31 @@ profile = load_profile("u_42")   # 返回 UserProfile
 
 # 2. 注入到 system —— 画像放 system 区，常驻且位置靠前（重要信息别埋中间）
 def chat(profile: UserProfile, user_input: str, history: list[dict]) -> str:
-    system = (
-        "你是一个贴心的生活助手，回答时遵循用户画像里的偏好和约束。\n"
-        + profile.to_context_block()
-    )
+    system = [
+        # 通用指令：所有用户相同，放最前面，够长时可以加 cache_control 共享缓存
+        {"type": "text", "text": "你是一个贴心的生活助手，回答时遵循用户画像里的偏好和约束。"},
+        # 画像：因人而异，跟在通用指令后面
+        {"type": "text", "text": profile.to_context_block()},
+    ]
     resp = client.messages.create(
-        model="claude-sonnet-4-5",
+        model="claude-sonnet-5-5",
         max_tokens=1024,
         system=system,                  # ← 画像注入这里
         messages=[*history[-8:], {"role": "user", "content": user_input}],
     )
-    return resp.content[0].text
+    return next(b.text for b in resp.content if b.type == "text")
 
 # 模型据此个性化：素食 + 不吃辣 + 上海 + 预算敏感 → 给出贴合的推荐
 print(chat(profile, "推荐个周末聚餐的地方", history=[]))
 ```
 
-要点：画像放 **system 区**（稳定、靠前、便于 prompt 缓存命中），别每轮都重新塞进 user 消息里造成重复。
+画像放在 system 区：位置靠前，对同一个用户整段会话都不变，同一用户的后续轮次可以命中缓存。它因人而异，所以要排在所有用户共用的通用指令之后，别让它打断通用前缀的缓存（[系统指令层](../02-anatomy/01-system-instructions.md) 说的「别把用户信息焊进 system」，指的就是把它拼进通用指令中间）。也不要每轮都重新塞进 user 消息，那样只会重复。
 
 ---
 
 ## 5. 个性化 vs 隐私
 
-个性化越深，隐私风险越大。几条原则：
+个性化做得越深，隐私风险越大。下面几条原则：
 
 | 原则 | 做法 |
 |------|------|
@@ -132,7 +134,7 @@ print(chat(profile, "推荐个周末聚餐的地方", history=[]))
 | 用户可见可控 | 让用户能查看 / 编辑 / 删除自己的记忆（OpenAI memory、Letta 都提供） |
 | 敏感分级 | 高敏感字段单独加密 / 单独授权才注入 |
 | 注入有度 | 别把全部画像一股脑塞窗口，按当前任务相关性裁剪 |
-| 合规 | GDPR/个保法的"被遗忘权"——删除要真删，含向量库副本 |
+| 合规 | GDPR/个保法的"被遗忘权"：删除要真删，含向量库副本 |
 
 ```python
 # ✅ 注入前过滤敏感字段，别让它进窗口/进日志
@@ -147,27 +149,27 @@ def safe_block(profile: UserProfile) -> str:
 
 ## 6. 多用户隔离：别把 A 的记忆泄漏给 B
 
-这是个性化系统最容易出事故的地方——**记忆串户**。一个共享的记忆库里，如果检索/加载时漏了 `user_id`，就会把别人的画像注入当前用户的窗口，既是隐私事故也是质量灾难。
+个性化系统最容易出事故的地方是记忆串户。在共享的记忆库里，检索或加载时漏了 `user_id`，别人的画像就会进入当前用户的窗口，既是隐私事故，回答质量也会一塌糊涂。
 
 ```python
 # ❌ 致命：检索时没按用户过滤，召回全库
-hits = qdrant.search(collection_name="memories", query_vector=v, limit=3)
+hits = qdrant.query_points(collection_name="memories", query=v, limit=3).points
 
 # ✅ 强制 user_id 过滤，且把它放在数据访问层而非业务层（防漏）
 from qdrant_client.models import Filter, FieldCondition, MatchValue
 
 def recall_for_user(user_id: str, v: list[float], top_k: int = 3):
-    return qdrant.search(
+    return qdrant.query_points(
         collection_name="memories",
-        query_vector=v,
+        query=v,
         query_filter=Filter(must=[
             FieldCondition(key="user_id", match=MatchValue(value=user_id)),
         ]),
         limit=top_k,
-    )
+    ).points
 ```
 
-工程上的硬措施：
+工程上可以落地的措施：
 
 | 措施 | 说明 |
 |------|------|
@@ -176,7 +178,7 @@ def recall_for_user(user_id: str, v: list[float], top_k: int = 3):
 | 加 tenant 维度 | 多租户场景再叠一层 org_id，双重过滤 |
 | 测试覆盖 | 专门写"用 A 的身份查不到 B 的记忆"的测试 |
 
-记住：**多用户隔离不是功能，是安全边界。** 宁可隔离过度，不可串户一次。
+多用户隔离应该当作安全边界来对待。我宁可隔离得过度一点，也不要串户一次。
 
 ---
 
@@ -184,7 +186,7 @@ def recall_for_user(user_id: str, v: list[float], top_k: int = 3):
 
 | 坑 | 后果 | 对策 |
 |----|------|------|
-| 画像无限增长 | 注入 token 爆、稀释 | 设上限 + 衰减（见 06） |
+| 画像无限增长 | 注入 token 暴涨、注意力被稀释 | 设上限 + 衰减（见 [记忆的遗忘与更新](./06-forgetting.md)） |
 | 偏好只增不改 | 用户改了主意但画像还是旧的 | 按 key 覆盖更新 |
 | 把画像塞进每轮 user 消息 | 重复 token、破坏缓存 | 放 system 区，稳定靠前 |
 | 检索漏 user_id | 记忆串户 | 数据访问层强制过滤 |
@@ -194,12 +196,12 @@ def recall_for_user(user_id: str, v: list[float], top_k: int = 3):
 
 ## 8. 下一步
 
-- 📖 画像里的过期/冲突/衰减怎么处理 → [06-forgetting.md](./06-forgetting.md)
-- 📖 画像的存储与召回底座 → [03-storage-recall.md](./03-storage-recall.md)
-- 📖 画像注入占多少预算 → [01-foundations/05-context-budget.md](../01-foundations/05-context-budget.md)
-- 📖 注入到 system 区与 prompt 缓存的配合 → [01-foundations/04-cost-latency.md](../01-foundations/04-cost-latency.md)
+- 画像的过期、冲突、衰减怎么处理：[记忆的遗忘与更新](./06-forgetting.md)
+- 画像背后的存储与召回：[记忆的存储与召回](./03-storage-recall.md)
+- 画像注入该占多少预算：[Context Budget](../01-foundations/05-context-budget.md)
+- 放在 system 区和 prompt 缓存怎么配合：[上下文的成本与延迟模型](../01-foundations/04-cost-latency.md)
 
 ## 参考资料
 
 - OpenAI，"Memory and new controls for ChatGPT"：https://openai.com/index/memory-and-new-controls-for-chatgpt/
-- Letta 记忆块（memory blocks）文档：https://docs.letta.com/concepts/memory
+- Letta 记忆块（memory blocks）文档：https://docs.letta.com/

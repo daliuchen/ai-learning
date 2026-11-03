@@ -1,12 +1,12 @@
 # 检索结果的排序、裁剪、去重
 
-> **一句话**：检索回来一堆 chunk 不能原样塞进窗口——先**重排**把最相关的提前，**去重**删掉冗余，**按 token 预算贪心填充**，再把最相关的放窗口**两端**对抗 lost-in-the-middle。这一步往往比换 embedding 模型更能提准。
+> 检索回来的一堆 chunk 不能原样塞进窗口。要先重排，把最相关的提到前面；再去重，删掉冗余；然后按 token 预算贪心填充；最后把最相关的放在窗口两端，避开 lost in the middle。这几步不用换模型，做好了效果提升常常很明显。
 
 ---
 
-## 1. 从「召回的一堆」到「进窗口的几条」
+## 1. 从召回的一堆到进窗口的几条
 
-召回阶段为了不漏，通常宽召回 top-50。但这 50 条里：有的不相关（向量相似 ≠ 真相关）、有的内容重复、加起来远超 token 预算、而且顺序是按粗排分数来的。进窗口前要过四道工序：
+召回阶段为了不漏，一般会放宽到 top-50。但这 50 条里，有的其实不相关（向量相似不等于真的相关），有的内容重复，加起来远超 token 预算，顺序也只是按粗排分数排的。进窗口之前要过四道工序：
 
 ```
 召回 top-50
@@ -17,13 +17,13 @@
 进窗口的 5~8 条
 ```
 
-重排（rerank）的**算法细节**（cross-encoder、LLM-as-judge）见 Embedding 手册的重排 pipeline 篇。本篇聚焦后三步——**裁剪、去重、排布**这些"进窗口"的上下文工程动作，假设已有一个 `rerank()` 给出分数。
+重排（rerank）的算法细节，比如 cross-encoder 和 LLM-as-judge，见 Embedding 手册的 [重排 Pipeline：召回 → 精排](../../../06-embedding/docs/05-retrieval/05-rerank-pipeline.md)。这篇假设已经有一个 `rerank()` 能给出分数，只讲后面三步：去重、裁剪和排布。
 
 ---
 
-## 2. 去重：删掉冗余 chunk
+## 2. 去重：删掉冗余的 chunk
 
-知识库里同一段内容常以多种形式重复（FAQ 改写、文档版本、镜像页），召回会把它们一起捞回来，白占预算还稀释注意力。用 embedding 相似度做近重复检测：
+知识库里同一段内容经常以好几种形式出现（改写过的 FAQ、不同版本的文档、镜像页面），召回时会被一起捞回来，白占预算，还稀释注意力。可以用 embedding 相似度检测近似重复：
 
 ```python
 import numpy as np
@@ -40,15 +40,13 @@ def dedup(chunks, embeddings, threshold: float = 0.92):
     return kept
 ```
 
-- 阈值经验值 0.9~0.95；太低会误删真正不同的内容。
-- 按 rerank 分数从高到低遍历，**保留分高的那个**，丢后来的近重复。
-- 没有现成 embedding 时，退化用 MinHash / 字符串相似度也行，只是糙一些。
+阈值一般取 0.9 到 0.95，太低会把其实不同的内容也删掉。遍历时按 rerank 分数从高到低，保留分高的那条，丢掉后面的近似重复。手头没有现成的 embedding，也可以退一步用 MinHash 或字符串相似度，只是粗糙一些。
 
 ---
 
 ## 3. 按 token 预算贪心填充
 
-不要写"固定取 5 条"——chunk 长度参差，5 条可能是 800 token 也可能是 6000。正确做法是**给一个 token 预算，从高分往下贪心填，填不下就停**：
+别写「固定取 5 条」。chunk 长短不一，5 条可能是 800 token，也可能是 6000。合理的做法是给定一个 token 预算，从高分往下贪心地填，放不下就跳过。
 
 ```python
 import tiktoken  # 或用对应模型的 tokenizer
@@ -70,17 +68,17 @@ def pack_to_budget(ranked_chunks, max_tokens: int = 4000):
     return packed
 ```
 
-要点：
+几点说明：
 
-- **预算从窗口里反推**：总窗口 − system − 历史 − query − 留给输出的 token = 检索可用预算。别把窗口填满，给生成留地方。
-- `continue` vs `break`：用 `continue` 可以让后面更短的高价值 chunk 仍有机会挤进来；要严格按序则用 `break`。
-- 单条 chunk 超长时，考虑先做**句子级截断**只保留与 query 最相关的片段，而不是整条丢弃。
+- 预算从窗口反推：总窗口减去 system、历史、query 和留给输出的 token，剩下的才是检索能用的预算。别把窗口填满，要给生成留出空间。
+- `continue` 和 `break` 的区别：用 `continue`，后面更短的高价值 chunk 还有机会挤进来；要严格按顺序取就用 `break`。
+- 单条 chunk 太长时，可以先做句子级截断，只保留和 query 最相关的片段，而不是整条丢掉。
 
 ---
 
-## 4. 排布：最相关的放两端，对抗 lost-in-the-middle
+## 4. 排布：最相关的放两端
 
-模型对上下文**首尾的注意力强于中部**（lost-in-the-middle，本手册长上下文章有实测）。所以填好的 chunk 不要按分数线性排，而要把最相关的放头尾、次要的埋中间：
+模型对上下文首尾的注意力强于中部（lost in the middle，[Context Rot 一篇](../01-foundations/03-context-rot.md)讲了机理和示意数据）。所以填好的 chunk 按分数从高到低线性排并不理想，更好的做法是把最相关的放在头尾，次要的放在中间：
 
 ```python
 def reorder_for_attention(packed_chunks):
@@ -100,11 +98,11 @@ def reorder_for_attention(packed_chunks):
 [最相关, 第3, 第5, ..., 第6, 第4, 第2相关]
 ```
 
-补充手段：在每个 chunk 前加编号/来源（`[文档 N]`），既方便引用归因（第 5 篇），也给模型"这是第几条参考"的结构感。
+另外，可以在每个 chunk 前面加上编号或来源（`[文档 N]`）。这样既方便做引用归因（第 5 篇），也让模型清楚这是第几条参考资料。
 
 ---
 
-## 5. 串起来：完整 trim pipeline
+## 5. 串起来：完整的裁剪流水线
 
 ```python
 def prepare_context(query, retriever, reranker, max_tokens: int = 4000):
@@ -127,17 +125,17 @@ def prepare_context(query, retriever, reranker, max_tokens: int = 4000):
 
 | 工序 | 解决什么 | 跳过的后果 |
 |------|----------|------------|
-| rerank | 粗排不准，相关的排太后 | 真答案在 top-50 但没进 top-5 |
-| dedup | 冗余 chunk 占预算 | 重复内容挤掉了其他有用信息 |
-| pack | 长度不一、超预算 | 截断报错或 token 浪费 |
-| reorder | lost-in-the-middle | 关键 chunk 被埋中部，模型忽略 |
+| rerank | 粗排不准，相关的排得太靠后 | 真答案在 top-50 里，但没进 top-5 |
+| dedup | 冗余 chunk 占预算 | 重复内容挤掉了其他有用的信息 |
+| pack | 长度不一，超出预算 | 截断报错，或者浪费 token |
+| reorder | lost in the middle | 关键 chunk 被埋在中部，模型没注意到 |
 
-这套 trim pipeline 是纯上下文工程动作，不依赖换模型，**性价比极高**——很多"RAG 答不准"的问题，根因不是召回差，而是这四步没做。
+这条流水线不需要换模型，投入很小。很多「RAG 答不准」的问题，原因不在召回，而在这四步没做。
 
 ---
 
 ## 下一步
 
-- [05-attribution.md](./05-attribution.md)：排好的 chunk 怎么让模型引用出处、不脱离资料胡编
-- 跨章：[../01-foundations/03-context-rot.md](../01-foundations/03-context-rot.md) lost-in-the-middle 的实测与机理
-- 回顾：[./01-rag-as-context.md](./01-rag-as-context.md) k 选多大与 token 预算的关系
+- [引用与归因（Citation & Grounding）](./05-attribution.md)：排好的 chunk 怎么让模型注明出处，不脱离资料乱编
+- 跨章，lost in the middle 的机理和示意数据：[Context Rot 与 Lost in the Middle](../01-foundations/03-context-rot.md)
+- 回顾 k 选多大和 token 预算的关系：[RAG 作为上下文来源](./01-rag-as-context.md)

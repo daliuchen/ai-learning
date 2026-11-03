@@ -1,6 +1,6 @@
-# 语义搜索：电商 / 内容
+# 语义搜索：电商与内容场景
 
-> **一句话**：语义搜索跟 RAG 区别——**返回的是文档列表给用户挑**，不让 LLM 总结答案。电商商品搜索、内容平台搜索都是这套。
+> 语义搜索和 RAG 用的是同一套检索底座，区别在出口：语义搜索把文档列表交给用户自己挑，不让 LLM 去总结答案。电商的商品搜索、内容平台的文章搜索都属于这一类，排序和业务字段在这里比在 RAG 里重要得多。
 
 ---
 
@@ -65,17 +65,18 @@ qd.create_collection("products", vectors_config=VectorParams(size=1024, distance
 for f in ["category", "brand"]:
     qd.create_payload_index("products", field_name=f, field_schema=PayloadSchemaType.KEYWORD)
 
-for f in ["price", "rating", "stock"]:
+for f in ["price", "rating"]:
     qd.create_payload_index("products", field_name=f, field_schema=PayloadSchemaType.FLOAT)
+qd.create_payload_index("products", field_name="stock", field_schema=PayloadSchemaType.INTEGER)
 
 
 points = [
     PointStruct(
-        id=p["id"],
+        id=i,               # Qdrant 的点 ID 只能是整数或 UUID，"p_001" 这种业务 ID 放进 payload
         vector=emb,
         payload=p,
     )
-    for p, emb in zip(products, embeddings)
+    for i, (p, emb) in enumerate(zip(products, embeddings))
 ]
 
 qd.upsert("products", points=points)
@@ -85,7 +86,7 @@ qd.upsert("products", points=points)
 
 ## 3. 多维度搜索 query
 
-用户："找 1 万以内、4 星以上的苹果笔记本"
+比如用户输入"找 1 万以内、4 星以上的苹果笔记本"，要先把语义部分和过滤条件拆开：
 
 ```python
 def parse_query(text):
@@ -118,12 +119,12 @@ def search(text, top_k=20):
         else:
             must.append(FieldCondition(key=k, match=MatchValue(value=v)))
     
-    hits = qd.search(
+    hits = qd.query_points(
         "products",
-        query_vector=q_vec.tolist(),
+        query=q_vec.tolist(),
         query_filter=Filter(must=must) if must else None,
         limit=top_k,
-    )
+    ).points
     
     return [h.payload for h in hits]
 ```
@@ -132,7 +133,7 @@ def search(text, top_k=20):
 
 ## 4. 业务加权排序
 
-纯 cosine 不够：用户会要"评分高优先"、"销量好优先":
+只按 cosine 排序不够，用户还希望评分高的、销量好的排在前面：
 
 ```python
 def business_score(hit):
@@ -145,17 +146,17 @@ def business_score(hit):
     return sim * 0.7 + rating_boost + popularity * stock_alive
 
 
-hits = qd.search("products", query_vector=q_vec, limit=50)
+hits = qd.query_points("products", query=q_vec, limit=50).points
 ranked = sorted(hits, key=lambda h: -business_score(h))[:20]
 ```
 
-或预先把"业务分"算到 vector 里（不推荐——耦合大）。
+也可以把业务分预先揉进向量里，但我不推荐，这样语义和业务规则耦合得太紧，调一次权重就得重建索引。
 
 ---
 
 ## 5. 多向量：标题 vs 描述
 
-商品的"标题"和"描述"语义不同，分别 embed 更准：
+商品的标题和描述表达的东西不一样，分开 embed 更准：
 
 ```python
 qd.create_collection(
@@ -167,9 +168,9 @@ qd.create_collection(
 )
 
 
-for p in products:
+for i, p in enumerate(products):
     qd.upsert("products", points=[PointStruct(
-        id=p["id"],
+        id=i,
         vector={
             "title": embed(p["title"]).tolist(),
             "description": embed(p["description"]).tolist(),
@@ -179,21 +180,20 @@ for p in products:
 
 
 # 查的时候按 title 优先
-hits = qd.search(
+hits = qd.query_points(
     "products",
-    query_vector=("title", q_vec.tolist()),
+    query=q_vec.tolist(), using="title",
     limit=20,
-)
+).points
 ```
 
-或两个向量都查再 RRF。
+也可以两个向量都查一遍，再用 RRF 合并。
 
 ---
 
 ## 6. 完整 demo
 
 ```python
-# demos/applications/02_semantic_search.py
 import numpy as np
 from openai import OpenAI
 
@@ -250,14 +250,14 @@ for q, mp in [
 
 ## 7. 跟 Elasticsearch 配合
 
-电商往往已有 ES：
+电商系统大多已经有 Elasticsearch 了，两者可以分工：
 
 ```
 ES：精确匹配 / facet aggregation / 商品库存查询
 Vector DB：语义搜索 / 同义改写
 ```
 
-混合检索：
+查询时两路并发，再融合：
 
 ```python
 async def hybrid_product_search(query, filter_dict):
@@ -278,7 +278,7 @@ async def hybrid_product_search(query, filter_dict):
 
 ## 8. 内容平台搜索
 
-类似商品，但更长 text：
+内容平台和商品搜索类似，只是文本更长：
 
 ```python
 articles = [
@@ -302,7 +302,7 @@ articles = [
 
 ## 9. typo / 拼音兼容
 
-电商搜"iponne" 应该召回 iPhone：
+用户在电商里搜"iponne"，应该能召回 iPhone。几种做法：
 
 ```python
 # 方案 1: 模糊搜索（ES fuzzy）
@@ -312,7 +312,7 @@ def correct_typo(query):
     return resp.strip()
 
 
-# 方案 3: 容错型 embedding（CLIP-like）
+# 方案 3: 字符级 n-gram 召回（比如 ES 的 ngram 分词），对拼错几个字母更宽容
 # 方案 4: 拼音搜索（中文场景）
 import pypinyin
 pinyin_text = pypinyin.lazy_pinyin(text)
@@ -339,7 +339,7 @@ def search_with_facets(query):
     }
 ```
 
-前端可以让用户按 facet 进一步过滤。
+前端可以用这些 facet 让用户进一步筛选。
 
 ---
 
@@ -347,15 +347,15 @@ def search_with_facets(query):
 
 | 坑 | 解 |
 |----|----|
-| 商品 description 太长 | 切分或只 embed 关键部分 |
-| 业务字段 vs 语义混排 | 分离 score：sim 和 boost 不要混 |
-| typo 不召回 | LLM correct 或 fuzzy 检索 |
-| 类目划错（"iPhone" 在"耳机"分类）| 业务 metadata + filter 别全靠语义 |
+| 商品 description 太长 | 切开，或者只 embed 关键部分 |
+| 业务字段和语义分数搅在一起 | sim 和各项 boost 分开算、分别记录，最后按配置里的权重合成，方便单独调和排查 |
+| 拼错的词召回不到 | 用 LLM 纠错，或者走 fuzzy 检索 |
+| 类目划错（"iPhone" 出现在"耳机"分类下）| 用业务 metadata 加 filter，别全靠语义 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 多模态：图搜图 / 文搜图 → [03-multimodal.md](./03-multimodal.md)
-- 📖 推荐系统 → [04-recommendation.md](./04-recommendation.md)
-- 📖 去重 / 聚类 → [05-deduplication.md](./05-deduplication.md)
+- 图搜图、文搜图：[多模态：图搜图 / 文搜图 / 图搜文](./03-multimodal.md)
+- 推荐系统：[用 Embedding 做推荐系统](./04-recommendation.md)
+- 去重和聚类：[用 Embedding 做去重、聚类与异常检测](./05-deduplication.md)

@@ -1,6 +1,6 @@
 # 持续评测 + 回归测试
 
-> **一句话**：把 evalset 跑成 CI 测试 + 灰度后看真实数据反馈，**每次 PR 都跑回归**——这是从"一次性优化"变成"持续提质"的关键。
+> 一次性的调优做完，过几周效果可能就悄悄退化了。办法是把 evalset 接进 CI，每个 PR 都跑一遍回归；上线后再用灰度和线上抽样补上真实数据的反馈。这篇讲这套闭环怎么搭。
 
 ---
 
@@ -77,11 +77,11 @@ for metric, threshold in thresholds.items():
 sys.exit(1 if failed else 0)
 ```
 
-PR 阈值不过 → 阻断 merge。
+指标没过阈值，PR 就不能合并。
 
 ---
 
-## 3. 看 diff（每个 PR 之前 vs 之后）
+## 3. 看 diff（每个 PR 改动前后对比）
 
 ```python
 # scripts/eval_with_diff.py
@@ -117,18 +117,19 @@ for c in regressions[:5]:
     print(f"  - {c['query']}")
 ```
 
-PR 评论里贴这个 diff——评审者一眼看到改了啥。
+把这个 diff 贴到 PR 评论里，评审的人一眼就能看出改动的影响。
 
 ---
 
 ## 4. 多版本对比
 
-记录每个 commit 的 metric：
+记录每个 commit 的指标：
 
 ```python
 # scripts/save_eval_history.py
 import json
-import git
+from datetime import datetime
+import git   # pip install GitPython
 
 
 repo = git.Repo(".")
@@ -150,7 +151,7 @@ with open("eval_history.json", "w") as f:
     json.dump(history, f, indent=2)
 ```
 
-可视化趋势：
+画出趋势：
 
 ```python
 import matplotlib.pyplot as plt
@@ -167,7 +168,7 @@ plt.savefig("eval_trend.png")
 
 ## 5. 线上 trace 持续评测
 
-部署后每天抽样：
+部署之后每天抽样评测：
 
 ```python
 # crons/daily_eval.py
@@ -213,7 +214,7 @@ async def daily_sample_eval():
 asyncio.run(daily_sample_eval())
 ```
 
-定时任务 cron 跑。
+用 cron 定时跑。
 
 ---
 
@@ -263,7 +264,7 @@ def add_to_evalset(trace_id):
 
 ## 7. 灰度对照
 
-新版上线时：
+新版本上线时：
 
 ```
 50% 走 v1 (control)
@@ -279,14 +280,19 @@ def add_to_evalset(trace_id):
   v2: 76%   ← 反而降了，回滚
 ```
 
+几个百分点的差距要看样本量，先做一下显著性检验（比如两比例 z 检验）再决定全量还是回滚。
+
 ```python
+import hashlib
+
+
 def route_to_version(user_id):
     """灰度路由"""
     hash_val = int(hashlib.md5(user_id.encode()).hexdigest(), 16)
     return "v2" if hash_val % 100 < 50 else "v1"
 ```
 
-详见 [04-prompt-engineering/07-production/04-ab-observability.md](../../../04-prompt-engineering/docs/07-production/04-ab-observability.md)。
+细节见 [PE Production 04：A/B 与可观测](../../../04-prompt-engineering/docs/07-production/04-ab-observability.md)。
 
 ---
 
@@ -300,7 +306,7 @@ evalset/
   ...
 ```
 
-跑评测时报告：
+跑评测时在报告里写明版本：
 
 ```
 Eval @ v1.2 (180 cases)
@@ -316,17 +322,13 @@ Eval @ v1.2 (180 cases)
 
 ## 9. golden set 跟 noise set 分开
 
-- **Golden set**：稳定，每次跑回归（100-200 条）
-- **Noise set**：随时间扩大，月度审查（500+ 条）
-
-Golden 跑得快，每次 PR 都跑；Noise 跑得慢，nightly。
+golden set 保持稳定，100-200 条，每次回归都跑；noise set 随时间不断扩大，500 条以上，每月审查一次。golden set 跑得快，可以挂在每个 PR 上；noise set 跑得慢，放到 nightly。
 
 ---
 
 ## 10. demo：完整流程
 
 ```python
-# demos/evaluation/04_continuous.py
 import json
 from pathlib import Path
 from datetime import datetime
@@ -390,10 +392,10 @@ def compare_with_baseline(current, baseline):
 
 | 坑 | 解 |
 |----|----|
-| evalset 没版本化 | 每次改 evalset 起新 vN |
-| 阈值定太严，CI 一直挂 | 起步松点，逐步提 |
-| LLM judge 每 PR 跑太贵 | 离线 recall 走 CI，LLM judge 走 nightly |
-| 改了 corpus 没更新 evalset | corpus diff 时 evalset 跑一遍发现哪些 case 影响 |
+| evalset 没版本化 | 每次改 evalset 都升一个 vN |
+| 阈值定得太严，CI 一直挂 | 起步时放宽，再逐步收紧 |
+| 每个 PR 都跑 LLM 判官，太贵 | 离线 recall 进 CI，LLM 判官放 nightly |
+| corpus 改了，evalset 没跟着更新 | corpus 有 diff 时跑一遍 evalset，找出受影响的 case |
 
 ---
 
@@ -410,12 +412,12 @@ def compare_with_baseline(current, baseline):
 6. review 后加进 evalset → 跑回归
 ```
 
-跟 PE 手册的方法论一致。
+思路和 PE 手册的评测方法一致。
 
 ---
 
 ## 13. 下一步
 
-- 📖 生产化：怎么部署 → [07-production/01-incremental.md](../07-production/01-incremental.md)
-- 📖 完整 RAG → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
-- 📖 PE 评测方法论 → [04-prompt-engineering/02-process](../../../04-prompt-engineering/docs/02-process/)
+- 进入生产化，从索引更新开始：[增量索引：文档新增 / 修改 / 删除](../07-production/01-incremental.md)
+- [完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)
+- PE 手册的评测方法：[Prompt Engineering 手册的流程篇](../../../04-prompt-engineering/docs/02-process/01-lifecycle.md)

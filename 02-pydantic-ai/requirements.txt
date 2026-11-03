@@ -1,38 +1,37 @@
-# ===== Pydantic AI 核心 =====
-pydantic-ai>=0.0.13
-pydantic>=2.6.0
+# ===== Pydantic AI 核心（V2，以 2.64.0 为准）=====
+pydantic-ai>=2.64.0            # 带 OpenAI / Anthropic / Google provider + CLI 依赖；想精简就用 pydantic-ai-slim[openai,mcp,...]
+pydantic>=2.12
 
-# ===== 模型 Provider 依赖（按需启用） =====
-openai>=1.30.0
-anthropic>=0.30.0
-# google-genai>=0.5.0
-# groq>=0.9.0
-# mistralai>=1.0.0
-# cohere>=5.0.0
+# ===== 模型 Provider（本手册 demo 默认走千问的 OpenAI 兼容端点，只需 openai）=====
+openai>=3.0
+# anthropic>=0.70          # 可选：anthropic:claude-* 分支
+# google-genai>=1.0        # 可选
 
-# ===== 配套模块 =====
-pydantic-evals>=0.0.13         # 评测
-pydantic-graph>=0.0.13         # 状态机
-logfire>=0.50.0                # 可观测性
-mcp>=1.0.0                     # MCP 协议
-
-# ===== Embedding / RAG =====
-sentence-transformers>=3.0.0
-chromadb>=0.5.0
-faiss-cpu>=1.8.0
+# ===== 配套包（版本号与 pydantic-ai 同步）=====
+pydantic-evals>=2.64.0         # 评测
+pydantic-graph>=2.64.0         # 图 / 状态机（GraphBuilder 新 API）
+pydantic-ai-harness>=0.64.0    # 官方 harness / capability 库（Coder、Skills、StepPersistence……）
+logfire>=4.0                   # 可观测性（可选）
+fastmcp>=4.0                   # MCP 服务端 / 客户端传输（pydantic-ai-slim[mcp] 会带上 fastmcp-slim；自己写 server 要完整 fastmcp）
+clai>=2.64.0                   # 命令行（clai 现为独立包）
 
 # ===== 工具 =====
-duckduckgo-search>=6.0.0
-tavily-python>=0.4.0
-requests>=2.31.0
-httpx>=0.27.0
+ddgs>=9.0                      # DuckDuckGo 搜索（pydantic-ai-slim[duckduckgo]）
+tenacity>=9.0                  # HTTP 传输层重试（pydantic-ai-slim[retries]）
+httpx>=0.27
+requests>=2.31
+
+# ===== 对比 demo（可选）=====
+langchain>=1.4
+langchain-openai>=1.0
 
 # ===== Web / UI =====
-fastapi>=0.110.0
-uvicorn>=0.27.0
-sse-starlette>=2.0.0
+fastapi>=0.110
+uvicorn>=0.27
 
-# ===== 杂项 =====
-python-dotenv>=1.0.0
-rich>=13.7.0
-typing-extensions>=4.10.0
+# ===== 测试 / 杂项 =====
+pytest>=8.0
+pytest-asyncio>=0.23
+python-dotenv>=1.0
+rich>=13.7
+pypdf>=4.0                     # RAG demo 读 PDF（可选）

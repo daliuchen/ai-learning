@@ -14,6 +14,8 @@ Pydantic AI 测试模式完整示例（pytest 风格）：
 """
 from __future__ import annotations
 
+import os
+
 from dataclasses import dataclass
 
 import pytest
@@ -27,6 +29,9 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+
+# 有千问 key 用千问（OpenAI 兼容端点），否则用内置 test 模型
+MODEL_NAME = "openai-chat:qwen-flash" if os.getenv("OPENAI_API_KEY") else "test"
 
 
 # ---------------------------------------------------------------------
@@ -43,10 +48,10 @@ class Greeting(BaseModel):
 
 
 agent = Agent(
-    "openai:gpt-4o-mini",
+    MODEL_NAME,
     deps_type=Deps,
     output_type=Greeting,
-    system_prompt="生成一段问候语。如需用户的正式称呼，调用 fancy_name 工具。",
+    instructions="生成一段问候语。如需用户的正式称呼，调用 fancy_name 工具。",
 )
 
 

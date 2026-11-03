@@ -1,6 +1,8 @@
 # LangGraph 02：StateGraph 基础（Node / Edge / 条件边 / 编译运行）
 
-> **一句话**：StateGraph = "State schema + 节点函数 + 边"。每个 node 接收当前 State，返回 partial State，LangGraph 自动把 partial 合并回 State。
+> StateGraph 由三样东西组成：State schema、节点函数、边。每个 node 拿到当前 State，只返回需要改的那部分字段，LangGraph 负责把这部分合并回去。这篇把构图、编译、运行的基本操作走一遍，后面所有篇章都建立在这套写法上。
+
+版本：以 `langgraph 1.2.19` 为准；`MemorySaver` 是 `InMemorySaver` 的别名。
 
 ---
 
@@ -35,7 +37,7 @@ app.invoke({"counter": 0, "history": []})
 
 ---
 
-## 2. Node：本质上是一个函数
+## 2. Node 就是一个函数
 
 签名：
 
@@ -43,29 +45,33 @@ app.invoke({"counter": 0, "history": []})
 def node(state: State, config: RunnableConfig | None = None) -> dict
 ```
 
-或异步：
+节点还可以声明 `runtime: Runtime[Context]` 参数，拿到本次运行的只读上下文（`runtime.context`）、`store`、`stream_writer`。上下文类型在 `StateGraph(State, context_schema=Context)` 里声明，调用时用 `app.invoke(x, context=Context(...))` 传入。
+
+也可以写成异步：
 
 ```python
 async def node(state, config=None) -> dict
 ```
 
-返回的 dict 是 **State 的 partial update**：
+返回的 dict 是对 State 的局部更新：
 
 ```python
 def inc(s: State) -> dict:
     return {"counter": s["counter"] + 1}   # 只返回要更新的字段
 ```
 
-未返回的字段不变，**不会**被设成 None。
+没返回的字段保持原值，**不会被设成 None**。
 
-可以是 **LCEL Runnable** 直接当 node：
+LCEL Runnable 也能直接当 node，但节点的返回值必须是 dict（或 `Command`），返回字符串会抛 `InvalidUpdateError: Expected dict, got ...`。链的末尾是 `StrOutputParser` 时，要再接一步把结果包成 State 的字段：
 
 ```python
-chain = prompt | model | StrOutputParser()
-g.add_node("answer", chain)   # 输入 state，输出 str → 自动包装
+from langchain_core.runnables import RunnableLambda
+
+chain = prompt | model | StrOutputParser() | RunnableLambda(lambda text: {"answer": text})
+g.add_node("answer", chain)   # 输入 state，输出 {"answer": ...}
 ```
 
-也可以传任意 callable。
+其他任意 callable 同样可以，返回值的要求一样。
 
 ---
 
@@ -82,7 +88,7 @@ class State(TypedDict):
     answer: str
 ```
 
-最常用。轻量、静态类型友好。
+最常用，轻量，对静态类型检查友好。
 
 ### 3.2 Pydantic
 
@@ -95,7 +101,7 @@ class State(BaseModel):
     answer: str = ""
 ```
 
-支持校验，但运行时开销略大。
+能做校验（包括类型转换），代价是运行时开销稍大；节点收到的是模型实例，用 `state.question` 取值。
 
 ### 3.3 dataclass
 
@@ -109,7 +115,7 @@ class State:
     answer: str = ""
 ```
 
-三种都能用，**TypedDict 是官方文档主推**。
+三种都能用，官方文档主推 TypedDict。dataclass 有个细节：默认值只在构造节点入参时补上，不会自动写进 state，图的最终输出始终是 dict。
 
 ---
 
@@ -136,7 +142,7 @@ g.add_conditional_edges(
 )
 ```
 
-`path_map` 把 router 返回的字符串映射到目标节点。也可省略 path_map，router 直接返回节点名：
+`path_map` 把 router 返回的字符串映射到目标节点。也可以省掉 path_map，让 router 直接返回节点名：
 
 ```python
 def router(state):
@@ -147,14 +153,14 @@ g.add_conditional_edges("A", router)
 
 ### 4.3 并行边（fan-out）
 
-同一个 source 加多个普通边：
+从同一个 source 连出多条普通边：
 
 ```python
 g.add_edge("A", "B")
 g.add_edge("A", "C")
 ```
 
-A 执行完后 **B、C 并行**执行。这是 LangGraph 重要特性，不需要显式 `parallel`。
+A 执行完后，B 和 C 会并行执行，不需要写任何显式的 `parallel`。
 
 ### 4.4 入口与出口
 
@@ -162,12 +168,9 @@ A 执行完后 **B、C 并行**执行。这是 LangGraph 重要特性，不需�
 from langgraph.graph import START, END
 g.add_edge(START, "first_node")
 g.add_edge("last_node", END)
-# 或者
-g.set_entry_point("first_node")
-g.set_finish_point("last_node")
 ```
 
-START 必须从一个特殊常量来，END 也是。
+`set_entry_point` / `set_finish_point` 是等价的旧写法，现在仍能用，新代码统一写 `add_edge(START, ...)`。
 
 ---
 
@@ -175,15 +178,15 @@ START 必须从一个特殊常量来，END 也是。
 
 ```python
 app = g.compile(
-    checkpointer=MemorySaver(),     # 持久化（HITL 必需）
-    interrupt_before=["tool"],      # 这些 node 执行前暂停
+    checkpointer=InMemorySaver(),   # 持久化（HITL 必需）
+    interrupt_before=["tool"],      # 静态断点：这些 node 执行前暂停（官方只建议调试用）
     interrupt_after=["plan"],       # 之后暂停
     debug=True,                     # 详细日志
     name="my-graph",                # LangSmith 显示名
 )
 ```
 
-`MemorySaver` / `SqliteSaver` 等下一篇专门讲。
+`InMemorySaver`、`SqliteSaver` 这些在 05 篇专门讲。做人在回路时优先用节点内的 `interrupt()`（06 篇），静态断点留给调试。
 
 ---
 
@@ -199,13 +202,13 @@ app.invoke({"question": "hi"})
 ### 6.2 stream
 
 ```python
-# stream_mode 有 4 种 ("values"/"updates"/"messages"/"debug")
+# stream_mode 有 values / updates / messages / custom / debug 等，可传列表组合
 for event in app.stream({"question": "hi"}, stream_mode="updates"):
     # event 是 dict: {node_name: partial_state}
     print(event)
 ```
 
-详见 07 篇。
+各种模式的区别见 [LangGraph 07：Streaming 的各种模式](./07-streaming.md)。
 
 ### 6.3 ainvoke / astream
 
@@ -239,17 +242,17 @@ print(app.invoke({"n": 0, "log": []}))
 # {'n': 5, 'log': ['inc to 1','inc to 2','inc to 3','inc to 4','inc to 5']}
 ```
 
-注意：
+这段代码里有三点要留意：
 
-- `log` 字段没用 reducer，每次返回完整新列表才能"追加"
-- 条件边自循环 "inc" → "inc" 完全合法
-- 默认递归上限 `recursion_limit=25`，超出抛错
+- `log` 字段没用 reducer，每次都得返回完整的新列表才能实现追加
+- 条件边让 "inc" 指回自己，这是完全合法的
+- 一次运行最多跑多少步由 `recursion_limit` 决定，超出会抛 `GraphRecursionError`。它是运行时 config（`app.invoke(x, {"recursion_limit": 50})`），不是 `compile()` 的参数。当前默认值是 10007（可用环境变量 `LANGGRAPH_DEFAULT_RECURSION_LIMIT` 调整），死循环要跑很久才会停，最好自己设一个上限
 
 ---
 
-## 8. Reducer 初探（关键）
+## 8. Reducer 初探
 
-上面 `log` 字段需要手动 `s["log"] + [...]` 才能追加。LangGraph 提供 **Reducer** 自动合并：
+上面的 `log` 字段要手动写 `s["log"] + [...]` 才能追加。LangGraph 提供的 Reducer 可以自动合并：
 
 ```python
 from typing_extensions import Annotated
@@ -263,9 +266,9 @@ def inc(s: S) -> dict:
     return {"n": s["n"] + 1, "log": [f"inc to {s['n']+1}"]}   # 只返回新增项
 ```
 
-每次 node 返回的 `log` 都是"新增"，LangGraph 自动 `old + new`。
+这样 node 每次只返回新增的条目，LangGraph 自己做 `old + new`。
 
-对消息列表有专用 reducer `add_messages`，下一篇详讲。
+消息列表有专用的 reducer `add_messages`，下一篇细讲。
 
 ---
 
@@ -289,23 +292,25 @@ g.add_edge("b", "merge")
 g.add_edge("merge", END)
 ```
 
-`a` 和 `b` 并行执行；都完成后 `merge` 一次执行。**LangGraph 自动等齐**。
+`a` 和 `b` 并行执行，两个都完成后 `merge` 只执行一次，等齐这件事由 LangGraph 负责。
 
 ---
 
 ## 10. 可视化
 
 ```python
-print(app.get_graph().draw_ascii())
+print(app.get_graph().draw_ascii())   # 需要 pip install grandalf
 # 或保存图片
 app.get_graph().draw_mermaid_png(output_file_path="graph.png")
 ```
 
-得到一张漂亮的拓扑图，直接放文档里。
+导出的拓扑图可以直接贴进文档。
 
 ---
 
-## 11. demo
+## 11. 本章 demo
+
+完整代码：[`demos/langgraph/02_stategraph.py`](../../demos/langgraph/02_stategraph.py)
 
 ```python
 # demos/langgraph/02_stategraph.py
@@ -340,16 +345,12 @@ print(app.get_graph().draw_ascii())
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `RecursionError` | 循环没收敛 | 加退出条件 / `compile(recursion_limit=...)` |
+| `GraphRecursionError` | 循环没收敛 | 加退出条件 / 调用时传 `config={"recursion_limit": N}`（不是 `compile` 参数） |
 | 字段每次被覆盖 | 没有 reducer | 用 `Annotated[..., add]` |
-| 并行 node 写同一字段冲突 | 并发写无 reducer | 给字段加 reducer |
+| 并行 node 写同一字段报 `InvalidUpdateError` | 同一步里多个写入且无 reducer | 给字段加 reducer |
 | 编译报错 "no entry point" | 没 START 边 | `add_edge(START, "x")` |
 | `END` 不识别 | import 错 | `from langgraph.graph import END` |
 
 ---
 
-## 13. 本章 demo
-
-[`demos/langgraph/02_stategraph.py`](../../demos/langgraph/02_stategraph.py)
-
-下一篇：[03-state-and-reducers.md](03-state-and-reducers.md)
+下一篇：[LangGraph 03：State 与 Reducer](03-state-and-reducers.md)

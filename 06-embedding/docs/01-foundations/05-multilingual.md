@@ -1,6 +1,6 @@
-# 多语言 Embedding 怎么工作的
+# 多语言 Embedding 的工作原理
 
-> **一句话**：多语言模型把不同语言的"同义表达"训到同一向量空间——"猫" / "cat" / "gato" / "ねこ" 在向量空间里靠得很近，所以中文 query 能召回英文文档（反之亦然）。
+> 多语言模型把不同语言里意思相同的表达训到同一个向量空间里，"猫"、"cat"、"gato"、"ねこ"彼此靠得很近。这样中文 query 能召回英文文档，反过来也一样。这篇讲它为什么可行、什么时候会出问题、怎么选模型。
 
 ---
 
@@ -8,14 +8,14 @@
 
 | 类型 | 例子 | 适合 |
 |------|------|------|
-| **单语言** | OpenAI text-embedding-3 系列（虽然标"多语言"但英文最强）、BGE-zh / GTE-zh | 单一语言场景 |
-| **真·多语言** | Cohere embed-multilingual-v3 / multilingual-e5 / bge-m3 / jina-embeddings-v3 | 多语言混合 / 跨语言检索 |
+| 单语言 | OpenAI text-embedding-3 系列（虽然标了多语言，但英文最强）、BGE-zh / GTE-zh | 单一语言场景 |
+| 多语言 | Cohere embed-v5.0 / voyage-4 / 千问 text-embedding-v4 / Qwen3-Embedding / multilingual-e5 / bge-m3 / jina-embeddings-v3 | 多语言混合、跨语言检索 |
 
-⚠️ "支持多语言" ≠ "效果一样好"。看 MMTEB / C-MTEB 等区域榜单。
+"支持多语言"不等于各语言效果一样好，具体要看 MMTEB、C-MTEB 这类分区域的榜单。
 
 ---
 
-## 2. 跨语言检索的 magic
+## 2. 跨语言检索是怎么做到的
 
 ```python
 query = "如何取消订阅"  # 中文 query
@@ -31,29 +31,28 @@ docs_en = [
 # → 召回成功
 ```
 
-为啥能 work：训练时见过海量 (zh, en) 翻译对，模型学到"语义跨语言对齐"。
+原因在训练数据：模型见过海量的中英翻译对，学会了把两种语言里的同一个意思对齐到一起。
 
 ---
 
 ## 3. 主流多语言模型
 
-### 3.1 Cohere embed-multilingual-v3
+### 3.1 Cohere embed（v3 多语言 → v5.0）
 
 ```python
 import cohere
 
-co = cohere.Client()
+co = cohere.ClientV2()   # 读取环境变量 CO_API_KEY
 resp = co.embed(
     texts=["猫", "cat", "gato"],
-    model="embed-multilingual-v3.0",
+    model="embed-v5.0-pro",           # 老的 embed-multilingual-v3.0 仍可用（1024 维，512 token）
     input_type="search_document",  # 或 "search_query"
+    embedding_types=["float"],
 )
-embeddings = resp.embeddings
+embeddings = resp.embeddings.float_
 ```
 
-- 100+ 语言，1024 维
-- 商业 API，质量高
-- 跨语言效果优秀
+运行这段需要 Cohere API key。v5.0 支持 100 多种语言，默认 2048 维、128k 上下文。它是商业 API，质量高，跨语言效果很好。
 
 ### 3.2 intfloat/multilingual-e5-large
 
@@ -69,8 +68,7 @@ embeddings = model.encode([
 ])
 ```
 
-- 100+ 语言，1024 维
-- 开源，可自部署
+支持 100 多种语言，1024 维，开源，可以自己部署。
 
 ### 3.3 BAAI/bge-m3
 
@@ -87,9 +85,7 @@ embeddings = model.encode(
 )
 ```
 
-- 100+ 语言，1024 维
-- 同时支持 dense / sparse / multi-vector
-- 长上下文（8192 tokens）
+同样是 100 多种语言、1024 维。它能同时输出 dense、sparse 和 multi-vector 三种表示，上下文长度 8192 tokens。
 
 ### 3.4 jinaai/jina-embeddings-v3
 
@@ -104,8 +100,7 @@ embeddings = model.encode(
 )
 ```
 
-- 100+ 语言，1024 维
-- 内置 task LoRA：检索 / 分类 / 聚类各自最优
+100 多种语言，1024 维。内置了按任务切换的 LoRA，检索、分类、聚类各用各的适配器。
 
 ---
 
@@ -130,7 +125,6 @@ embeddings = model.encode(
 ## 5. 跨语言 demo
 
 ```python
-# demos/foundations/05_multilingual.py
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
@@ -161,37 +155,27 @@ for doc, sim in zip([
     print(f"{doc:>15}  sim={sim:.4f}")
 ```
 
-输出大致：
-
-```
-       EN-同义  sim=0.85
-   EN-同义(更长)  sim=0.87
-      EN-不相关  sim=0.32
-      ZH-不相关  sim=0.41
-       ZH-同义  sim=0.91
-```
-
-英文同义文档相似度 > 中文不相关——跨语言检索成功。
+要看的是相对顺序：两条英文同义文档的相似度应该高于中文的不相关文档（"退款政策"），这说明模型是按意思而不是按语言在比，跨语言检索起作用了。具体数值随模型而变，multilingual-e5 的相似度整体偏高（模型卡提到常集中在 0.7 到 1.0 之间），不要拿绝对值做阈值。
 
 ---
 
-## 6. 何时多语言会"翻车"
+## 6. 多语言模型容易出错的地方
 
-1. **同形异义**：
+1. 同形异义：
 
    ```
    "python" (en, 编程语言) vs "python" (en, 蟒蛇)
    多语言模型容易混
    ```
 
-2. **小语种**：
+2. 小语种：
 
    ```
    斯瓦希里语 / 蒙古语 / 缅甸语 训练数据少
    → 效果远不如英中
    ```
 
-3. **特定领域术语**：
+3. 特定领域术语：
 
    ```
    "Form W-9" / "ICD-10" 这类英文专业术语
@@ -199,9 +183,9 @@ for doc, sim in zip([
    → 跨语言检索可能找错
    ```
 
-   解决：keep 原文 + 加翻译，双语都 embed。
+   解决办法是保留原文、同时加上译文，两种语言都 embed。
 
-4. **代码 / 公式**：
+4. 代码和公式：
 
    ```
    多语言模型对代码很弱
@@ -212,7 +196,7 @@ for doc, sim in zip([
 
 ## 7. instruction / prefix 必须用对
 
-很多多语言模型对 prefix 敏感：
+很多多语言模型对 prefix 很敏感：
 
 ```python
 # ❌ 不加 prefix
@@ -220,10 +204,10 @@ model.encode("How to cancel")
 
 # ✅ 按文档要求加
 model.encode("query: How to cancel")           # multilingual-e5
-model.encode("Represent this query: How to cancel")  # instructor
+model.encode("Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: How to cancel")  # Qwen3-Embedding，只给 query 加
 ```
 
-跟 input_type：
+Cohere 用的是 input_type 参数：
 
 ```python
 # Cohere
@@ -233,13 +217,13 @@ co.embed(texts, input_type="classification")
 co.embed(texts, input_type="clustering")
 ```
 
-**不同 input_type 给的向量不同**——不能混用。
+不同 input_type 给出的向量不一样，不能混着用。
 
 ---
 
 ## 8. 翻译 + 单语 vs 直接多语
 
-有些团队的"曲线救国"：
+有些团队会绕个弯，先翻译再用单语模型：
 
 ```
 方案 A（直接多语）：
@@ -254,13 +238,13 @@ co.embed(texts, input_type="clustering")
 | A | 简单，一步到位 | multilingual 模型质量略低 |
 | B | 用更强的单语模型 | 翻译有失真，延迟高 |
 
-**实战**：B 在 query 端代价高、不可扩展，**A 是主流**。
+B 每个 query 都要多一次翻译，成本高，也不好扩展，所以主流做法是 A。
 
 ---
 
 ## 9. 跨语言混合检索
 
-混合 BM25（关键词） + dense（语义） 时，BM25 部分需要 query 跟 doc 同语言。常见策略：
+BM25（关键词）和 dense（语义）混合时，BM25 那一路要求 query 和文档是同一种语言。常见的做法是分三路：
 
 ```
 中文 query：
@@ -272,7 +256,7 @@ co.embed(texts, input_type="clustering")
 合并三路 → rerank
 ```
 
-详见 [05-retrieval/02-bm25-fusion.md](../05-retrieval/02-bm25-fusion.md)。
+融合的细节见[BM25 + Dense 融合：RRF / Weighted](../05-retrieval/02-bm25-fusion.md)。
 
 ---
 
@@ -283,16 +267,16 @@ co.embed(texts, input_type="clustering")
   → 选该语言最强单语模型（中文 BGE / 英文 OpenAI）
 
 中英为主，偶尔小语种：
-  → multilingual-e5 / bge-m3 / cohere-multilingual
+  → 千问 text-embedding-v4 / bge-m3 / multilingual-e5
 
 跨语言检索是核心需求：
-  → cohere-multilingual-v3 / bge-m3（强）
+  → Cohere embed-v5.0 / Qwen3-Embedding / bge-m3，在自己的跨语言 evalset 上比
 
 预算紧：
-  → bge-m3 / multilingual-e5（开源）
+  → bge-m3 / multilingual-e5 / Qwen3-Embedding-0.6B（开源）
 
 要长上下文：
-  → bge-m3（8192 tokens）
+  → bge-m3（8192 tokens）/ Qwen3-Embedding（32k）
 ```
 
 ---
@@ -301,15 +285,15 @@ co.embed(texts, input_type="clustering")
 
 | 坑 | 解 |
 |----|----|
-| 用单语模型搜跨语言 | 召回率掉到 < 30%，换 multilingual |
-| 中英混搭文档没切分 | 切到同语言段落分别 embed 或用 bge-m3 |
-| query / doc 不加 prefix | 按官方文档加 |
-| 同时存多个模型的 vec | 维度 / 分布不同，必须分开 collection |
+| 用单语模型做跨语言检索 | 召回会很差，换 multilingual 模型 |
+| 中英混排的文档没有切开 | 按语言切成段落分别 embed，或者用 bge-m3 |
+| query / doc 没加 prefix | 按官方文档加上 |
+| 多个模型的向量存在一起 | 维度和分布都不同，必须分开放到不同 collection |
 
 ---
 
 ## 12. 下一步
 
-- 📖 多模态：图片也能 embedding → [06-multimodal.md](./06-multimodal.md)
-- 📖 多语言模型实操对比 → [02-models/03-open-source.md](../02-models/03-open-source.md)
-- 📖 在多语言上做混合检索 → [05-retrieval/02-bm25-fusion.md](../05-retrieval/02-bm25-fusion.md)
+- 图片也能 embedding：[多模态 Embedding：CLIP 原理](./06-multimodal.md)
+- 多语言模型的实操对比：[开源模型：Qwen3-Embedding / BGE / Jina / Nomic](../02-models/03-open-source.md)
+- 在多语言数据上做混合检索：[BM25 + Dense 融合：RRF / Weighted](../05-retrieval/02-bm25-fusion.md)

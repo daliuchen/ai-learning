@@ -1,6 +1,6 @@
 # 增量索引：文档新增 / 修改 / 删除
 
-> **一句话**：生产 RAG 的文档是动态的——新文档要进库、改了要更新 chunk、删了要清。**用 doc_id 关联 chunk** + **upsert 模式** 是基础策略。
+> 生产环境里的文档一直在变：新文档要入库，改过的要更新 chunk，删掉的要从索引里清干净。基础做法是两条：chunk 通过 doc_id 关联到原文档，写入一律用 upsert。这篇在此基础上讲变更检测、章节级 diff、零停机重建和幂等重试。
 
 ---
 
@@ -15,12 +15,12 @@
     "embedding": [...],
     "metadata": {
         "doc_version": 5,         # 文档版本
-        "updated_at": 1715817600,
+        "updated_at": 1778889600,  # unix 秒（2026-05-16）
     }
 }
 ```
 
-文档 → N 个 chunk。删除 / 更新都按 `doc_id` 操作。
+一个文档对应 N 个 chunk，删除和更新都按 `doc_id` 操作。
 
 ---
 
@@ -52,7 +52,7 @@ def add_doc(doc):
 
 ## 3. 修改文档（最棘手）
 
-文档内容改了 → 要重新切 chunk → 重新 embed → 替换索引。
+文档内容一改，就要重新切 chunk、重新 embed、替换索引里的旧数据。
 
 ```python
 def update_doc(doc):
@@ -63,14 +63,11 @@ def update_doc(doc):
     add_doc(doc)
 ```
 
-**注意**：
-
-- 删除应该是事务的（避免"删了但没插完成"）
-- 大文档慢，做 async 任务
+这里有两点要留意。一是中间状态：多数向量库没有跨操作的事务，先删后插的话，插入失败就会出现"旧的删了、新的没进来"。稳妥的顺序是先把新版本的 chunk 写进去（带上新的 `doc_version`），再删掉旧版本的；用 pgvector 的话直接放进一个 PG 事务（见第 10 节）。二是大文档处理慢，要做成异步任务。
 
 ---
 
-## 4. 怎么检测"要重 embed"
+## 4. 怎么判断要不要重新 embed
 
 ```python
 def needs_reindex(doc, last_indexed):
@@ -80,7 +77,7 @@ def needs_reindex(doc, last_indexed):
     )
 ```
 
-各加一个 `content_hash`（md5(text)）字段，变了才重 embed。
+给每条记录加一个 `content_hash`（md5(text)）字段，内容变了才重新 embed。
 
 ```python
 import hashlib
@@ -101,9 +98,9 @@ def content_hash(text):
 
 ---
 
-## 5. 章节级 diff 优化（高级）
+## 5. 章节级 diff 优化（进阶）
 
-文档改了一段，**不要全文重 embed**——只动改了的 chunk：
+文档只改了一段时，没必要全文重新 embed，只处理改动过的 chunk 就行：
 
 ```python
 def smart_update_doc(doc, old_chunks_meta):
@@ -137,10 +134,7 @@ def smart_update_doc(doc, old_chunks_meta):
         # ... upsert
 ```
 
-实战常常：
-
-- 小文档（< 10 chunks）→ 全删全加
-- 大文档（PDF 100 页）→ 章节级 diff
+我的经验是看文档大小：小文档（少于 10 个 chunk）直接全删全加，省事；大文档（比如 100 页的 PDF）才值得做章节级 diff。
 
 ---
 
@@ -151,26 +145,22 @@ def delete_doc(doc_id):
     vector_db.delete(filter={"doc_id": doc_id})
 ```
 
-或软删除：
+也可以软删除：
 
 ```python
 def soft_delete_doc(doc_id):
     vector_db.update_metadata(
         filter={"doc_id": doc_id},
-        update={"deleted_at": int(time.time())},
+        update={"deleted": True, "deleted_at": int(time.time())},
     )
 
 
-# 检索时排除
-filter = {"deleted_at": {"$eq": None}}
+# 检索时排除：各库写法不同。Qdrant 用 must_not + 字段存在性判断；
+# Pinecone 不支持按 null 过滤，可以给所有记录写一个 deleted: false，软删时改成 true
+filter = {"deleted": {"$eq": False}}
 ```
 
-软删的好处：
-
-- 误删可恢复
-- 历史可审计
-
-定期 hard delete 过老软删数据。
+软删除的好处是误删能恢复，历史也可以审计。过老的软删数据定期做一次 hard delete。
 
 ---
 
@@ -241,10 +231,10 @@ async def listen_doc_changes():
 asyncio.run(listen_doc_changes())
 ```
 
-或定期 poll：
+或者定期轮询：
 
 ```python
-async def poll_changes(interval=60):
+async def poll_changes(last_synced, interval=60):
     while True:
         changes = await db.query(
             "SELECT * FROM docs WHERE updated_at > %s",
@@ -260,7 +250,7 @@ async def poll_changes(interval=60):
 
 ## 9. 重试 / 幂等
 
-embed / upsert 失败要能重跑而不出问题：
+embed 或 upsert 失败后，要能安全地重跑：
 
 ```python
 async def add_doc_safe(doc, max_retries=3):
@@ -279,7 +269,7 @@ async def add_doc_safe(doc, max_retries=3):
                 raise
 ```
 
-**chunk_id 用确定性算法**（hash(doc_id + chunk_idx)）→ 重跑同 id 自动覆盖，不会重复。
+chunk_id 要用确定性算法生成（hash(doc_id + chunk_idx)），这样重跑时同一个 id 会自动覆盖，不会产生重复数据。
 
 ---
 
@@ -303,16 +293,16 @@ UPDATE chunks SET deleted_at = NOW() WHERE doc_id = $1;
 SELECT * FROM chunks WHERE deleted_at IS NULL ORDER BY embedding <=> $1 LIMIT 5;
 ```
 
-pgvector 优势：直接用 PG 事务，比向量库的"删 + 插"更稳。
+pgvector 的优势在于能直接用 PG 事务，比向量库先删再插更稳。
 
 ---
 
 ## 11. 完整 demo
 
 ```python
-# demos/production/01_incremental.py
 import asyncio
 import hashlib
+import uuid
 from qdrant_client import QdrantClient
 from qdrant_client.models import PointStruct, Filter, FieldCondition, MatchValue
 
@@ -323,7 +313,8 @@ class IncrementalIndexer:
         self.collection = collection
     
     def _chunk_id(self, doc_id, idx):
-        return hashlib.md5(f"{doc_id}_{idx}".encode()).hexdigest()
+        # 确定性 ID：同一个 (doc_id, idx) 永远得到同一个 UUID，重跑时自动覆盖
+        return str(uuid.UUID(hashlib.md5(f"{doc_id}_{idx}".encode()).hexdigest()))
     
     async def add_doc(self, doc):
         chunks = self._chunk(doc)
@@ -389,15 +380,15 @@ asyncio.run(indexer.delete_doc("kb_42"))
 
 | 坑 | 解 |
 |----|----|
-| chunk_id 不稳定 → 重跑生成不同 ID | 用 hash(doc_id + idx) 确定性 |
-| 改 doc 没删旧 chunk | delete + insert，或 UPSERT |
-| 大量并发更新冲突 | 加 doc_id 锁 / 串行化 |
-| 删了 doc 但 metadata 缓存还在 | 缓存也要清 |
+| chunk_id 不稳定，重跑生成了不同 ID | 用 hash(doc_id + idx) 生成确定性 ID |
+| 改了文档没删旧 chunk | 先 delete 再 insert，或者用 UPSERT |
+| 大量并发更新互相冲突 | 按 doc_id 加锁，或串行处理 |
+| 文档删了，metadata 缓存还在 | 缓存也要一起清 |
 
 ---
 
 ## 13. 下一步
 
-- 📖 批量 embed + cost 优化 → [02-batch-cost.md](./02-batch-cost.md)
-- 📖 缓存 → [03-caching.md](./03-caching.md)
-- 📖 部署形态 → [04-deployment.md](./04-deployment.md)
+- [批量 Embed + Cost 优化](./02-batch-cost.md)
+- [缓存策略：Embedding Cache / Query Cache / Result Cache](./03-caching.md)
+- [部署形态选型](./04-deployment.md)

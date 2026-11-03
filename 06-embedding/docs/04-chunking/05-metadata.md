@@ -1,12 +1,12 @@
 # Chunk Metadata 设计
 
-> **一句话**：每个 chunk 不只是 text，还要带 `doc_id / section / page / source / created_at / tags` 这些 metadata——**好的 metadata 设计直接决定生产 RAG 的检索精度和 UX**。
+> chunk 除了文本，还要带上 `doc_id / section / page / source / created_at / tags` 这些 metadata。生产环境里 RAG 能不能按条件过滤、能不能给出引用、能不能处理过期内容，都取决于 metadata 设计得好不好。
 
 ---
 
-## 1. 为啥 metadata 这么重要
+## 1. 为什么 metadata 这么重要
 
-不带 metadata 的 chunk 在生产里几乎不能用：
+只有文本、不带 metadata 的 chunk，放到生产环境基本没法用：
 
 ```python
 # ❌ 只有 text
@@ -48,8 +48,8 @@ chunk = "用户取消订阅的步骤是..."
     
     # === 版本 / 时间 ===
     "version": "v3.2",
-    "created_at": 1715817600,
-    "updated_at": 1716000000,
+    "created_at": 1778889600,             # 2026-05-16
+    "updated_at": 1779062400,             # 2026-05-18
     "expires_at": None,
     
     # === 权限 ===
@@ -67,7 +67,7 @@ chunk = "用户取消订阅的步骤是..."
 
 ## 3. metadata 设计原则
 
-### 3.1 只放"检索 / 过滤 / 显示"需要的
+### 3.1 只放检索、过滤、显示用得上的字段
 
 ```
 ✅ doc_id（关联回原文）
@@ -86,10 +86,10 @@ chunk = "用户取消订阅的步骤是..."
 # ❌ 不一致
 {"created_at": "2026-05-20"}      # 字符串
 {"created_at": "2026/05/20"}      # 不同格式
-{"created_at": 1715817600}        # int
+{"created_at": 1779235200}        # int
 
-# ✅ 统一 unix int
-{"created_at": 1715817600}
+# ✅ 统一 unix int（这里是 2026-05-20 00:00 UTC）
+{"created_at": 1779235200}
 ```
 
 ### 3.3 枚举用固定值
@@ -114,7 +114,7 @@ class Category:
 
 ## 4. metadata 给 LLM 看
 
-不只是 filter——给 LLM 看 metadata 提升答案质量：
+metadata 不只用来过滤。把它一起交给 LLM，答案质量也会提高：
 
 ```python
 def format_chunk_for_llm(hit):
@@ -123,8 +123,8 @@ def format_chunk_for_llm(hit):
     section = hit.payload.get("section_path", "")
     updated = hit.payload.get("updated_at", 0)
     
-    age_days = (now() - updated) / 86400 if updated else None
-    age_str = f"（{int(age_days)} 天前更新）" if age_days else ""
+    age_days = (time.time() - updated) / 86400 if updated else None
+    age_str = f"（{int(age_days)} 天前更新）" if age_days is not None else ""
     
     return f"""[来源: {title}{age_str}]
 [Section: {section}]
@@ -143,13 +143,13 @@ prompt = f"""基于以下文档回答用户问题。如果文档过期或不相�
 """
 ```
 
-LLM 看到"3 个月前更新"会自动谨慎。
+LLM 看到"3 个月前更新"这样的标注，回答时会更谨慎。
 
 ---
 
 ## 5. 引用 / 溯源
 
-前端展示要显示"答案来自哪里":
+前端要能告诉用户答案出自哪里：
 
 ```python
 def answer_with_citations(query):
@@ -179,7 +179,7 @@ def answer_with_citations(query):
     return {"answer": answer, "citations": citations}
 ```
 
-前端：
+前端渲染出来是这样：
 
 ```html
 <p>用户可以登录后进入设置取消订阅 [1]，订阅在周期末停止 [1]。退款政策见 [2]。</p>
@@ -228,7 +228,7 @@ def chunk_doc_with_metadata(doc):
 
 ## 7. 跟向量库 payload index 配合
 
-详见 [03-vector-db/07-hybrid-storage.md](../03-vector-db/07-hybrid-storage.md)。
+常用的过滤字段要在向量库里建 payload index，原理见[混合存储：Vector + Metadata + Filter](../03-vector-db/07-hybrid-storage.md)。
 
 ```python
 # Qdrant：给常用 filter 字段建 index
@@ -246,7 +246,7 @@ for field, schema in [
 
 ## 8. 增量更新 vs 替换
 
-文档变了，metadata 怎么处理？
+文档更新以后，最直接的做法是删掉旧 chunk 再整体重建：
 
 ```python
 def update_doc(doc):
@@ -260,7 +260,7 @@ def update_doc(doc):
     vector_db.upsert(items)
 ```
 
-或软删除 + 加新版本（详见 [07-production/01-incremental.md](../07-production/01-incremental.md)）。
+也可以先软删除老版本再加新版本，见[增量索引：文档新增 / 修改 / 删除](../07-production/01-incremental.md)。
 
 ---
 
@@ -285,7 +285,6 @@ def update_doc(doc):
 ## 10. demo：完整 metadata 流程
 
 ```python
-# demos/chunking/05_metadata.py
 import time
 import hashlib
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
@@ -298,9 +297,10 @@ char_splitter = RecursiveCharacterTextSplitter(chunk_size=300, chunk_overlap=30)
 def chunk_md_with_meta(doc):
     final = []
     md_chunks = md_splitter.split_text(doc["content"])
+    i = 0   # 整篇文档内的连续序号，取相邻 chunk（i-1 / i+1）时要用
     
     for mc in md_chunks:
-        for i, sub in enumerate(char_splitter.split_text(mc.page_content)):
+        for sub in char_splitter.split_text(mc.page_content):
             chunk_id = hashlib.md5(f"{doc['id']}:{i}:{sub[:20]}".encode()).hexdigest()
             final.append({
                 "id": chunk_id,
@@ -319,6 +319,7 @@ def chunk_md_with_meta(doc):
                     "chunk_size": len(sub),
                 },
             })
+            i += 1
     return final
 
 
@@ -357,27 +358,22 @@ for c in chunks:
 
 | 坑 | 解 |
 |----|----|
-| metadata 太大（塞全文） | 只放 ID + 关键字段 |
-| 时间用 string 不能 range | 改 int timestamp |
-| 没 doc_id → 增量更新难 | 必有 doc_id |
-| 字段名不一致 | 文档化 + lint |
-| 没 version → 灰度难 | 加 version 字段 |
+| metadata 太大（把全文也塞进去） | 只放 ID 和关键字段 |
+| 时间存成字符串，没法做范围查询 | 改成 int 时间戳 |
+| 没有 doc_id，增量更新很难做 | doc_id 必须有 |
+| 字段名不统一 | 写成文档，再加 lint 检查 |
+| 没有 version，灰度发布很难做 | 加 version 字段 |
 
 ---
 
 ## 12. 04-chunking 章节小结
 
-走完这 5 篇你应该：
-
-- 知道 chunking 决定 RAG 上限
-- 会用 recursive / markdown / structure-aware 切
-- 会用 small-to-big 提质量
-- 设计完整的 chunk metadata
+切片这一章到此结束。前面几篇讲了 chunking 为什么决定 RAG 的上限，recursive、markdown、结构感知这几种切法怎么用，怎么用 small-to-big 提升质量，以及这一篇的 metadata 设计。
 
 ---
 
 ## 13. 下一步
 
-- 📖 检索策略：纯向量 vs 混合 → [05-retrieval/01-vector-vs-keyword.md](../05-retrieval/01-vector-vs-keyword.md)
-- 📖 BM25 + dense 融合 → [05-retrieval/02-bm25-fusion.md](../05-retrieval/02-bm25-fusion.md)
-- 📖 rerank → [05-retrieval/05-rerank-pipeline.md](../05-retrieval/05-rerank-pipeline.md)
+- 检索策略怎么选：[纯向量 vs 关键词 vs 混合](../05-retrieval/01-vector-vs-keyword.md)
+- BM25 和 dense 怎么融合：[BM25 + Dense 融合：RRF / Weighted](../05-retrieval/02-bm25-fusion.md)
+- 加上 rerank：[重排 Pipeline：召回 → 精排](../05-retrieval/05-rerank-pipeline.md)

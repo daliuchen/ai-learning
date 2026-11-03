@@ -1,20 +1,14 @@
 # Input Guardrails：输入守卫
 
-> **一句话**：在 LLM 调用前**校验用户输入**——发现违规直接 tripwire，阻止整个 Agent 跑起来；不违规则放行。
+> Input guardrail 用来校验用户输入：发现违规就触发 tripwire，抛出 `InputGuardrailTripwireTriggered` 并终止整个 run，没问题就放行。它默认和 Agent 并行运行，延迟最低，代价是被拦下时 Agent 可能已经在消耗 token、调用工具；如果要求拦下的输入完全不触发模型和工具，就设 `run_in_parallel=False`。
 
 ---
 
-## 1. 为啥需要
+## 1. 为什么需要
 
-LLM 调用前防御：
+在调用 LLM 之前，有几类输入值得先拦一道：身份证、银行卡、密码这类 PII；想绕过权限的越权请求；在输入里塞“忽略上面的指令”的 prompt injection；和产品无关的滥用提问；还有免费用户问付费功能这种业务规则。
 
-- **PII 检测**：身份证 / 银行卡 / 密码
-- **越权请求**：用户想绕过权限
-- **Prompt Injection**：用户在 input 里塞 "忽略上面指令"
-- **滥用**：用户问跟产品无关的事
-- **业务规则**：免费用户问付费功能
-
-不用 guardrails 也能做（在 instructions 里写规则），但 guardrails 更明确、可单独评测。
+这些规则写进 instructions 里也能起作用，但做成 guardrail 更明确，也能单独评测。
 
 ---
 
@@ -49,13 +43,28 @@ except InputGuardrailTripwireTriggered as e:
     print("被拦下:", e.guardrail_result.output.output_info)
 ```
 
-`tripwire_triggered=True` → SDK 抛 `InputGuardrailTripwireTriggered` → Agent 不会跑。
+`tripwire_triggered=True` 时，SDK 抛出 `InputGuardrailTripwireTriggered`，run 被终止。
+
+> `GuardrailFunctionOutput(output_info=..., tripwire_triggered=...)` 里的 `output_info` 是必填参数，没信息就传 `None`。只写 `GuardrailFunctionOutput(tripwire_triggered=True)` 在 0.24 会报 `missing 1 required positional argument: 'output_info'`。
+>
+> 守卫函数第三个参数 `user_input` 的类型是 `str | list[TResponseInputItem]`，传入 messages 列表时它就是列表，所以做字符串判断前先 `str(...)` 或自己拼出文本。装饰器也可以从 `agents.decorators` 引入（0.19 起提供，和 `agents` 顶层是同一个）。
 
 ---
 
-## 3. 用 LLM 做守卫
+## 3. 执行模式：并行 vs 阻塞
 
-正则 / 关键词不够准，可以让一个小模型来判断：
+| 模式 | 写法 | 行为 | 适合 |
+|------|------|------|------|
+| 并行（默认） | `@input_guardrail` | 守卫和 Agent 同时启动；守卫触发时 Agent 被取消，但可能已经花了 token、执行了工具 | 对延迟敏感、守卫很快 |
+| 阻塞 | `@input_guardrail(run_in_parallel=False)` | 守卫先跑完；触发的话 Agent 根本不启动 | 省钱、避免工具副作用（写库、发邮件） |
+
+两种模式命中后都会抛出 `InputGuardrailTripwireTriggered`，区别只在 Agent 有没有先跑起来。**有副作用的工具要配阻塞模式**，否则在并行模式下工具可能已经执行了。output guardrail 总是在 Agent 跑完之后才执行，所以没有这个参数。
+
+---
+
+## 4. 用 LLM 做守卫
+
+正则和关键词不够准时，可以让一个小模型来判断：
 
 ```python
 from pydantic import BaseModel
@@ -77,7 +86,7 @@ guard_agent = Agent(
 输出 is_problematic 和 reason。
 """,
     output_type=GuardOutput,
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -98,23 +107,23 @@ main_agent = Agent(
 )
 ```
 
-**注意**：每次 main_agent 跑都额外调一次 guard_agent → 烧 token，所以 guard_agent 用 mini。
+每次 main_agent 运行都会额外调用一次 guard_agent，会多花 token，所以 guard_agent 用便宜的小模型。
 
 ---
 
-## 4. 多个 guardrails
+## 5. 多个 guardrails
 
 ```python
 @input_guardrail
 async def length_guard(ctx, agent, user_input):
-    return GuardrailFunctionOutput(tripwire_triggered=len(user_input) > 5000)
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered=len(user_input) > 5000)
 
 
 @input_guardrail
 async def language_guard(ctx, agent, user_input):
     # 只接受中英文（用 langdetect 等）
     triggered = not is_zh_or_en(user_input)
-    return GuardrailFunctionOutput(tripwire_triggered=triggered)
+    return GuardrailFunctionOutput(output_info=None, tripwire_triggered=triggered)
 
 
 agent = Agent(
@@ -123,11 +132,11 @@ agent = Agent(
 )
 ```
 
-**所有 guardrails 并发跑**——只要一个 tripwire 就停。
+所有 guardrails 并发执行，任何一个触发 tripwire 就停下。触发时，`e.run_data.input_guardrail_results` 里有此前已经完成的全部守卫结果。
 
 ---
 
-## 5. 拿 context 做决策
+## 6. 用 context 做判断
 
 ```python
 from dataclasses import dataclass
@@ -156,20 +165,20 @@ await Runner.run(main_agent, "advanced ML", context=UserCtx("u1", is_pro=False))
 
 ---
 
-## 6. 错误返回 vs Tripwire
+## 7. 错误返回 vs Tripwire
 
 | 场景 | tripwire | output_info |
 |------|----------|-------------|
 | 检测正常 | False | 检查结果（统计用） |
 | 检测异常 | True | reason / detected |
 
-`output_info` 是给你（业务代码）看的，可以放统计、错误码、模型给的 reason 等。LLM 看不到。
+`output_info` 是给业务代码看的，可以放统计信息、错误码、模型给出的理由等，LLM 看不到。
 
 ---
 
-## 7. 拦下后给用户啥回应
+## 8. 拦下后怎么回复用户
 
-`InputGuardrailTripwireTriggered` 被 catch 后你来决定怎么回 user：
+捕获 `InputGuardrailTripwireTriggered` 之后，由你决定怎么回复：
 
 ```python
 try:
@@ -181,43 +190,32 @@ except InputGuardrailTripwireTriggered as e:
     return {"reply": f"抱歉，我无法处理这个请求。{reason}", "blocked": True}
 ```
 
-不要让 main_agent 道歉——它根本没跑。
+回复只能由你的代码给出：并行模式下 main_agent 跑到一半就被取消，阻塞模式下它根本没启动。
 
 ---
 
-## 8. guardrail 自身错误处理
+## 9. 守卫自身出错
 
-guardrail 函数抛异常 → 视为 tripwire 触发：
+守卫函数抛异常不会被当成 tripwire 触发。在 0.24 里，守卫函数里 `raise RuntimeError("guard api down")`，`Runner.run` 抛出的就是这个 `RuntimeError` 本身。它既不算 tripwire，也不会被吞掉，整个 run 直接失败。官方的说法是这种情况下结论是 “unknown”：tripwire 才会拒绝输出，异常走的是另一条路径。
 
-```python
-@input_guardrail
-async def risky_guard(ctx, agent, user_input):
-    score = await some_api(user_input)  # 万一 timeout
-    return GuardrailFunctionOutput(tripwire_triggered=score > 0.8)
-```
-
-API 挂了 → tripwire → 用户被拦。**通常你不希望这样**（守卫挂了不能误伤）：
+所以守卫里调用外部 API 时，要自己决定它挂了怎么办：
 
 ```python
 @input_guardrail
 async def safe_guard(ctx, agent, user_input):
     try:
-        score = await some_api(user_input)
+        score = await some_api(str(user_input))
     except Exception:
-        return GuardrailFunctionOutput(tripwire_triggered=False)  # fail-open
-    return GuardrailFunctionOutput(tripwire_triggered=score > 0.8)
+        # fail-open：守卫挂了放行；换成 tripwire_triggered=True 就是 fail-close
+        return GuardrailFunctionOutput(output_info={"error": "guard_unavailable"}, tripwire_triggered=False)
+    return GuardrailFunctionOutput(output_info={"score": score}, tripwire_triggered=score > 0.8)
 ```
 
-**fail-open vs fail-close**：
-
-- fail-open：守卫挂了就放行（用户体验优先）
-- fail-close：守卫挂了就拒（安全优先）
-
-按业务选。
+有两种选择。fail-open 是守卫挂了就放行，用户体验优先；fail-close 是守卫挂了就拒绝，安全优先。按业务选，但两种都要配告警，别让守卫悄无声息地失效。
 
 ---
 
-## 9. 性能：守卫只在主 Agent 入口跑一次
+## 10. 守卫只在入口跑一次
 
 ```python
 triage = Agent(
@@ -232,16 +230,15 @@ billing = Agent(
 )
 ```
 
-`input_guardrails` 只在用户 input 进入 `Runner.run` 时跑——后续 handoff 不会再跑（因为 handoff 之间不是新 user input）。
+`input_guardrails` 只在用户输入进入 `Runner.run` 时执行，之后的 handoff 不会再触发，因为 handoff 之间没有新的用户输入。
 
-要在 Billing 内部也守卫 → 用 output_guardrails（详见 [02-output-guardrails.md](./02-output-guardrails.md)）。
+想在 Billing 内部也做检查，可以用 output_guardrails（它只管产出最终回答的那个 agent，见 [Output Guardrails：输出守卫](./02-output-guardrails.md)），或者给每个敏感工具挂 tool guardrails。后者在每次调用前后都检查，不受 handoff 影响，见 [Tripwire 与异常处理](./03-tripwire.md)。
 
 ---
 
-## 10. 完整 demo
+## 11. 完整 demo
 
 ```python
-# demos/guardrails/01_input_guardrails.py
 import asyncio
 import re
 from dataclasses import dataclass
@@ -284,7 +281,7 @@ main_agent = Agent(
     name="Main",
     instructions="正常回答用户问题",
     input_guardrails=[block_pii, pro_only],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -311,31 +308,32 @@ asyncio.run(main())
 
 ---
 
-## 11. 跟 OpenAI Moderation API 配合
+## 12. 跟 OpenAI Moderation API 配合
 
 OpenAI 自带 `moderations` 端点：
 
 ```python
-from openai import OpenAI
+from openai import AsyncOpenAI
+
+moderation_client = AsyncOpenAI()
 
 
-@input_guardrail
+@input_guardrail(run_in_parallel=False)
 async def openai_mod(ctx, agent, user_input):
-    client = OpenAI()
-    resp = client.moderations.create(input=user_input)
+    resp = await moderation_client.moderations.create(input=str(user_input))   # async 客户端，别在协程里用同步 OpenAI()
     flagged = resp.results[0].flagged
     return GuardrailFunctionOutput(
-        tripwire_triggered=flagged,
         output_info={"categories": resp.results[0].categories.model_dump()},
+        tripwire_triggered=flagged,
     )
 ```
 
-免费 + 快，但只覆盖通用违规（暴力 / 仇恨 / 自残 / 性 / 骚扰）。
+它免费也快，但只覆盖通用的违规类别：暴力、仇恨、自残、色情、骚扰。（运行这段需要 OpenAI API key。）守卫不一定要再套一个 Agent，像这里一样直接调用外部分类器也可以。
 
 ---
 
-## 12. 下一步
+## 13. 下一步
 
-- 📖 Output Guardrails 防输出泄露 → [02-output-guardrails.md](./02-output-guardrails.md)
-- 📖 Tripwire 完整异常处理 → [03-tripwire.md](./03-tripwire.md)
-- 📖 安全：injection 防御 → [07-production/04-security.md](../07-production/04-security.md)
+- 防止输出泄露 → [Output Guardrails：输出守卫](./02-output-guardrails.md)
+- 完整的异常处理 → [Tripwire 与异常处理](./03-tripwire.md)
+- injection 防御 → [安全：Prompt Injection / 越狱防御 / 滥用监控](../07-production/04-security.md)

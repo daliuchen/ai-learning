@@ -28,9 +28,9 @@ load_dotenv()
 
 
 def pick_vision_model() -> str | TestModel:
-    """vision 任务首选 gpt-4o，否则 Claude，否则 TestModel"""
+    """vision 任务首选 OpenAI 兼容模型，否则 Claude，否则 TestModel"""
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
         return "anthropic:claude-3-5-sonnet-latest"
     print("[warn] 未检测到 API key，使用 TestModel。\n")
@@ -44,7 +44,7 @@ def pick_doc_model() -> str | TestModel:
     if os.getenv("GEMINI_API_KEY"):
         return "google-gla:gemini-1.5-flash"
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     return TestModel()
 
 
@@ -111,7 +111,7 @@ def demo_document_url() -> None:
     agent = Agent(
         pick_doc_model(),
         output_type=PaperSummary,
-        system_prompt="从给定 PDF 中抽取论文标题、作者、核心贡献。",
+        instructions="从给定 PDF 中抽取论文标题、作者、核心贡献。",
     )
     try:
         result = agent.run_sync(
@@ -142,7 +142,7 @@ def demo_invoice_pipeline() -> None:
     agent = Agent(
         pick_vision_model(),
         output_type=Invoice,
-        system_prompt="你是发票识别专家，从图中抽取关键字段。",
+        instructions="你是发票识别专家，从图中抽取关键字段。",
     )
     img_bytes = make_demo_png()  # 真实项目用 Path("invoice.png").read_bytes()
     try:

@@ -1,32 +1,27 @@
-# LangChain 06：Streaming 全方位流式
+# LangChain 06：Streaming 流式输出
 
-> **一句话**：LangChain 提供四种流式 API（`stream` / `astream` / `astream_events` / `astream_log`），分别覆盖"末端 chunk 流"、"异步 chunk 流"、"事件流"、"差异 patch 流"四类需求。生产环境最常用的是 `astream_events`。
+> LangChain 有四个流式 API：`stream` 和 `astream` 输出链末端的 chunk（一个同步一个异步），`astream_events` 输出每一步的事件，`astream_log` 输出差异 patch。上线的应用里用得最多的是 `astream_events`。这篇逐个讲，最后补上 agent 的 `stream_mode`。
 
 ---
 
 ## 1. 为什么 Streaming 重要
 
-LLM 应用的体感延迟主要在"等模型一口气写完"。直接 `invoke` 用户要等好几秒，流式可以让首字符在 200ms 内吐出，体验差异是质变的。
+用户觉得 LLM 应用慢，多半是在等模型把整段话写完。直接 `invoke` 要等好几秒，流式能让第一个字在几百毫秒内出来，体验完全不一样。
 
-LangChain 的流式有两个层面：
-
-1. **Token 级流式**：ChatModel 内部 yield token chunk
-2. **链路级流式**：整个 chain 把中间事件透出来
-
-只有 ChatModel 内部支持流式才能做到 token 级；如果链里有 Lambda/Parser 阻塞了输出，外面也流不起来。
+LangChain 的流式分两层。一层是 token 级，由 ChatModel 内部逐个 yield token chunk；另一层是链路级，整个 chain 把中间步骤的事件透出来。token 级流式的前提是 ChatModel 本身支持流式，而且链里没有哪个 Lambda 或 Parser 把输出攒住，否则外面也流不起来。
 
 ---
 
-## 2. 四个流式 API 全景
+## 2. 四个流式 API
 
 | API | 输入 | 输出 | 何时用 |
 |-----|------|------|--------|
 | `stream(input)` | 单条 | `Iterator[Output]` | 简单同步场景 |
 | `astream(input)` | 单条 | `AsyncIterator[Output]` | 异步、Web 服务 |
-| `astream_events(input, version="v2")` | 单条 | `AsyncIterator[StreamEvent]` | **最常用**：监听 chain 每一步 |
+| `astream_events(input, version="v2")` | 单条 | `AsyncIterator[StreamEvent]` | 最常用，监听 chain 每一步 |
 | `astream_log(input)` | 单条 | `AsyncIterator[RunLogPatch]` | 差异 patch 流（少用） |
 
-后两者都是异步，所以 Web 场景几乎都用 `astream_events`。
+后两个都是异步的，Web 场景基本都用 `astream_events`。
 
 ---
 
@@ -36,13 +31,13 @@ LangChain 的流式有两个层面：
 
 ```python
 from langchain_openai import ChatOpenAI
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="gpt-6-luna")
 
 for chunk in model.stream("讲个长一点的故事"):
     print(chunk.content, end="", flush=True)
 ```
 
-每个 `chunk` 是 `AIMessageChunk`，能用 `+` 累加：
+每个 `chunk` 是一个 `AIMessageChunk`，可以用 `+` 累加：
 
 ```python
 acc = None
@@ -60,7 +55,7 @@ for chunk in chain.stream({"q": "..."}):
     print(chunk, end="", flush=True)   # chunk 是 str
 ```
 
-LangChain 内部把每个 `AIMessageChunk.content` 传给 `StrOutputParser`，parser 流式 yield 字符串。
+LangChain 把每个 `AIMessageChunk.content` 依次交给 `StrOutputParser`，parser 再逐段 yield 字符串。
 
 ### 3.3 异步
 
@@ -72,13 +67,13 @@ async def main():
 asyncio.run(main())
 ```
 
-`astream` 比 `stream` 更适合 Web 服务（FastAPI/Starlette），因为不阻塞事件循环。
+在 FastAPI、Starlette 这类 Web 服务里用 `astream`，它不会阻塞事件循环。
 
 ---
 
-## 4. astream_events：事件流（重点）
+## 4. astream_events：事件流
 
-`stream` 只能流末端结果，看不到中间步骤；`astream_events` 暴露 chain 里每个节点的开始/中间/结束事件，是构建生产级 UI 的核心 API。
+`stream` 只输出最后一步的结果，中间步骤看不到。`astream_events` 会把 chain 里每个节点的开始、中间、结束事件都发出来，做正式产品的界面基本都靠它。
 
 ### 4.1 基本用法
 
@@ -105,7 +100,7 @@ on_chain_end RunnableSequence
 
 ### 4.2 事件 schema
 
-每个 event 是 dict：
+每个 event 是一个 dict：
 
 ```python
 {
@@ -120,7 +115,7 @@ on_chain_end RunnableSequence
 }
 ```
 
-按 `event` 类型 + `name` 类型分发处理：
+按 `event` 和 `name` 分发处理：
 
 ```python
 async for ev in chain.astream_events(x, version="v2"):
@@ -156,11 +151,11 @@ async def chat(q: str):
     return EventSourceResponse(gen())
 ```
 
-前端用 `EventSource` 监听即可。
+前端用 `EventSource` 接收。
 
 ### 4.4 过滤：include_names / include_tags
 
-事件量很大，可以过滤：
+事件很多，可以按名字过滤：
 
 ```python
 async for ev in chain.astream_events(
@@ -173,7 +168,7 @@ async for ev in chain.astream_events(
     ...
 ```
 
-或在 chain 里给节点打标签：
+也可以在 chain 里给节点打标签，再按标签过滤：
 
 ```python
 chain = (prompt | model).with_config({"tags": ["main-llm"], "run_name": "main"})
@@ -183,7 +178,7 @@ chain = (prompt | model).with_config({"tags": ["main-llm"], "run_name": "main"})
 
 ## 5. astream_log
 
-差异 patch 流，每个 patch 是 JSONPatch RFC 6902 风格：
+它输出的是差异 patch，格式遵循 JSONPatch（RFC 6902）：
 
 ```python
 async for chunk in chain.astream_log(x, include_types=["llm"]):
@@ -197,31 +192,30 @@ RunLogPatch({'op': 'add', 'path': '/logs/ChatOpenAI/streamed_output/-', 'value':
 RunLogPatch({'op': 'add', 'path': '/logs/ChatOpenAI/streamed_output/-', 'value': 'i'})
 ```
 
-`astream_log` 是早期 API，`astream_events` 是其升级版，**新项目首选 astream_events**。
+`astream_log` 是早期的 API，现在还在，但已经不推荐。`astream_events` 是它的升级版，新项目直接用 `astream_events`。
 
 ---
 
 ## 6. 让 RunnableLambda 也流起来
 
-默认 `RunnableLambda` 是阻塞的：
+默认情况下 `RunnableLambda` 会等拿到完整输入再处理：
 
 ```python
 chain = model | RunnableLambda(lambda s: s + "!!!")
 # 即使 model 流式输出，lambda 也会等全部完成
 ```
 
-让它流式：
+改成「接收迭代器、yield 输出」的生成器函数，直接放进 `|` 链，LangChain 会把它包成 `RunnableGenerator`，按 chunk 流式处理：
 
 ```python
 def make_stream(stream):
     for chunk in stream:
         yield chunk + "!"
 
-# 函数接收 Iterator 并 yield，会自动被识别为流式
-chain = model | RunnableLambda(make_stream)
+chain = model | StrOutputParser() | make_stream   # 自动包成 RunnableGenerator
 ```
 
-或者用 `RunnableGenerator`：
+注意不要再套一层 `RunnableLambda(make_stream)`：`RunnableLambda` 会先把上游输出攒完整再调用函数，流式就失效了。也可以显式用 `RunnableGenerator`：
 
 ```python
 from langchain_core.runnables import RunnableGenerator
@@ -237,7 +231,7 @@ chain = model | StrOutputParser() | RunnableGenerator(transform)
 
 ## 7. JSON 部分流式
 
-`JsonOutputParser` 支持"边生成边解析不完整 JSON"：
+`JsonOutputParser` 可以边生成边解析不完整的 JSON：
 
 ```python
 from langchain_core.output_parsers import JsonOutputParser
@@ -258,17 +252,17 @@ for partial in chain.stream({"q": "返回 10 个水果数组"}):
 ...
 ```
 
-这是 LangChain 工程上很亮的点，前端写实时表单的好帮手。
+前端要实时填充表单时，这个能力很好用。
 
 ---
 
-## 8. 累计 token 用法
+## 8. 统计 token 用量
 
-每个 chunk 单独的 usage 一般是空的，最后一个 chunk 才有完整 usage（OpenAI 返回 `stream_options={"include_usage": True}` 时）：
+单个 chunk 的 usage 一般是空的，只有最后一个 chunk 带完整用量（Chat Completions 接口需要请求里带 `stream_options={"include_usage": True}`）：
 
 ```python
 model = ChatOpenAI(
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
     stream_usage=True,
 )
 
@@ -278,13 +272,40 @@ for chunk in model.stream("..."):
 print(acc.usage_metadata)
 ```
 
-`stream_usage=True` 让 LangChain 自动开 OpenAI 的 include_usage 选项。
+`stream_usage=True` 会让 LangChain 在请求里带上 include_usage。用 OpenAI 官方地址时它默认就是开的；设了 `base_url`（比如接千问）或传了自定义 client 时默认关闭，要显式打开，前提是对方接口支持。
 
 ---
 
-## 9. 流式中的中断
+## 9. Agent 的流式：stream_mode（1.x 新增）
 
-异步流可以用 `asyncio.CancelledError` 中断：
+前面讲的都是单个 chain 或模型的流式。`create_agent` 返回的是 LangGraph 图，它有自己的一套 `stream_mode`。要在界面上分别展示 agent 正在思考、正在调工具、给出答案，用它更合适：
+
+```python
+from langchain.agents import create_agent
+
+agent = create_agent(model, tools=[get_weather])
+inp = {"messages": [{"role": "user", "content": "北京天气？"}]}
+
+# 1) messages：逐 token 拿模型输出（含 tool_call_chunks），meta 里有 langgraph_node
+for token, meta in agent.stream(inp, stream_mode="messages"):
+    print(meta["langgraph_node"], token.text, end="")
+
+# 2) updates：每个节点跑完给一次增量（model / tools 交替出现），适合画进度
+for ev in agent.stream(inp, stream_mode="updates"):
+    print(list(ev))            # ['model'] -> ['tools'] -> ['model']
+
+# 3) 组合：传列表，拿到 (mode, data) 元组
+for mode, data in agent.stream(inp, stream_mode=["updates", "messages"]):
+    ...
+```
+
+此外还有 `custom`（在工具里用 `get_stream_writer()` 主动推送自定义事件，比如「已查到 3 条订单」）、`values`（每一步的完整状态）、`debug` 等模式。`astream_events(version="v2")` 在 agent 上同样可用，事件类型就是 `on_chat_model_stream` / `on_tool_start` / `on_tool_end` 那一套。`stream_mode` 的完整用法在 LangGraph 07 篇。
+
+---
+
+## 10. 流式中的中断
+
+异步流可以通过 `asyncio.CancelledError` 中断：
 
 ```python
 task = asyncio.create_task(consume_stream())
@@ -292,11 +313,13 @@ await asyncio.sleep(2)
 task.cancel()   # 中断
 ```
 
-LangChain 内部会取消正在进行的 LLM 调用（取决于供应商 SDK 是否支持中断）。
+LangChain 会尝试取消正在进行的 LLM 调用，能不能真的停下来取决于供应商 SDK 是否支持。
 
 ---
 
-## 10. 综合 demo：astream_events 监听 RAG
+## 11. 综合 demo：astream_events 监听 RAG
+
+完整代码：[`demos/langchain/06_streaming.py`](../../demos/langchain/06_streaming.py)
 
 ```python
 # demos/langchain/06_streaming.py
@@ -308,7 +331,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnableLambda
 
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="gpt-6-luna")
 
 # 假装 retriever
 async def fake_retrieve(q: str):
@@ -347,24 +370,21 @@ async def main():
 asyncio.run(main())
 ```
 
-跑起来你会先看到"retriever 完成"提示，然后实时看到 LLM token 输出。
+运行后会先看到 retriever 完成的提示，接着是 LLM 逐 token 的输出。
 
 ---
 
-## 11. 常见坑
+## 12. 常见坑
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `stream` 不流，整段一起出 | chain 末端有阻塞 parser | 改 `StrOutputParser` 或自定义流式 |
-| RunnableLambda 不流 | 函数返回值而非 yield | 把函数改成 generator |
-| `astream_events` 报 `version` 错 | LangChain 旧版本 | 升级 `langchain-core>=0.2.30` |
-| OpenAI 流式拿不到 usage | 没开 `stream_usage` | `ChatOpenAI(stream_usage=True)` |
-| WebSocket 断了，LLM 还在烧 token | 没取消 | 用 `task.cancel()` |
+| `stream` 没流起来，整段一起出 | chain 末端的 parser 不支持流式 | 换成 `StrOutputParser`，或自己实现流式 |
+| RunnableLambda 不流式 | `RunnableLambda` 总是等输入攒完整再调用函数 | 改成接收迭代器的生成器函数，用 `RunnableGenerator` 包装 |
+| `astream_events` 报 `NotImplementedError` | 传了 `version="v3"`，它目前只有 ChatModel 和 LangGraph 图实现了 | 用默认的 `version="v2"` |
+| 接兼容接口时流式拿不到 usage | 设了 `base_url` 后 `stream_usage` 默认关闭 | `ChatOpenAI(stream_usage=True)` |
+| agent 流式只看到整段回答 | 用了 `stream_mode="values"` / `"updates"` | 要逐 token 就用 `stream_mode="messages"` |
+| WebSocket 断了，LLM 还在消耗 token | 没有取消任务 | 用 `task.cancel()` |
 
 ---
 
-## 12. 本章 demo
-
-[`demos/langchain/06_streaming.py`](../../demos/langchain/06_streaming.py)
-
-下一篇：[07-tools.md](07-tools.md) — Tools 工具系统。
+下一篇：[LangChain 07：Tools 工具系统](07-tools.md)

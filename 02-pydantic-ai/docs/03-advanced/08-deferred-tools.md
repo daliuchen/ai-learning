@@ -1,12 +1,14 @@
 # Pydantic AI 进阶 08：Deferred Tools 与人审批
 
-> **一句话**：Deferred Tools 让工具调用"延后"到 Agent run 之外去执行 —— 等人审批、跨进程异步、跨网络调度，都可以让 Agent 先暂停，业务层处理完再把结果塞回来继续 run。
+> 有些工具调用不能在 Agent 运行中当场执行：要等人审批，要交给别的进程异步处理，或者要跨网络调度。Deferred Tools 让 Agent 先停下来，把调用请求交给业务层，处理完再带着结果接着跑。这篇讲审批和外部执行两种模式、怎么恢复运行，以及审批在安全上的边界。
+
+以 `pydantic-ai 2.64.0` 为准。想在运行中途就地处理延迟调用，用 `HandleDeferredToolCalls` capability（见第 12 节）。
 
 ---
 
-## 1. 为什么需要"延迟工具"
+## 1. 为什么需要延迟工具
 
-普通 `@agent.tool` 是**当场执行 + 立刻返回**的同进程函数：
+普通的 `@agent.tool` 是在同一进程里当场执行、立刻返回的函数：
 
 ```python
 @agent.tool
@@ -14,18 +16,18 @@ def get_weather(ctx, city: str) -> str:
     return requests.get(...).text   # 当场调
 ```
 
-但生产里很多工具**不能/不该**当场执行：
+但生产环境里，很多工具不能或者不该当场执行：
 
-1. **危险操作要人审批**：删库、退款、发邮件给客户 —— Agent 不能自己决定
-2. **跨进程异步**：工具是别的 worker 在跑，要排队 + 等回调
-3. **跨网络协议**：工具实际是浏览器端调的（如前端按钮触发），Agent 拿不到
-4. **超长任务**：跑 30 分钟的批处理，HTTP 连接撑不住
+1. 危险操作要人审批：删库、退款、给客户发邮件，不能让 Agent 自己决定
+2. 跨进程异步：工具由别的 worker 执行，要排队、等回调
+3. 跨网络：工具实际在浏览器端调用（比如由前端按钮触发），Agent 那边拿不到
+4. 超长任务：跑 30 分钟的批处理，HTTP 连接撑不了那么久
 
-这四类场景的共同特征：**Agent 决定"调哪个工具+用什么参数"，但执行权要交出去**。Pydantic AI 用 `DeferredToolRequests` + `DeferredToolResults` 这套机制把它做成一等公民。
+这几种情况有一个共同点：Agent 决定调用哪个工具、传什么参数，但执行要交给别人。Pydantic AI 用 `DeferredToolRequests` + `DeferredToolResults` 这套机制专门处理它。
 
 ---
 
-## 2. 基本工作流
+## 2. 基本流程
 
 ```
    ┌─────────────────────────────────────────────────┐
@@ -55,24 +57,24 @@ def get_weather(ctx, city: str) -> str:
    └─────────────────────────────────────────────────┘
 ```
 
-注意三点：
+有三点要注意：
 
-1. **Agent run 暂停时是"正常返回"**，不是抛异常
-2. 两轮之间靠 `message_history` 串联，**不能跨进程丢消息**
-3. `DeferredToolResults` 里的 `tool_call_id` 必须严格对应
+1. Agent 暂停时是正常返回，不是抛异常
+2. 两轮之间靠 `message_history` 串起来，跨进程时消息不能丢
+3. `DeferredToolResults` 里的 `tool_call_id` 必须和请求一一对应
 
 ---
 
 ## 3. 两种延迟模式
 
-Pydantic AI 把"延迟"分成两种语义不同的场景：
+Pydantic AI 把延迟分成两种含义不同的情况：
 
 | 模式 | 触发方式 | 用途 |
 |------|---------|------|
-| **Approval（审批）** | 工具加 `requires_approval=True` 或运行时 raise `ApprovalRequired()` | 危险操作要人点头 |
-| **External（外部执行）** | 工具里 raise `CallDeferred(metadata=...)` | 工具实际不在这进程跑，比如前端 / 后台 worker |
+| Approval（审批） | 工具加 `requires_approval=True`，或运行时 raise `ApprovalRequired()` | 危险操作要人同意 |
+| External（外部执行） | 工具里 raise `CallDeferred(metadata=...)` | 工具实际不在当前进程执行，比如前端或后台 worker |
 
-两种都通过 `DeferredToolRequests` 返回，你按 `requests.approvals` 和 `requests.calls` 分别处理。
+两种都通过 `DeferredToolRequests` 返回，分别在 `requests.approvals` 和 `requests.calls` 里处理。
 
 ---
 
@@ -81,7 +83,7 @@ Pydantic AI 把"延迟"分成两种语义不同的场景：
 ```python
 from pydantic_ai import Agent
 
-agent = Agent('openai:gpt-5.2')
+agent = Agent('openai:gpt-6.1-sol')
 
 
 @agent.tool_plain(requires_approval=True)
@@ -90,9 +92,9 @@ def delete_file(path: str) -> str:
     return f'File {path!r} deleted'
 ```
 
-`requires_approval=True` 告诉 Pydantic AI：**模型决定要调这个工具时，先停下来问人**。
+`requires_approval=True` 的意思是：模型决定调用这个工具时，先停下来问人。
 
-也可以**条件审批**（只有敏感场景才暂停）：
+也可以按条件审批，只在敏感场景暂停：
 
 ```python
 from pydantic_ai import Agent, ApprovalRequired, RunContext
@@ -108,19 +110,19 @@ def update_file(ctx: RunContext, path: str, content: str) -> str:
     return f'Updated {path}'
 ```
 
-`ctx.tool_call_approved` 在审批通过后**重新进入这个工具**时是 `True`，于是直接执行真实逻辑。
+审批通过后再次进入这个工具时，`ctx.tool_call_approved` 是 `True`，于是直接执行实际逻辑。
 
 ---
 
 ## 5. 接收 DeferredToolRequests
 
-如果 Agent 的某次 run 触发了延迟，`result.output` **不再是你的输出类型**，而是 `DeferredToolRequests`：
+某次运行触发了延迟时，`result.output` 就不再是你声明的输出类型，而是 `DeferredToolRequests`：
 
 ```python
 from pydantic_ai import Agent, DeferredToolRequests
 
 
-agent = Agent('openai:gpt-5.2', output_type=[str, DeferredToolRequests])
+agent = Agent('openai:gpt-6.1-sol', output_type=[str, DeferredToolRequests])
 
 result = agent.run_sync('请把 config.py 删了')
 
@@ -133,7 +135,7 @@ else:
     print('正常输出:', result.output)
 ```
 
-**关键**：要把 `DeferredToolRequests` 加进 `output_type` 列表里。这是 Pydantic AI 让你显式声明"我能处理延迟"。
+`DeferredToolRequests` 必须加进 `output_type` 列表，相当于你显式声明「我能处理延迟」。
 
 ---
 
@@ -160,14 +162,16 @@ final = agent.run_sync(
 print('最终回答:', final.output)
 ```
 
-`results.approvals` 字典值可以是：
+`results.approvals` 的值可以是：
 
-- `True` —— 批准
-- `False` —— 拒绝（默认错误信息）
-- `ToolApproved(...)` —— 批准并可附加 metadata
-- `ToolDenied('原因')` —— 拒绝并告诉模型为啥
+- `True`：批准
+- `False`：拒绝（用默认的错误信息）
+- `ToolApproved(override_args={...})`：批准，并可以用 `override_args` 替换模型给的参数
+- `ToolDenied('原因')`：拒绝，并告诉模型原因
 
-被拒的工具，模型读到 `ToolDenied` 后会决定下一步，比如"那我换个安全操作"或"我向用户道歉并停下"。
+需要给工具带额外信息时，写在 `results.metadata[tool_call_id]` 里，工具执行时从 `ctx.tool_call_metadata` 读到。
+
+工具被拒后，模型读到 `ToolDenied`，自己决定下一步，比如换一个安全的操作，或者向用户说明情况后停下。
 
 ---
 
@@ -179,7 +183,7 @@ print('最终回答:', final.output)
 import asyncio
 from pydantic_ai import Agent, CallDeferred, RunContext
 
-agent = Agent('openai:gpt-5.2')
+agent = Agent('openai:gpt-6.1-sol')
 
 tasks: dict[str, asyncio.Task] = {}
 
@@ -192,9 +196,9 @@ async def compute_heavy(ctx: RunContext, payload: str) -> str:
     raise CallDeferred(metadata={'task_id': task_id})
 ```
 
-raise 之后 Agent 把这个调用塞进 `requests.calls`，metadata 一起带出来。
+raise 之后，Agent 把这次调用放进 `requests.calls`，metadata 也一起带出来。
 
-外部 worker 跑完后：
+外部 worker 执行完后：
 
 ```python
 from pydantic_ai import DeferredToolResults
@@ -212,21 +216,22 @@ final = await agent.run(
 )
 ```
 
-`results.calls` 字典值可以是：
+`results.calls` 的值可以是：
 
-- `str | dict | BaseModel` —— 真实工具返回
-- `ModelRetry('...')` —— 让模型重试
+- 任意可序列化的值（`str`、`dict`、`BaseModel` 等）：当作工具的实际返回，也可以显式包成 `ToolReturn`
+- `ModelRetry('...')`：把错误信息回给模型，让它重试
+- `ToolFailed(...)`：告诉模型这次调用失败了
 
 ---
 
-## 8. 一图看懂两种模式的字段对照
+## 8. 两种模式的字段对照
 
 | 字段 | Approval | External |
 |------|----------|----------|
 | 触发方式 | `tool_plain(requires_approval=True)` / `raise ApprovalRequired()` | `raise CallDeferred(metadata={...})` |
 | 出现在 | `requests.approvals` | `requests.calls` |
-| 回填位置 | `results.approvals[id] = True/False/ToolApproved/ToolDenied` | `results.calls[id] = 真实返回 / ModelRetry` |
-| 业务含义 | "可不可以做" | "做完了，结果是什么" |
+| 回填位置 | `results.approvals[id] = True/False/ToolApproved/ToolDenied` | `results.calls[id] = 真实返回 / ModelRetry / ToolFailed` |
+| 业务含义 | 能不能做 | 做完了，结果是什么 |
 | 是否一定要 metadata | 否 | 通常需要（记 task_id） |
 
 ---
@@ -235,9 +240,9 @@ final = await agent.run(
 
 需求：
 
-- 用户："帮我把购物车结算了，最贵的那件如果超 5000 就先放着"
-- Agent 自动调 `get_cart_items`、`calculate_total`、`apply_coupon` —— 都自动执行
-- Agent 调 `submit_order`、`refund` —— 必须人审批
+- 用户说：「帮我把购物车结算了」
+- `get_cart_items`、`calculate_total` 自动执行
+- `submit_order`、`refund` 必须经人审批
 
 ```python
 from pydantic import BaseModel
@@ -250,7 +255,7 @@ class Order(BaseModel):
 
 
 agent = Agent(
-    'openai:gpt-5.2',
+    'openai:gpt-6.1-sol',
     output_type=[Order, DeferredToolRequests],
     instructions='你是电商助理，对涉及金额/支付/退款的操作要谨慎。',
 )
@@ -281,7 +286,7 @@ def refund(order_id: str, amount: float) -> str:
     return f'退款 ¥{amount} → {order_id} 完成'
 ```
 
-**Round 1**：
+第一轮：
 
 ```python
 result = agent.run_sync('帮我结算购物车')
@@ -302,7 +307,7 @@ if isinstance(result.output, DeferredToolRequests):
   submit_order({'items': [...], 'total': 9997.0})
 ```
 
-**Round 2**（人点了"确认"）：
+第二轮（用户点了确认）：
 
 ```python
 results = DeferredToolResults()
@@ -320,14 +325,13 @@ final = agent.run_sync(
 print('最终:', final.output)
 ```
 
-如果用户同意，`final.output` 就是 `Order(order_id='ORD-001', total=9997.0)`。
-如果拒绝，Agent 会读到 `ToolDenied`，可能回复"已为您取消下单"。
+用户同意的话，`final.output` 就是 `Order(order_id='ORD-001', total=9997.0)`；拒绝的话，Agent 会读到 `ToolDenied`，可能回复「已为您取消下单」。
 
 ---
 
 ## 10. 与 message_history 的关系
 
-**这是最容易踩坑的地方**：第二轮 run **必须**传 `message_history`，否则模型完全不知道之前发生过什么，可能直接重新调用工具，或者完全不调用：
+这里最容易出错：第二轮必须传 `message_history`。框架要在历史里找到最后一条带未处理工具调用的 `ModelResponse`，才知道这些结果填给谁；不传历史会直接报 `UserError`（"Tool call results were provided, but the message history is empty."）：
 
 ```python
 # ❌ 错误：丢历史
@@ -343,16 +347,16 @@ agent.run_sync(
 历史里包含：
 
 - 用户的原始 prompt
-- 模型决定调工具的 `ToolCallPart`
-- (空位置，等你填回结果)
+- 模型决定调用工具的 `ToolCallPart`
+- 一个空位，等你把结果填回来
 
-Pydantic AI 拿 `deferred_tool_results` 里的 `tool_call_id` 去匹配历史里的 `ToolCallPart`，对上号才能继续。**ID 错就报错，所以别自己造**。
+Pydantic AI 用 `deferred_tool_results` 里的 `tool_call_id` 去匹配历史里的 `ToolCallPart`，所以 ID 要原样取自 `requests.approvals` / `requests.calls`，不要自己编。用 `requests.build_results(...)` 构造结果时，ID 对不上会直接抛 `ValueError`。
 
 ---
 
 ## 11. 跨进程持久化
 
-如果 Round 1 和 Round 2 跨**HTTP 请求 / 跨服务 / 跨数据库**（很常见），你要把 `messages` 序列化存下来：
+第一轮和第二轮分属不同的 HTTP 请求、不同服务，或者中间要落库，这种情况很常见。这时要把 `messages` 序列化存起来：
 
 ```python
 import json
@@ -367,13 +371,13 @@ serialized = load_from_db(user_session_id)
 messages = ModelMessagesTypeAdapter.validate_json(serialized)
 ```
 
-`ModelMessagesTypeAdapter` 是 Pydantic AI 提供的 TypeAdapter，**保证消息体跨版本兼容**。
+`ModelMessagesTypeAdapter` 是 Pydantic AI 提供的 TypeAdapter，按框架自己的消息 schema 序列化和反序列化，`ToolCallPart`、时间戳这些类型都能原样还原。
 
 ---
 
-## 12. Inline Handler 模式（高级）
+## 12. Inline Handler 模式
 
-如果你的"延迟"其实是**当下能解决的**（比如 mock 一个审批流程），可以用 `HandleDeferredToolCalls` capability 让 Agent 内部就处理掉：
+如果延迟的事情当下就能解决（比如审批流程很快就有结果），可以用 `HandleDeferredToolCalls` capability 在 Agent 内部处理掉：
 
 ```python
 from pydantic_ai.capabilities import HandleDeferredToolCalls
@@ -387,7 +391,7 @@ async def handle_deferred(ctx, requests):
 
 
 agent = Agent(
-    'openai:gpt-5.2',
+    'openai:gpt-6.1-sol',
     capabilities=[HandleDeferredToolCalls(handler=handle_deferred)],
 )
 
@@ -396,13 +400,13 @@ result = agent.run_sync('删 config.py')
 print(result.output)  # 直接是最终输出
 ```
 
-适合的场景：**审批流不需要长时间等待**，但你又想保持"延迟工具"的语义清晰。
+适合审批不需要长时间等待、又想保留延迟工具这层清晰语义的场景。
 
 ---
 
 ## 13. 与 LangChain / LangGraph 对比
 
-LangChain 没有原生"延迟工具"概念，通常用 LangGraph 的 **interrupt** 来实现：
+LangChain 本身没有延迟工具的概念，一般用 LangGraph 的 interrupt 实现：
 
 ```python
 # LangGraph
@@ -413,9 +417,9 @@ def approval_node(state):
         do_delete()
 ```
 
-LangGraph 的 interrupt 是图节点级别的，更通用但更重；Pydantic AI 的延迟工具是工具级别，**写起来比 LangGraph 直接得多**：你不需要画图、不需要 checkpointer，只需要把工具标个 `requires_approval=True`。
+LangGraph 的 interrupt 在图节点这一级，更通用，也更重。LangChain 1.x 里还有 `HumanInTheLoopMiddleware`，挂在 `create_agent` 上对指定工具中断，需要 checkpointer 和 `thread_id`。Pydantic AI 的延迟工具在工具这一级，状态就是消息历史：不用画图，也不用 checkpointer，给工具标上 `requires_approval=True`，什么时候拿到审批结果，就什么时候带着历史接着跑。代价是持久化，以及「客户端传回来的历史不可信」这件事，都要你自己负责。
 
-如果你的"人审批"只覆盖几个敏感工具，Pydantic AI 是更简单的选择。如果你的整个工作流都需要"中断 + 恢复"，LangGraph 的 interrupt 更合适。
+如果只是少数几个敏感工具需要人审批，我会选 Pydantic AI 这套，简单得多；如果整个工作流都要中断和恢复，LangGraph 的 interrupt 更合适。
 
 ---
 
@@ -423,22 +427,34 @@ LangGraph 的 interrupt 是图节点级别的，更通用但更重；Pydantic AI
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `result.output` 拿到的不是 Pydantic 模型而是 `DeferredToolRequests` | 模型决定调要审批的工具 | 用 `isinstance(result.output, DeferredToolRequests)` 判断 |
-| 第二轮 run 报"unknown tool_call_id" | 没传 `message_history` 或 id 不对 | 必须 `message_history=result.all_messages()` |
-| Agent 第二轮直接再次问用户 | 历史里 ToolCallPart 没被"喂结果" | 检查 `results.approvals` 是否填全所有 `requests.approvals` 的 id |
+| `result.output` 不是 Pydantic 模型，而是 `DeferredToolRequests` | 模型决定调用要审批的工具 | 用 `isinstance(result.output, DeferredToolRequests)` 判断 |
+| 第二轮报 `UserError: Tool call results were provided, but the message history is empty.` | 没传 `message_history` | 必须 `message_history=result.all_messages()` |
+| 第二轮 Agent 又一次停下来要审批 | 历史里的 ToolCallPart 没拿到结果 | 检查 `results.approvals` 是否覆盖了 `requests.approvals` 里所有 id |
 | `output_type=Issue` 报错 | 没声明 `DeferredToolRequests` 是合法输出 | `output_type=[Issue, DeferredToolRequests]` |
-| `requires_approval=True` 没生效 | 用了 `@agent.tool` 但参数名打错 | 改成 `@agent.tool_plain(requires_approval=True)` 或 `@agent.tool(requires_approval=True)` |
-| 跨进程 messages 反序列化失败 | 自己 `json.dumps()` 了 | 用 `ModelMessagesTypeAdapter` |
-| `CallDeferred.metadata` 在第二轮拿不到 | 没去 `requests.metadata[id]` 取 | 它是 dict，按 tool_call_id 索引 |
-| 多个 deferred 工具同时挂起，只处理了一个 | 没遍历 `approvals + calls` 全部 | 两个列表都要遍历填值 |
-| 用 `ToolDenied('xxx')` 但模型没读到原因 | 写成 `False` 了 | 显式用 `ToolDenied('原因')` |
-| Round 2 后又触发新一轮 deferred | 这是正常的（agent 想调另一个敏感工具） | 循环处理直到没有 `DeferredToolRequests` |
+| 某个工具没有停下来等审批 | 工具是用 `Agent(tools=[fn])` 直接传函数注册的，没有地方写 `requires_approval`（装饰器里把参数写成 `require_approval` 不会静默失效，会直接报 `TypeError`） | 改成 `Agent(tools=[Tool(fn, requires_approval=True)])`，或用 `@agent.tool(requires_approval=True)` / `@agent.tool_plain(requires_approval=True)` |
+| 跨进程反序列化 messages 失败 | 自己用了 `json.dumps()` | 用 `ModelMessagesTypeAdapter` |
+| 第二轮拿不到 `CallDeferred.metadata` | 没从 `requests.metadata[id]` 取 | 它是 dict，按 tool_call_id 索引 |
+| 多个延迟工具同时挂起，只处理了一个 | 没把 `approvals` 和 `calls` 都遍历一遍 | 两个列表都要遍历并填值 |
+| 用了 `ToolDenied('xxx')`，模型却没读到原因 | 实际写成了 `False` | 显式用 `ToolDenied('原因')` |
+| 第二轮之后又出现新的延迟请求 | 这是正常的，agent 想调用另一个敏感工具 | 循环处理，直到不再返回 `DeferredToolRequests` |
 
 ---
 
-## 15. 多轮循环范式
+## 15. 安全边界：审批不等于授权
 
-如果 Agent 可能多次需要审批，写一个循环：
+Pydantic AI 的服务端是无状态的：延迟工具的结果（`deferred_tool_results`）和消息历史都是随请求带进来的，框架既不签名也不校验。所以：
+
+- 通过 UI 适配器（Vercel AI / AG-UI）或自己的 HTTP 接口对外服务时，审批结果由客户端随请求提交，**任何能访问这个接口的客户端都能批准** `requires_approval=True` 的工具。不要把「历史里有审批记录」当成授权凭据；
+- 高风险操作要在服务端重新校验调用方的权限，按调用方权限构建工具集；来自浏览器的历史先用 `sanitize_messages` 清洗（见[消息与对话历史（Messages & History）](../01-basics/07-messages-history.md)）；
+- 内置的网页聊天 UI（`agent.to_web()`）把审批显示成「批准 / 拒绝」按钮。官方明确说它只用于本地开发调试，只接受 `application/json` 以防跨站请求，但绑定 localhost 本身并不构成安全边界。
+
+V2 还有几个细节：工具参数必须先校验通过才能延迟，因为处理延迟的人需要看到参数；`ApprovalRequired` / `CallDeferred` 也可以在 `before_tool_execute` 等执行 hook 里抛，给一批工具统一加审批；`toolset.approval_required(predicate)` 可以按条件批量加审批。
+
+---
+
+## 16. 多轮循环写法
+
+Agent 可能多次需要审批时，写成一个循环：
 
 ```python
 from pydantic_ai import DeferredToolRequests, DeferredToolResults
@@ -463,36 +479,36 @@ while isinstance(result.output, DeferredToolRequests):
 print('全部完成:', result.output)
 ```
 
-这是**生产环境的标准范式**，把 deferred 当成"协作信号"而不是"一次性中断"。
+生产环境里一般就这么写：把延迟看作 Agent 和业务层之间反复来回的协作，不要当成只发生一次的中断。
 
 ---
 
-## 16. 本章 demo
+## 17. 本章 demo
 
 完整可运行代码：[`demos/advanced/08_deferred_tools.py`](../../demos/advanced/08_deferred_tools.py)
 
-demo 涵盖：
-- 电商 Agent：自动工具 + 审批工具混用
-- 审批通过 / 拒绝 两条路径
-- 多轮 deferred 循环
-- 跨进程序列化 messages 演示
-- 无 key 时用 TestModel 模拟模型选择审批工具
+demo 包括：
+- 电商 Agent：自动执行的工具和需要审批的工具混用
+- 审批通过、拒绝两条路径
+- 多轮延迟循环
+- 跨进程序列化 messages
+- 没有 key 时用 TestModel 模拟模型选中审批工具
 
 ---
 
-## 17. 章节小结
+## 18. 进阶部分回顾
 
-到这里你已经走完 03-advanced 的 8 篇，掌握了 Pydantic AI 的核心进阶能力：
+进阶部分的 8 篇：
 
 | 章节 | 主题 |
 |------|------|
-| 01 | 流式响应 |
-| 02 | 多模态输入 |
-| 03 | 思维链 |
-| 04 | Hooks |
-| 05 | 直接调模型（Direct Requests）|
-| 06 | Capabilities |
-| 07 | 重试机制 |
+| 01 | [流式响应](01-streaming.md) |
+| 02 | [多模态输入](02-multimodal.md) |
+| 03 | [思维链](03-thinking.md) |
+| 04 | [Hooks](04-hooks.md) |
+| 05 | [直接调模型（Direct Requests）](05-direct-requests.md) |
+| 06 | [Capabilities](06-capabilities.md) |
+| 07 | [重试机制](07-retries-http.md) |
 | 08 | Deferred Tools（本篇）|
 
-下一阶段：[`04-modules/`](../04-modules/) —— MCP、Evals、Graph、Logfire 等配套模块。
+接下来是[配套模块](../04-modules/)：MCP、Evals、Graph、Logfire 等。

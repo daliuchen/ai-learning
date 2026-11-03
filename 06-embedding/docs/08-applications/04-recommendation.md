@@ -1,6 +1,6 @@
-# 推荐系统 with Embedding
+# 用 Embedding 做推荐系统
 
-> **一句话**：把"用户兴趣"和"物品特征"分别 embed 到同一空间，**用户向量 × 物品向量** 算相似度做候选召回——传统推荐系统的现代化方式。
+> 把用户兴趣和物品特征分别 embed 到同一个向量空间，再用用户向量和物品向量的相似度来召回候选，这是把传统推荐系统换成 embedding 做法的思路。这篇从用户向量怎么来讲到多样性、冷启动和实时更新。
 
 ---
 
@@ -24,7 +24,7 @@
 
 ### 方案 A：行为聚合
 
-把用户最近交互的物品 embedding 平均：
+最简单的做法，是把用户最近交互过的物品 embedding 取平均：
 
 ```python
 def user_embedding(user_id):
@@ -42,7 +42,7 @@ def user_embedding(user_id):
 
 ### 方案 B：加权聚合
 
-近期权重高、买的比看的权重高：
+在平均的基础上加权：越近的行为权重越高，购买比浏览权重高。
 
 ```python
 def weighted_user_embedding(user_id):
@@ -59,7 +59,7 @@ def weighted_user_embedding(user_id):
         
         # 时间衰减
         age_days = (now - e["ts"]) / 86400
-        time_weight = math.exp(-age_days / 30)   # 半衰期 30 天
+        time_weight = 0.5 ** (age_days / 30)     # 半衰期 30 天：30 天前的行为权重减半
         
         # 行为权重
         action_weight = {"view": 1, "click": 2, "cart": 5, "purchase": 10}.get(e["action"], 1)
@@ -82,13 +82,13 @@ def weighted_user_embedding(user_id):
 训练目标：(user, clicked_item) 相似度高
 ```
 
-工业级用 Two-Tower / DSSM 等专门架构。简单场景方案 B 够用。
+工业界一般用 Two-Tower、DSSM 这类专门的架构。简单场景用方案 B 就够了。
 
 ---
 
 ## 3. Item Embedding
 
-跟语义搜索一样：
+物品向量的做法和语义搜索一样：
 
 ```python
 def item_to_text(item):
@@ -101,7 +101,7 @@ item_embeddings = {
 }
 ```
 
-或用 CLIP 给电商商品图 embed（详见 [03-multimodal.md](./03-multimodal.md)）。
+电商商品也可以用 CLIP 给商品图做 embedding，见[多模态：图搜图 / 文搜图 / 图搜文](./03-multimodal.md)。
 
 ---
 
@@ -111,11 +111,11 @@ item_embeddings = {
 def recommend(user_id, top_k=20):
     user_vec = user_embedding(user_id)
     
-    hits = vector_db.search(
+    hits = vector_db.query_points(
         collection_name="items",
-        query_vector=user_vec.tolist(),
+        query=user_vec.tolist(),
         limit=top_k * 2,
-    )
+    ).points
     
     # 过滤已看过 / 已购买
     seen = set(get_user_seen_items(user_id))
@@ -128,13 +128,16 @@ def recommend(user_id, top_k=20):
 
 ## 5. 多样性
 
-直接 cosine 召回的物品**太相似**——用户体验差：
+直接按 cosine 召回，结果会彼此太像，用户体验很差。可以用 MMR 在相关性和多样性之间折中：
 
 ```python
 def diverse_recommend(user_id, top_k=20, diversity=0.5):
     """MMR (Maximal Marginal Relevance)"""
     user_vec = user_embedding(user_id)
-    candidates = vector_db.search("items", query_vector=user_vec, limit=100)
+    candidates = vector_db.query_points(
+        "items", query=user_vec.tolist(), limit=100,
+        with_vectors=True,          # MMR 要用到候选自己的向量
+    ).points
     
     selected = []
     selected_vecs = []
@@ -161,7 +164,7 @@ def diverse_recommend(user_id, top_k=20, diversity=0.5):
     return selected
 ```
 
-`diversity=0` 全是最相似，`diversity=1` 拼命要多样。常用 0.3-0.5。
+`diversity=0` 时只看相似度，`diversity=1` 时只追求多样，常用 0.3-0.5。
 
 ---
 
@@ -195,7 +198,7 @@ def business_rerank(user_id, candidates):
 
 ## 7. 冷启动
 
-新用户 / 新物品没数据：
+新用户、新物品都没有行为数据，需要单独处理：
 
 ```python
 def recommend_cold_user(user_id):
@@ -212,7 +215,7 @@ def recommend_cold_user(user_id):
         # 完全冷 → 热门
         return get_trending_items()
     
-    return vector_db.search("items", query_vector=seed_vec.tolist())
+    return vector_db.query_points("items", query=seed_vec.tolist(), limit=20).points
 
 
 def index_cold_item(item_id):
@@ -227,7 +230,7 @@ def index_cold_item(item_id):
 
 ## 8. 实时更新
 
-用户每次点击 → 更新 user_embedding：
+用户每点击一次，就更新一次 user_embedding：
 
 ```python
 async def on_user_click(user_id, item_id):
@@ -244,7 +247,6 @@ async def on_user_click(user_id, item_id):
 ## 9. 完整 demo
 
 ```python
-# demos/applications/04_recommendation.py
 import numpy as np
 from openai import OpenAI
 
@@ -309,11 +311,11 @@ for user in ["alice", "bob"]:
 |---|---|---|
 | 数据 | User-item 交互矩阵 | User / item 内容 + 交互 |
 | 冷启动 | 难（新用户 / 新物品没数据） | 容易（内容 embed 即可） |
-| 解释性 | 弱 | 强（同义物品聚一起） |
-| 内容相似 | ❌ | ✅ |
+| 解释性 | 一般（"看过 X 的人也看了 Y"） | 一般（"和你看过的 X 内容相近"） |
+| 内容相似 | 不支持 | 支持 |
 | 计算复杂度 | 高（矩阵分解）| 中（embed 一次，查询 ANN）|
 
-实战常**两者结合**：CF 抓"行为相似"，Embedding 抓"内容相似"。
+实际系统里两者常常一起用：CF 负责行为上的相似，embedding 负责内容上的相似。
 
 ---
 
@@ -321,14 +323,14 @@ for user in ["alice", "bob"]:
 
 | 坑 | 解 |
 |----|----|
-| User vector 偏老兴趣 | 加时间衰减 |
-| 推荐都太像 | 加 MMR 多样性 |
-| Item embedding 不更新 | 物品改动后要 re-embed |
-| 没过滤已看 | seen set 必须做 |
+| 用户向量被旧兴趣主导 | 加时间衰减 |
+| 推荐结果彼此太像 | 用 MMR 加多样性 |
+| 物品 embedding 不更新 | 物品信息改动后要重新 embed |
+| 没过滤用户已经看过的 | 一定要维护 seen set |
 
 ---
 
 ## 12. 下一步
 
-- 📖 去重 / 聚类 / 异常检测 → [05-deduplication.md](./05-deduplication.md)
-- 📖 多模态推荐（电商图 + 描述）→ [03-multimodal.md](./03-multimodal.md)
+- 去重、聚类、异常检测：[用 Embedding 做去重、聚类与异常检测](./05-deduplication.md)
+- 结合商品图和描述的多模态推荐：[多模态：图搜图 / 文搜图 / 图搜文](./03-multimodal.md)

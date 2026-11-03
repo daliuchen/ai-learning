@@ -1,6 +1,6 @@
 # BM25 + Dense 融合：RRF / Weighted
 
-> **一句话**：把 BM25 和 dense 两路召回结果用 **Reciprocal Rank Fusion (RRF)** 合并——不用调权重、稳定提分 5-10%，是混合检索的事实标准。
+> BM25 和向量检索各召回一批结果之后，要合成一个列表。最常用的办法是 Reciprocal Rank Fusion（RRF）：只看排名、不用调权重，通常能稳定提升召回，也是混合检索事实上的默认做法。
 
 ---
 
@@ -12,11 +12,7 @@
 final_score = α × vec_score + (1 - α) × bm25_score
 ```
 
-问题：
-
-- 两个 score 尺度不同（vec 0-1，BM25 0-50+），需要归一化
-- α 难调（不同场景最佳值不同）
-- 跨 query 不稳
+这个办法有三个麻烦：两路分数尺度不同（vec 0-1，BM25 可以到 50 以上），必须先归一化；α 很难调，不同场景最佳值不一样；换一个 query，最优权重又会变。
 
 ### 思路 B：RRF (Reciprocal Rank Fusion)
 
@@ -24,7 +20,7 @@ final_score = α × vec_score + (1 - α) × bm25_score
 final_score = Σ 1 / (k + rank_i)
 ```
 
-只看排名，不看分数。稳、不用调，**实战首选**。
+RRF 只看排名，不看分数，所以既稳定又不用调参。**实战里先用 RRF。**
 
 ---
 
@@ -40,11 +36,7 @@ final_score = Σ 1 / (k + rank_i)
 - k 常量，默认 60
 ```
 
-直觉：
-
-- 同时在两个 retriever 都靠前 → 高分
-- 只在一个 retriever 排第 1 → 中等分
-- 在两个都很后 → 低分
+按这个公式，两路都排得靠前的文档分最高；只在一路排第 1 的拿中等分；两路都靠后的分很低。
 
 ---
 
@@ -72,7 +64,7 @@ bm25_hits = ["d1", "d2", "d4", "d5"]     # BM25 召回排名
 
 
 fused = reciprocal_rank_fusion([vec_hits, bm25_hits], top_k=4)
-print(fused)  # ['d1', 'd5', 'd2', 'd3', ...]
+print(fused)  # ['d1', 'd2', 'd5', 'd3']
 ```
 
 ---
@@ -80,7 +72,8 @@ print(fused)  # ['d1', 'd5', 'd2', 'd3', ...]
 ## 4. 完整混合检索 demo
 
 ```python
-# demos/retrieval/02_rrf.py
+# 注：rank-bm25 最后一次发版是 2022 年（0.2.2），仍可用但已停止维护，规模大时可换 bm25s 或直接用 ES/Qdrant sparse；
+# 这里 embedding 用 OpenAI text-embedding-3-small，换成千问 text-embedding-v4 的 client 写法见 02-models/01-openai.md 第 5 节
 import numpy as np
 from collections import defaultdict
 from openai import OpenAI
@@ -158,7 +151,7 @@ for q in ["怎么取消订阅", "ERR_TIMEOUT_500", "停止扣费"]:
 
 ## 5. Weighted RRF（带权重）
 
-如果一路明显更可信，可以加权：
+如果某一路明显更可信，可以给它加权：
 
 ```python
 def weighted_rrf(rankings_with_weight, k=60, top_k=10):
@@ -175,7 +168,7 @@ fused = weighted_rrf([
 ])
 ```
 
-**通常不需要**——纯 RRF 已经够好。
+多数情况下用不着，纯 RRF 已经够好。
 
 ---
 
@@ -183,14 +176,13 @@ fused = weighted_rrf([
 
 ### 6.1 Qdrant Hybrid（推荐）
 
-Qdrant 1.10+ 支持 dense + sparse 一次查：
+Qdrant 1.10+ 的 Query API 支持 dense + sparse 一次查完：
 
 ```python
 from qdrant_client.models import (
     Prefetch, FusionQuery, Fusion,
-    NamedSparseVector, NamedVector,
     SparseVector,
-)
+)   # NamedVector / NamedSparseVector 在新版 qdrant-client 里已移除，用 using="名字" 指定
 
 
 # 假设 collection 同时有 dense 和 sparse vector
@@ -202,47 +194,53 @@ results = client.query_points(
     ],
     query=FusionQuery(fusion=Fusion.RRF),
     limit=5,
-)
+).points   # query_points 返回 QueryResponse，命中在 .points 里
 ```
 
 ### 6.2 Pinecone
 
 ```python
+# Pinecone 的 query 本身没有 alpha 参数：先自己按权重缩放 dense / sparse 向量，再查询
+alpha = 0.5   # 1=只 dense, 0=只 sparse
+dense_scaled = [v * alpha for v in dense_vec]
+sparse_scaled = {"indices": [...], "values": [v * (1 - alpha) for v in sparse_values]}
 results = index.query(
-    vector=dense_vec,
-    sparse_vector={"indices": [...], "values": [...]},
+    vector=dense_scaled,
+    sparse_vector=sparse_scaled,
     top_k=5,
-    alpha=0.5,   # 0=只 sparse, 1=只 dense
-)
+)   # 需要 dotproduct 度量的索引
 ```
 
 ### 6.3 Elasticsearch / OpenSearch
 
-```python
+Elasticsearch 8.14 起用 retriever 写法做 RRF（早期的 `"rank": {"rrf": {}}` 写法已被取代）：
+
+```json
 {
-  "knn": {
-    "field": "embedding",
-    "query_vector": [...],
-    "k": 20
-  },
-  "query": {
-    "match": {"content": "用户的 query"}
-  },
-  "rank": {"rrf": {}}
+  "retriever": {
+    "rrf": {
+      "retrievers": [
+        {"standard": {"query": {"match": {"content": "用户的 query"}}}},
+        {"knn": {"field": "embedding", "query_vector": [0.1, 0.2], "k": 20, "num_candidates": 100}}
+      ]
+    }
+  }
 }
 ```
+
+OpenSearch 的做法不同：用 `hybrid` 查询，再在 search pipeline 里配归一化或 RRF 处理器，写法以 OpenSearch 文档为准。
 
 ---
 
 ## 7. Sparse vector 怎么来
 
-3 种方式：
+有三种来源。
 
 ### 7.1 BM25 → sparse vector
 
 ```python
-# BM25 weights 转 sparse vector
-# 词表里每个词一个 index
+# 文本转 sparse vector：词表里每个词一个 index，这里只放词频（TF）。
+# IDF 交给向量库算：Qdrant 给 sparse 向量配置 modifier=Modifier.IDF 后，会在服务端按语料统计 IDF
 def bm25_to_sparse(text, bm25, vocab):
     tokens = list(jieba.cut(text))
     sparse = {}
@@ -253,7 +251,7 @@ def bm25_to_sparse(text, bm25, vocab):
     return sparse
 ```
 
-实战麻烦，向量库提供工具或者自带（如 Pinecone 的 hosted sparse encoder）。
+自己算比较麻烦，一般用向量库提供的工具，或者直接用它托管的编码器（如 Pinecone 的 hosted sparse encoder）。
 
 ### 7.2 BGE-M3 自带
 
@@ -271,20 +269,20 @@ output = model.encode(
 
 
 sparse_dict = output["lexical_weights"][0]
-# {"如何": 0.34, "取消": 0.52, "订阅": 0.48, ...}
+# key 是 tokenizer 里的 token id（字符串），形如 {"6": 0.21, "15013": 0.35, ...}
+# 想看对应的词：model.convert_id_to_token(output["lexical_weights"])
 ```
 
-转向量库格式：
+转成向量库的格式：token id 本身就是整数下标，不需要另建词表：
 
 ```python
 # Qdrant
-indices = []
-values = []
-for token, weight in sparse_dict.items():
-    # 需要把 token 映射到 int index（vocab）
-    idx = vocab[token]
-    indices.append(idx)
-    values.append(weight)
+from qdrant_client.models import SparseVector
+
+sparse = SparseVector(
+    indices=[int(tid) for tid in sparse_dict],
+    values=[float(w) for w in sparse_dict.values()],
+)
 ```
 
 ### 7.3 SPLADE
@@ -309,22 +307,22 @@ def get_sparse(text):
     return sparse[0].numpy()
 ```
 
-SPLADE 比 BM25 更"智能"，效果通常更好但更慢。
+SPLADE 会做词扩展，比 BM25 聪明一些，效果通常更好，代价是更慢。
 
 ---
 
-## 8. RRF 提升实测
+## 8. RRF 能提升多少（示意）
 
-200 条客服 evalset：
+下表是示意数据（设定为 200 条客服 evalset，没有固定到某个模型），和[重排 Pipeline](05-rerank-pipeline.md)第 11 节的示意表用同一组数：
 
 | Retriever | Recall@5 |
 |-----------|----------|
 | Vector only | 85% |
 | BM25 only | 75% |
 | Hybrid (RRF) | 92% |
-| Hybrid + rerank | 96% |
+| Hybrid + rerank | 97% |
 
-提 5-10%，几乎免费午餐。
+混合比最好的单路（向量）高 7 个点，比纯 BM25 高 17 个点；BM25 本身很便宜，多出来的成本几乎可以忽略。
 
 ---
 
@@ -350,16 +348,16 @@ SPLADE 比 BM25 更"智能"，效果通常更好但更慢。
 
 | 坑 | 解 |
 |----|----|
-| 直接加分（不归一化）| 用 RRF |
-| BM25 分词没做 / 错 | 中文用 jieba，英文 split |
-| RRF k=60 不变 | 通常不用调，调也只 30-100 |
-| 召回数太少（top_k=5） | 每路召回 20-50，再融合取 top-5 |
-| Sparse + Dense 维度不同 | 不能直接 concat，用向量库的 hybrid API |
+| 分数不归一化直接相加 | 用 RRF |
+| BM25 没分词或分错 | 中文用 jieba，英文 split |
+| 纠结 RRF 的 k 要不要调 | k=60 一般不用动，要调也在 30-100 之间 |
+| 每路召回太少（top_k=5） | 每路召回 20-50 条，融合后再取 top-5 |
+| Sparse 和 Dense 维度不同 | 不能直接 concat，用向量库的 hybrid API |
 
 ---
 
 ## 11. 下一步
 
-- 📖 HyDE：用 LLM 改写 query → [03-hyde.md](./03-hyde.md)
-- 📖 Multi-query / Sub-query → [04-multi-query.md](./04-multi-query.md)
-- 📖 Rerank pipeline（混合后再精排）→ [05-rerank-pipeline.md](./05-rerank-pipeline.md)
+- 用 LLM 改写 query：[HyDE：用 LLM 生成假设答案](./03-hyde.md)
+- 拆分复杂问题：[Multi-query / Sub-query 拆解](./04-multi-query.md)
+- 混合召回之后再精排：[重排 Pipeline：召回 → 精排](./05-rerank-pipeline.md)

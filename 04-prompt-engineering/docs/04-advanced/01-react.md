@@ -1,6 +1,6 @@
-# PE Advanced 01：ReAct —— Reasoning + Acting
+# PE Advanced 01：ReAct（Reasoning + Acting）
 
-> **一句话**：ReAct = 让模型在"思考"和"行动（调工具）"间循环——Thought → Action → Observation → Thought → ... 直到完成任务。这是绝大多数 Agent 框架（LangGraph、Pydantic AI、Claude Code、Cursor）的底层范式。
+> ReAct 让模型在思考和行动（调用工具）之间循环：Thought、Action、Observation，再回到 Thought，直到任务完成。LangGraph、Pydantic AI、Claude Code、Cursor 这些 Agent 框架和工具，底层大多是这个模式。
 
 ---
 
@@ -19,13 +19,13 @@
 [最终输出] "雾都细雨..."
 ```
 
-模型按"Thought / Action / Observation" 三段式循环，直到能给出最终答案。
+模型按 Thought、Action、Observation 三段循环，直到能给出最终答案。
 
 ---
 
-## 2. ReAct 的"现代写法"
+## 2. 现在的写法
 
-早期 ReAct 论文用 prompt 字符串模拟："Thought:..., Action:..."。**现代写法直接用 tool calling API**——更稳、更省 prompt 工程：
+早期的 ReAct 论文是用 prompt 字符串模拟的，让模型输出 "Thought:..., Action:..."。现在直接用 tool calling API 就行，更稳定，也省掉了大量 prompt 工程。
 
 ```python
 import anthropic
@@ -47,7 +47,7 @@ def react_loop(user_message: str):
     messages = [{"role": "user", "content": user_message}]
     for step in range(10):    # 防死循环
         resp = client.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5-5",
             max_tokens=1000,
             tools=TOOLS,
             messages=messages,
@@ -79,15 +79,15 @@ def run_tool(name, input):
     raise ValueError(f"unknown tool: {name}")
 ```
 
-模型自己决定"何时调工具、何时给最终答案"。
+什么时候调工具、什么时候给最终答案，由模型自己决定。
 
 ---
 
-## 3. ReAct prompt 设计要点
+## 3. ReAct 的 prompt 怎么写
 
-哪怕用了 tool calling API，prompt 仍然要写好：
+即使用了 tool calling API，prompt 也得认真写。
 
-### 3.1 系统消息说明 "agentic" 风格
+### 3.1 在 system 里说明工作方式
 
 ```
 你是研究助手。你会：
@@ -102,9 +102,9 @@ def run_tool(name, input):
 - 调够 5 步还没结论，告诉用户"信息不足，需要 ..."
 ```
 
-### 3.2 工具描述要 LLM-friendly
+### 3.2 工具描述写给模型看
 
-工具描述给 LLM 看——清晰、完整、含使用提示：
+工具描述的读者是模型，要写得清楚完整，带上使用提示：
 
 ```python
 {
@@ -123,9 +123,9 @@ def run_tool(name, input):
 }
 ```
 
-### 3.3 防 loop
+### 3.3 防止死循环
 
-模型可能陷入"反复调同一个工具"——给个 stop condition：
+模型可能反复调用同一个工具，要给它停下来的条件：
 
 ```
 约束：
@@ -135,12 +135,10 @@ def run_tool(name, input):
 
 ---
 
-## 4. ReAct 失败模式
+## 4. ReAct 的失败模式
 
-### 4.1 不调工具直接编
-模型不愿调工具，直接用训练知识答 → 答错。
-
-对策：
+### 4.1 不调工具，直接编
+模型懒得调工具，凭训练数据里的知识作答，结果答错。可以在 prompt 里写死：
 
 ```
 重要：
@@ -148,35 +146,27 @@ def run_tool(name, input):
 - 不要根据训练数据回答"今天" / "最新" / "现在" 类问题
 ```
 
-### 4.2 工具调用 over-eagerly
-什么都调工具，包括"1+1=?"。
+### 4.2 什么都要调工具
+连「1+1 等于几」都去调工具。对策是在工具描述里写清楚「不要用于」哪些情况。
 
-对策：工具描述明确"不要用于"清单。
+### 4.3 步数太多
+20 步还没结论，token 和成本一起涨。用 max_steps 兜底，并要求模型 5 步之内给出方向。
 
-### 4.3 串太多步
-20 步还没结论，token 爆 + cost 高。
-
-对策：max_steps 限制 + 强制 "5 步内给方向"。
-
-### 4.4 工具结果误解
-模型把工具返回的数据理解错。
-
-对策：
-- 工具返回结构化 JSON 而非自然语言
-- 返回里加 metadata 提示模型怎么读
+### 4.4 误读工具结果
+模型把工具返回的数据理解错了。让工具返回结构化的 JSON 而不是自然语言，必要时在返回里附上说明，告诉模型字段怎么读。
 
 ---
 
-## 5. ReAct vs CoT vs 普通 Tool Call
+## 5. ReAct、CoT 和普通 Tool Call
 
 | 模式 | 思考 | 工具 |
 |------|------|------|
 | 普通 (zero-shot) | 无 | 无 |
 | CoT | 显式 | 无 |
 | Tool call (单轮) | 隐式 | 1 次 |
-| **ReAct** | 显式 | 多次循环 |
+| ReAct | 显式 | 多次循环 |
 
-ReAct 是 CoT + Tool 的循环版。
+可以把 ReAct 理解成 CoT 加上工具调用，再循环起来。
 
 ---
 
@@ -184,14 +174,14 @@ ReAct 是 CoT + Tool 的循环版。
 
 | 框架 | ReAct 实现 |
 |------|-----------|
-| LangGraph | `create_react_agent(model, tools)` |
+| LangChain 1.x | `create_agent(model, tools)`（返回 LangGraph 图，取代已弃用的 `langgraph.prebuilt.create_react_agent`），见 [LangChain 08：Agents](../../../01-langchain/docs/01-langchain/08-agents.md) |
 | Pydantic AI | Agent + tools 默认就是 ReAct |
-| Claude Code | 内置 ReAct loop（你写 MCP tool 即用） |
+| Claude Code | 内置 ReAct 循环，写好 MCP tool 就能用 |
 | 自己写 | 上面的 `react_loop` 函数 |
 
 ---
 
-## 7. ReAct 的 prompt 关键点 checklist
+## 7. ReAct prompt 检查清单
 
 ```
 □ system 说明 "你是 agent，会循环调用工具"
@@ -207,7 +197,7 @@ ReAct 是 CoT + Tool 的循环版。
 
 ## 8. demo
 
-完整 demo 见 [08-practice/02-research-agent.md](../08-practice/02-research-agent.md)——一个 4 工具的 research agent。
+完整 demo 见 [Research Agent 的 5 版迭代史](../08-practice/02-research-agent.md)，是一个带搜索、读网页、Python 三个工具的 research agent。
 
 ---
 
@@ -215,22 +205,22 @@ ReAct 是 CoT + Tool 的循环版。
 
 | 坑 | 排查 |
 |----|------|
-| **不写 system 风格说明** | 模型不知道该 agentic |
-| **max_steps 没限** | 死循环爆 token |
-| **工具描述太短** | LLM 选错工具 |
-| **没透明性** | 用户不知道工具调了什么 |
-| **prompt 写"Thought: ... Action: ..."** | 老 ReAct 风格，现在用 tool calling API |
+| system 里没说明工作方式 | 模型不知道要循环调工具 |
+| 没限制 max_steps | 死循环，token 耗尽 |
+| 工具描述太短 | 模型选错工具 |
+| 不透明 | 用户不知道调了哪些工具 |
+| prompt 里还写 "Thought: ... Action: ..." | 这是老式写法，现在用 tool calling API |
 
 ---
 
 ## 10. 下一步
 
-- 📖 工具调用 prompt 优化 → [02-tool-use.md](./02-tool-use.md)
-- 📖 RAG → [03-rag-prompting.md](./03-rag-prompting.md)
-- 🛠️ Research agent 实战 → [08-practice/02-research-agent.md](../08-practice/02-research-agent.md)
+- [Tool Use Prompting](./02-tool-use.md)
+- [RAG Prompting 与引用约束](./03-rag-prompting.md)
+- [Research Agent 的 5 版迭代史](../08-practice/02-research-agent.md)
 
 ## 参考资料
 
 - "ReAct" (Yao et al. 2022): https://arxiv.org/abs/2210.03629
-- LangGraph create_react_agent: https://langchain-ai.github.io/langgraph/reference/prebuilt/
+- LangChain Agents（create_agent）: https://docs.langchain.com/oss/python/langchain/agents
 - Anthropic Tool Use Guide: https://docs.anthropic.com/en/docs/build-with-claude/tool-use

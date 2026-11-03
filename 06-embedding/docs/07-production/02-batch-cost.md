@@ -1,6 +1,6 @@
 # 批量 Embed + Cost 优化
 
-> **一句话**：百万级文档第一次入库可能要几小时 / 几十美元——**批量 API + 并发 + 缓存 + 选对模型** 能省一半。
+> 百万级文档第一次入库，可能要跑好几个小时、花几十美元。用好批量 API、并发、缓存，再选对模型，这笔开销通常能省掉一半。
 
 ---
 
@@ -35,12 +35,9 @@ for i in range(0, len(all_texts), batch_size):
     embeddings.extend([d.embedding for d in resp.data])
 ```
 
-OpenAI 限制：
+OpenAI 的限制：单次 input list 最多 2048 项，单条最多 8191 tokens，一次请求所有输入合计不超过 300k tokens。
 
-- 单次 input list 最多 2048 项
-- 单条最多 8191 tokens
-
-推荐 batch_size = **96-512**（看 token 总量 / latency 容忍）。
+batch_size 建议取 96-512，具体看 token 总量和你能接受的延迟。
 
 ---
 
@@ -75,18 +72,13 @@ async def embed_all(all_texts, batch_size=256, concurrency=10):
 vecs = asyncio.run(embed_all(my_million_texts))
 ```
 
-10 路并发 + batch 256 → 100 万条 ~10 分钟。
-
-注意 rate limit：
-
-- OpenAI Tier 1：500 RPM / 1M TPM
-- 适当 `concurrency` 不超限
+这类任务的上限通常是账号的 TPM（每分钟 token 数），不是并发数。按第 10 节的口径，100 万条约 500M tokens：如果账号的 embedding 限额是 1M TPM，最快也要 500 分钟（8 个多小时），并发开再多也只会被 429 挡回来；要在 1 小时内跑完，需要 10M TPM 左右的限额。自己账号的 RPM / TPM 以 OpenAI 控制台的 Limits 页为准，并发数按它倒推，再加上重试和指数退避。
 
 ---
 
 ## 3. OpenAI Batch API（50% 折扣）
 
-不紧急的大量 embed → 用 Batch API：
+量大又不着急的 embed 任务，可以走 Batch API：
 
 ```python
 # 1. 准备 .jsonl
@@ -128,6 +120,8 @@ while True:
     batch = client.batches.retrieve(batch.id)
     if batch.status == "completed":
         break
+    if batch.status in ("failed", "expired", "cancelled"):
+        raise RuntimeError(f"batch {batch.id} {batch.status}")
     time.sleep(60)
 
 
@@ -136,23 +130,13 @@ result_file = client.files.content(batch.output_file_id)
 results = [json.loads(l) for l in result_file.text.strip().split("\n")]
 ```
 
-**优**：
-
-- 50% 价格折扣
-- 限流更松
-
-**劣**：
-
-- 延迟最长 24h
-- 大数据集才划算（手续费 / 复杂度）
-
-适合：初始化全库（一次性 100 万条）。
+好处是价格打五折（OpenAI 定价页上 Batch API 统一按标准价的 50% 计费），而且走单独的批处理额度，不占在线接口的 TPM。代价是结果最长要等 24 小时，流程也更复杂，只有数据量大时才划算。最合适的场景是初始化全库。注意单个 batch 有规模上限（embedding 批次合计最多 5 万条输入，文件最大 200MB，以 Batch API 文档为准），100 万条要拆成 20 个以上的 batch 分别提交。
 
 ---
 
 ## 4. 缓存：避免重复 embed
 
-文档没变就别重 embed：
+文档没变，就不要再 embed 一次：
 
 ```python
 import hashlib
@@ -169,17 +153,13 @@ def embed_with_cache(text):
     return vec
 ```
 
-**实战**：
-
-- 文档库的 chunk 文本作为 cache key
-- TTL 30 天起
-- Redis / 文件 cache 都行
+实际做法：用 chunk 文本当 cache key，TTL 从 30 天起步，Redis 或文件缓存都可以。
 
 ---
 
 ## 5. 自部署模型
 
-如果你已经有 GPU，自部署比 OpenAI 便宜得多：
+如果手上已经有 GPU，自部署比调 OpenAI 便宜得多：
 
 ```
 text-embedding-3-small (OpenAI):
@@ -187,12 +167,12 @@ text-embedding-3-small (OpenAI):
 
 BGE-large-zh-v1.5 (自部署 A100):
   电费 + 折旧 ~$1/小时
-  吞吐 ~3000 sentences/秒（avg 200 tokens）
-  → ~$0.0001 / 1M tokens
-  便宜 200x
+  吞吐 ~3000 sentences/秒（avg 200 tokens）≈ 60 万 tokens/秒 ≈ 21.6 亿 tokens/小时
+  → $1 / 2160M tokens ≈ $0.0005 / 1M tokens
+  便宜约 40x（示意估算，吞吐和成本以你的硬件实测为准）
 ```
 
-详见 [02-models/03-open-source.md](../02-models/03-open-source.md) + [04-sentence-transformers.md](../02-models/04-sentence-transformers.md)。
+模型选择和用法见 [开源模型：Qwen3-Embedding / BGE / Jina / Nomic](../02-models/03-open-source.md) 和 [sentence-transformers 工具链](../02-models/04-sentence-transformers.md)。
 
 ---
 
@@ -201,38 +181,38 @@ BGE-large-zh-v1.5 (自部署 A100):
 ```
 text-embedding-3-large @ 3072 维 → $0.13 / 1M tokens
 text-embedding-3-large @ 1024 维 (Matryoshka) → $0.13 / 1M tokens
-
-Wait，价格一样？
 ```
 
-是的，OpenAI Matryoshka 维度不影响 API 费用。但：
+两行价格一样。
 
-- 存储 × 3
-- 检索慢 × 3
-
-所以截维省的是**下游**成本（存储 + 查询），不是 embed cost。
+OpenAI 按输入 token 计费，`dimensions` 截维不影响 API 费用；但 3072 维的存储是 1024 维的 3 倍，暴力检索的计算量也大致按维度线性增长。所以截维省下的是下游的存储和查询成本，不是 embed 本身的费用。
 
 ---
 
 ## 7. 文档预处理
 
-embed 前过滤垃圾：
+embed 之前先把垃圾内容过滤掉：
 
 ```python
 def is_worth_embedding(text):
     if len(text) < 30:        # 太短
-        return False
-    if len(text) > 8000:      # 太长，要切
         return False
     if not has_meaningful_content(text):  # 全是 stopword
         return False
     return True
 
 
-texts = [t for t in raw_texts if is_worth_embedding(t)]
+texts = []
+for t in raw_texts:
+    if not is_worth_embedding(t):
+        continue
+    if len(t) > 8000:         # 太长：先切块再 embed，不要直接丢掉
+        texts.extend(split_into_chunks(t, max_chars=2000))
+    else:
+        texts.append(t)
 ```
 
-每节省 1000 条 = 几美分。百万级累积。
+按 3-small 的价格，每条 500 tokens 的话，少 embed 1000 条只省大约 1 美分，单看 API 费用不多；过滤的主要收益是索引里少了噪声 chunk，存储和检索质量都受益。
 
 ---
 
@@ -270,39 +250,39 @@ tracker.report()
 
 ## 9. Cohere / Voyage Batch
 
-Cohere `embed` 单次最多 96 个 doc：
+Cohere `embed` 单次最多 96 个 doc（以当前 API 参考为准；运行下面的代码需要 Cohere API key）。千问 `text-embedding-v4` 的兼容接口每次最多 10 条：
 
 ```python
 import cohere
-co = cohere.Client()
+co = cohere.ClientV2()
 
 
-def embed_cohere_batch(texts, model="embed-multilingual-v3.0"):
+def embed_cohere_batch(texts, model="embed-v5.0-pro"):
     embeddings = []
     for i in range(0, len(texts), 96):
         batch = texts[i:i+96]
-        resp = co.embed(texts=batch, model=model, input_type="search_document")
-        embeddings.extend(resp.embeddings)
+        resp = co.embed(texts=batch, model=model, input_type="search_document", embedding_types=["float"])
+        embeddings.extend(resp.embeddings.float_)
     return embeddings
 ```
 
-VoyageAI 类似但限制不同（看 doc）。
+VoyageAI 的做法类似，只是限制数字不同，具体看它的文档。
 
 ---
 
 ## 10. 完整 cost 估算
 
-100 万条 docs × 平均 500 字 ≈ 500M tokens（中文 1 字 ≈ 1 token）：
+100 万条文档，平均每条 500 字，约 500M tokens（中文 1 字约 0.7–1 个 token，视 tokenizer 而定，这里按 1:1 粗估）：
 
 | 方案 | Cost |
 |------|------|
 | OpenAI 3-small (API) | $10 |
-| OpenAI 3-small (Batch API 50% off) | $5 |
+| OpenAI 3-small (Batch API，五折) | $5 |
 | OpenAI 3-large (API) | $65 |
-| Cohere multilingual | $50 |
-| 自部署 BGE-large (1 A100 4小时) | ~$8 |
+| 千问 text-embedding-v4（官方标价 0.5 元/百万 token，Batch API 0.25 元/百万；2026-11） | 约 ¥250 / ¥125 |
+| 自部署 BGE-large (1 张 A100) | 按第 5 节的示意吞吐约 15 分钟跑完，GPU 费用不到 $1；加上部署、调试和机器空转，实际按小时计（示意） |
 
-**自部署对量大场景压倒性优势**——但需要前期搭建。
+只看计算费用，自部署便宜一个数量级以上；但 100 万条的一次性入库用 API 也只要 $5–65，自部署的优势要在反复重建索引、持续大量入库时才体现出来，前提是愿意投入搭建和运维。
 
 ---
 
@@ -335,16 +315,16 @@ for batch in batches:
 
 | 坑 | 解 |
 |----|----|
-| 用 batch size 1 跑生产 | 至少 100，最优 256-512 |
-| 顺序跑不并发 | asyncio.gather + Semaphore |
-| 没 cache 重复 embed | 必做 |
-| 不监控 cost | 每天 budget alert |
-| API 限流没 retry | exponential backoff |
+| 生产上用 batch size 1 跑 | 至少 100，256-512 最好 |
+| 顺序跑，没有并发 | asyncio.gather + Semaphore |
+| 没加缓存，重复 embed | 一定要加 |
+| 不监控费用 | 每天设预算告警 |
+| API 限流后不重试 | exponential backoff |
 
 ---
 
 ## 13. 下一步
 
-- 📖 缓存策略 → [03-caching.md](./03-caching.md)
-- 📖 部署形态 → [04-deployment.md](./04-deployment.md)
-- 📖 监控 → [05-monitoring.md](./05-monitoring.md)
+- [缓存策略：Embedding Cache / Query Cache / Result Cache](./03-caching.md)
+- [部署形态选型](./04-deployment.md)
+- [监控：召回率 / Latency / Cost](./05-monitoring.md)

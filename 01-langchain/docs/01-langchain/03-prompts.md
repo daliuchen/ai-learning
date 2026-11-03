@@ -1,25 +1,21 @@
 # LangChain 03：Prompt Templates 提示模板
 
-> **一句话**：Prompt Template 把"字符串拼接"升级为"声明式模板对象"，支持变量插值、消息历史占位、Few-shot 选择，是 LangChain 里继 ChatModel 之后第二重要的抽象。
+> 手拼字符串写 Prompt，项目一大就难以维护。Prompt Template 把提示词变成声明式的模板对象，支持变量插值、消息历史占位和 Few-shot 示例选择。在 LangChain 的各种抽象里，它的重要性仅次于 ChatModel。
 
 ---
 
 ## 1. 为什么不用 f-string
 
-直觉上你可能想这样：
+最直接的写法是这样：
 
 ```python
 prompt = f"你是 {role}，回答问题：{question}"
 model.invoke(prompt)
 ```
 
-简单但有三个缺陷：
+简单是简单，但字符串没法序列化，存不进 LangSmith Prompt Hub 或数据库；想在 system 后面插一段历史消息，拼接代码会很难看；而且 prompt 和调用绑死在一起，想单独测一下 prompt 也得跑一遍模型。
 
-1. **不可序列化**：没法存到 LangSmith Prompt Hub / 数据库
-2. **难以局部修改**：要在 system 后插一段历史消息？字符串拼接很丑
-3. **无法和 Chain 解耦**：测试 prompt 必须跑模型
-
-Prompt Template 解决这些问题：
+换成 Prompt Template：
 
 ```python
 from langchain_core.prompts import ChatPromptTemplate
@@ -32,7 +28,7 @@ prompt = ChatPromptTemplate.from_messages([
 prompt.invoke({"role": "Python 老师", "question": "什么是装饰器？"})
 ```
 
-返回 `ChatPromptValue`，能直接喂给 model，或 `.to_messages()` 拆出消息列表。
+返回的是 `ChatPromptValue`，可以直接传给 model，也可以用 `.to_messages()` 拆成消息列表。
 
 ---
 
@@ -40,10 +36,10 @@ prompt.invoke({"role": "Python 老师", "question": "什么是装饰器？"})
 
 | 模板 | 输入 | 输出 | 何时用 |
 |------|------|------|--------|
-| `PromptTemplate` | str | `StringPromptValue` | LLM（旧补全模型） |
-| `ChatPromptTemplate` | str | `ChatPromptValue` | ChatModel（**主流**） |
+| `PromptTemplate` | 变量 dict | `StringPromptValue` | LLM（旧补全模型） |
+| `ChatPromptTemplate` | 变量 dict | `ChatPromptValue` | ChatModel（主流） |
 
-现代 LLM 几乎都是 chat 模型，**99% 场景用 `ChatPromptTemplate`**。
+现在的 LLM 基本都是 chat 模型，绝大多数场景用 `ChatPromptTemplate` 就对了。
 
 ---
 
@@ -58,7 +54,7 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 ```
 
-支持的 role 字符串：`"system" | "human" | "ai" | "tool" | "placeholder"`。
+支持的 role 字符串：`"system"`、`"human"`（或 `"user"`）、`"ai"`（或 `"assistant"`）、`"placeholder"`。
 
 ### 3.2 显式 Message 类
 
@@ -71,7 +67,7 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 ```
 
-啰嗦但更直观，适合 IDE 没 type hint 时。
+写起来啰嗦一些，但更直观，IDE 没有类型提示时比较好用。
 
 ### 3.3 from_template（单 human）
 
@@ -79,13 +75,13 @@ prompt = ChatPromptTemplate.from_messages([
 prompt = ChatPromptTemplate.from_template("简短回答：{question}")
 ```
 
-等价于一条 HumanMessage。
+效果和只放一条 HumanMessage 一样。
 
 ---
 
 ## 4. 变量插值与 Partial
 
-模板默认用 `{var}` 风格的 f-string 变量。如果想要部分填充：
+模板默认用 f-string 风格的 `{var}` 变量。如果只想先填一部分：
 
 ```python
 from langchain_core.prompts import ChatPromptTemplate
@@ -102,9 +98,7 @@ zh_python_tutor = base.partial(role="Python 老师", language="中文")
 zh_python_tutor.invoke({"question": "什么是 GIL？"})
 ```
 
-`partial` 返回新模板，原模板不变。
-
-`partial` 还支持回调函数：
+`partial` 返回一个新模板，原模板不受影响。它也可以接收函数：
 
 ```python
 from datetime import datetime
@@ -115,13 +109,13 @@ prompt = ChatPromptTemplate.from_messages([
 ]).partial(now=lambda: datetime.now().isoformat())
 ```
 
-每次 invoke 时回调被执行，时间会刷新。
+函数在每次 invoke 时执行，所以时间每次都是新的。
 
 ---
 
 ## 5. MessagesPlaceholder：插入消息历史
 
-聊天机器人最常见需求：把历史对话塞进 prompt：
+聊天机器人几乎都要把历史对话放进 prompt：
 
 ```python
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -169,7 +163,7 @@ prompt = ChatPromptTemplate.from_messages([
 
 ### 6.1 静态 Few-shot
 
-固定几个例子拼到 prompt：
+把固定的几个例子拼进 prompt：
 
 ```python
 from langchain_core.prompts import (
@@ -203,7 +197,7 @@ print(final.invoke({"input": "10+12"}).to_string())
 ```python
 from langchain_core.example_selectors import SemanticSimilarityExampleSelector
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+from langchain_core.vectorstores import InMemoryVectorStore   # 或 langchain_chroma.Chroma / FAISS 等
 
 examples = [
     {"input": "苹果", "output": "水果"},
@@ -216,7 +210,7 @@ examples = [
 selector = SemanticSimilarityExampleSelector.from_examples(
     examples=examples,
     embeddings=OpenAIEmbeddings(),
-    vectorstore_cls=Chroma,
+    vectorstore_cls=InMemoryVectorStore,
     k=2,
 )
 
@@ -239,17 +233,17 @@ final = ChatPromptTemplate.from_messages([
 final.invoke({"input": "哈士奇"}).to_messages()
 ```
 
-可选 Selector：
+可用的 Selector：
 - `SemanticSimilarityExampleSelector`：向量相似
 - `LengthBasedExampleSelector`：按长度截断（防止 prompt 超长）
 - `MaxMarginalRelevanceExampleSelector`：多样性
-- `NGramOverlapExampleSelector`：n-gram 重叠
+- `NGramOverlapExampleSelector`：n-gram 重叠（在 `langchain_community.example_selectors`，需要 `pip install nltk`）
 
 ---
 
 ## 7. 自定义模板格式：Jinja2 / mustache
 
-默认是 Python 的 f-string，如果你的 prompt 里要写大括号（如代码示例），切到 Jinja2 更友好：
+默认是 Python 的 f-string 格式。prompt 里如果要写大括号（比如放代码示例），切到 Jinja2 会省事很多：
 
 ```python
 prompt = ChatPromptTemplate.from_messages(
@@ -261,40 +255,43 @@ prompt = ChatPromptTemplate.from_messages(
 )
 ```
 
-注意只有 `from_template` 支持 mustache/jinja2，元组列表里逐条传入时需要指定 `template_format`。
+需要先 `pip install jinja2`（不是默认依赖）。`template_format` 对整个 `from_messages` 生效；mustache 用 `"mustache"`，写法同样是 `{{变量}}`。Jinja2 会执行模板里的表达式，所以用户输入只能作为变量传入，不能拿来当模板本身。
 
 ---
 
 ## 8. Prompt 序列化与 Hub
 
-LangChain 内置 LangSmith Prompt Hub，可以把 prompt 推到云端：
+LangSmith 的 Prompt Hub 可以把 prompt 存到云端。1.x 里 `from langchain import hub` 已经搬走了（现在在 `langchain_classic.hub`），建议直接用 LangSmith SDK：
 
 ```python
-# 拉取
-from langchain import hub
-prompt = hub.pull("rlm/rag-prompt")
+from langsmith import Client
+
+client = Client()
+
+# 拉取（拉别人公开的 prompt 必须显式确认）
+prompt = client.pull_prompt("rlm/rag-prompt", dangerously_pull_public_prompt=True)
 print(prompt)
 
-# 推送
-hub.push("my-handle/my-prompt", prompt)
+# 推送（需要 LANGSMITH_API_KEY）
+client.push_prompt("my-handle/my-prompt", object=prompt)
 ```
 
-或者本地序列化：
+也可以在本地序列化。老的 `prompt.save("x.yaml")` / `load_prompt` 在 `langchain-core 1.2.21` 起已被弃用（`ChatPromptTemplate.save` 甚至直接 `NotImplementedError`），改用 `langchain_core.load`：
 
 ```python
-prompt.save("my_prompt.yaml")
+from langchain_core.load import dumps, loads
 
-from langchain_core.prompts import load_prompt
-prompt2 = load_prompt("my_prompt.yaml")
+text = dumps(prompt, pretty=True)      # 得到 JSON 字符串，可写文件
+prompt2 = loads(text)
 ```
 
-第 18 篇会专门讲 Prompt Hub。
+Prompt Hub 在 LangSmith 04 篇里细讲。
 
 ---
 
 ## 9. PromptTemplate（字符串模板）
 
-旧的补全模型才用，了解即可：
+只有旧的补全模型才用，知道有这么个东西就行：
 
 ```python
 from langchain_core.prompts import PromptTemplate
@@ -308,10 +305,10 @@ print(t.invoke({"text": "你好世界"}))
 
 ## 10. 进阶：在 prompt 里调用工具描述
 
-ReAct 类 Prompt 经常需要在 system 里列出工具列表：
+以前模型不支持 tool calling 时，要用文本版 ReAct，在 system 里手写工具列表。现在的模型都原生支持 tool calling，一般直接用 `bind_tools` 或 `create_agent`。下面这段只作了解：
 
 ```python
-from langchain.tools.render import render_text_description
+from langchain_core.tools.render import render_text_description
 from langchain_core.tools import tool
 
 @tool
@@ -336,15 +333,15 @@ prompt = ChatPromptTemplate.from_messages([
 
 ## 11. 与 Chain 协作
 
-完整 chain：
+放进 chain 里：
 
 ```python
 chain = prompt | model | parser
 ```
 
-`prompt` 的输入变量 = `chain.invoke(...)` 字典的 keys。所以扩展模板变量时记得同步更新调用方。
+`chain.invoke(...)` 传入的字典 key 就是 prompt 的输入变量，模板加了变量，调用方也要跟着改。
 
-如果你想看 prompt 真实渲染结果：
+想看 prompt 实际渲染出来是什么样：
 
 ```python
 rendered = prompt.invoke({"role": "...", "question": "..."})
@@ -352,11 +349,13 @@ print(rendered.to_string())     # 字符串形式
 print(rendered.to_messages())   # Message 列表
 ```
 
-调试 prompt 时这是最有用的两个方法。
+调试 prompt 时，我最常用的就是这两个方法。
 
 ---
 
 ## 12. 一个综合 demo
+
+完整代码：[`demos/langchain/03_prompts.py`](../../demos/langchain/03_prompts.py)
 
 ```python
 # demos/langchain/03_prompts.py
@@ -388,7 +387,7 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{input}"),
 ])
 
-chain = prompt | ChatOpenAI(model="gpt-4o-mini", temperature=0) | StrOutputParser()
+chain = prompt | ChatOpenAI(model="gpt-6-luna", temperature=0) | StrOutputParser()
 
 history = [
     ("human", "5*5"),
@@ -403,15 +402,13 @@ print(chain.invoke({"input": "6*7", "history": history}))
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `KeyError: 'history'` | placeholder 必须提供变量，即使为空 | 传 `{"history": []}` |
-| `{` 转义出问题 | f-string 默认占位 | `template_format="jinja2"` 或 `{{` 转义 |
-| 模型完全没看到你新加的内容 | 忘了改 `from_messages`，只改了字符串拼接 | 用 `prompt.invoke(...).to_string()` 检查 |
-| 上线后 prompt 难改 | 写死在代码里 | 用 LangSmith Hub 或 YAML 加载 |
+| `KeyError: 'history'` | placeholder 的变量必须传，空的也要传 | 传 `{"history": []}` |
+| `{` 转义出问题 | 默认按 f-string 解析占位符 | `template_format="jinja2"`，或写成 `{{` 转义 |
+| 模型完全没看到新加的内容 | 只改了字符串拼接，没改 `from_messages` | 用 `prompt.invoke(...).to_string()` 检查 |
+| 上线后 prompt 难改 | 写死在代码里 | 用 LangSmith Prompt Hub（`pull_prompt`）或配置中心 |
+| `from langchain import hub` 报错 | 1.x 已移出 | 改用 `langsmith.Client().pull_prompt`，或 `from langchain_classic import hub` |
+| `prompt.save()` 报 NotImplementedError / 弃用警告 | 1.2.21 起弃用 | 用 `langchain_core.load.dumps/loads` |
 
 ---
 
-## 14. 本章 demo
-
-[`demos/langchain/03_prompts.py`](../../demos/langchain/03_prompts.py)
-
-下一篇：[04-output-parsers.md](04-output-parsers.md)
+下一篇：[LangChain 04：Output Parsers 与结构化输出](04-output-parsers.md)

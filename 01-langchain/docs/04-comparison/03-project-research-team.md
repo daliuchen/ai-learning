@@ -1,12 +1,14 @@
-# 实战项目 2：多 Agent 研究助手（Supervisor + 子图 + Map-Reduce）
+# 实战项目 2：多 Agent 研究助手（子图 + Map-Reduce + HITL）
 
-> **一句话**：构建一个三层架构的研究助手——顶层 Supervisor → 研究团队 / 写作团队 → 各团队内并行 Agent。涵盖本系列所有 LangGraph 进阶能力：Supervisor、子图、Send/Map-Reduce、HITL、Streaming、LangSmith Trace。
+> 这个项目做一个分三段的研究助手：主图负责编排，先由研究子图并行检索，再 fan-out 给多个写作节点并行写各节，最后交给编辑整合。LangGraph 的几项进阶能力都会用到：子图、Send / Map-Reduce、HITL（interrupt）、持久化，以及 LangSmith Trace。
+
+版本：以 `langgraph 1.2.x` 为准。模型通过 `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `QWEN_MODEL` 环境变量指向任意 OpenAI 兼容服务，文中用 `MODEL` 表示。
 
 ---
 
 ## 1. 需求
 
-输入一个研究主题（如"LangGraph 的最佳实践"），输出一份结构化研究报告：
+输入一个研究主题（比如「LangGraph 的最佳实践」），输出一份结构化的研究报告：
 
 ```
 1. 概述（150 字）
@@ -18,13 +20,7 @@
 5. 参考资料
 ```
 
-要求：
-
-- 研究团队**并行**做多种检索（web + 文档库 + arxiv）
-- 写作团队**多个作家**各写一节，**并行**进行
-- 最后**编辑** Agent 整合并润色
-- 用户可以在"研究完成"和"初稿完成"两个节点**审核**
-- 全程可在 LangGraph Studio 看到执行
+具体要求：研究团队同时查 web、文档库和 arxiv；写作团队由多个写手并行，每人写一节；最后由编辑 Agent 整合润色。研究完成和初稿完成这两个节点要停下来，等用户审核。整个执行过程可以用 `langgraph dev` 在 LangGraph Studio 里看到。
 
 ---
 
@@ -32,7 +28,7 @@
 
 ```
 ┌──────────────────────────────────────────────┐
-│              Top Supervisor                  │
+│              主图（StateGraph）               │
 └──────────────────────────────────────────────┘
    │              │              │
    ▼              ▼              ▼
@@ -53,7 +49,7 @@ class MainState(TypedDict):
     research: str                       # 研究团队产物
     sections: Annotated[list, add]      # 写作团队产物（并行）
     final: str                          # 编辑产物
-    next: str                           # supervisor 路由
+    stage: str                          # 流程阶段：init / writing / editing / rejected / done
 ```
 
 ---
@@ -79,7 +75,7 @@ def arxiv_node(s):
 
 def summarize_research(s):
     text = "\n".join([s["web_results"], s["doc_results"], s["arxiv_results"]])
-    out = ChatOpenAI(model="gpt-4o-mini").invoke(f"整合摘要：{text}").content
+    out = ChatOpenAI(model=MODEL).invoke(f"整合摘要：{text}").content
     return {"summary": out}
 
 r = StateGraph(ResearchState)
@@ -97,184 +93,134 @@ r.add_edge("summarize", END)
 research_team = r.compile()
 ```
 
-并行三种检索，最后汇总。
+三路检索并行跑完，再汇总成一份摘要。
 
 ---
 
 ## 4. 写作团队（Send 动态 fan-out）
 
 ```python
+from langgraph.types import Send
+
 SECTIONS = ["概述", "核心特性", "与其他框架对比", "适用场景"]
 
-class SectionState(TypedDict):
+class SectionInput(TypedDict):
     topic: str
     research: str
     section_title: str
 
-def section_writer(s: SectionState):
-    msg = f"主题：{s['topic']}\n研究资料：{s['research']}\n请写'{s['section_title']}'一节，300 字以内。"
-    out = ChatOpenAI(model="gpt-4o-mini").invoke(msg).content
-    return {"sections": [(s["section_title"], out)]}
-
-def fan_out_sections(state):
-    return [
-        Send("section_writer", {
-            "topic": state["topic"],
-            "research": state["research"],
-            "section_title": sec,
-        }) for sec in SECTIONS
-    ]
+def section_writer(inp: SectionInput):
+    msg = f"主题：{inp['topic']}\n研究资料：{inp['research']}\n请写'{inp['section_title']}'一节，120 字以内。"
+    out = ChatOpenAI(model=MODEL, temperature=0.4).invoke(msg).content
+    return {"sections": [(inp["section_title"], out)]}   # sections 的 reducer 是 add，并行结果自动合并
 ```
 
-每个 section 一个 worker 并行写。
-
----
-
-## 5. 编辑 + Supervisor
+`Send(节点名, 私有输入)` 让同一个节点带着不同的输入并行跑 N 份。`section_writer` 收到的是 `Send` 里给它的 `SectionInput`，不是主 state。如果把它当普通节点、用普通边连过去，就会报 `KeyError: 'section_title'`。`Send` 必须由条件边函数返回：
 
 ```python
-def edit(state):
-    ordered = sorted(state["sections"], key=lambda x: SECTIONS.index(x[0]))
-    draft = "\n\n".join(f"## {t}\n{c}" for t, c in ordered)
-    polished = ChatOpenAI(model="gpt-4o-mini").invoke(
-        f"对以下报告进行整体润色：\n{draft}"
-    ).content
-    return {"final": polished}
-
-def supervisor(state):
-    if not state.get("research"): return {"next": "research"}
-    if not state.get("sections"): return {"next": "write"}
-    if not state.get("final"):    return {"next": "edit"}
-    return {"next": "done"}
-
-def route(state):
-    n = state["next"]
-    if n == "research": return "research"
-    if n == "write":    return "fan_out"   # Send
-    if n == "edit":     return "edit"
-    return END
+def after_research_review(s: MainState):
+    if s["stage"] != "writing":
+        return "research"                       # 研究被驳回，重做
+    return [Send("section_writer", {"topic": s["topic"], "research": s["research"], "section_title": sec})
+            for sec in SECTIONS]
 ```
 
 ---
 
-## 6. HITL 审批点
+## 5. HITL 审批点（interrupt）
 
 ```python
 from langgraph.types import interrupt
 
-def review_research(state):
-    answer = interrupt({"stage": "research_done", "summary": state["research"]})
-    if answer != "yes":
-        return {"research": ""}    # 清空，supervisor 会重试
-    return {}
+def review_research(s: MainState):
+    ans = interrupt({"stage": "research_done", "summary": s["research"]})   # 在这里暂停整张图
+    return {"stage": "writing" if ans == "yes" else "init"}
 
-def review_draft(state):
-    answer = interrupt({"stage": "draft_done", "draft": state["sections"]})
-    if answer != "yes":
-        return {"sections": []}
-    return {}
+def review_draft(s: MainState):
+    preview = {t: c[:60] for t, c in s["sections"]}
+    ans = interrupt({"stage": "draft_done", "preview": preview})
+    return {"stage": "editing" if ans == "yes" else "rejected"}
 ```
 
-把这两个 review 节点插在团队后面。
+`interrupt` 需要 checkpointer。恢复时调用 `app.invoke(Command(resume="yes"), config)`，`interrupt(...)` 的返回值就是 `"yes"`。恢复时这个节点会从头重新执行，所以 `interrupt` 之前不要放有副作用的代码。
 
 ---
 
-## 7. 完整 graph
+## 6. 编辑节点 + 完整 graph
 
 ```python
-def call_research(state):
-    out = research_team.invoke({"topic": state["topic"]})
+def edit(s: MainState):
+    ordered = sorted(s["sections"], key=lambda x: SECTIONS.index(x[0]))
+    draft = "\n\n".join(f"## {t}\n{c}" for t, c in ordered)
+    polished = ChatOpenAI(model=MODEL).invoke(f"对以下报告整体润色，保持 markdown 标题不变：\n{draft}").content
+    return {"final": polished, "stage": "done"}
+
+def call_research(s: MainState):
+    out = research_team.invoke({"topic": s["topic"]})   # 子图 schema 不同，包一层函数转换
     return {"research": out["summary"]}
 
-main = StateGraph(MainState)
-main.add_node("supervisor", supervisor)
-main.add_node("research", call_research)
-main.add_node("review_research", review_research)
-main.add_node("section_writer", section_writer)   # 用 Send 调用
-main.add_node("review_draft", review_draft)
-main.add_node("edit", edit)
+g = StateGraph(MainState)
+g.add_node("research", call_research)
+g.add_node("review_research", review_research)
+g.add_node("section_writer", section_writer)
+g.add_node("review_draft", review_draft)
+g.add_node("edit", edit)
 
-main.add_edge(START, "supervisor")
-main.add_conditional_edges("supervisor", route, {
-    "research": "research",
-    "fan_out": "review_research",     # 先审 research，再 fan_out
-    "edit": "review_draft",            # 先审 draft
-    END: END,
-})
-main.add_edge("research", "supervisor")
-main.add_conditional_edges("review_research", lambda s: "fan_out" if s.get("research") else "supervisor",
-    {"fan_out": "section_writer", "supervisor": "supervisor"})
-
-# Send 是从 conditional_edges 触发的，我们用 supervisor → review → "fan_out" 节点 → 把 Send 当 path
-# 这里用一个伪 dispatcher node
-def dispatcher(state):
-    return state
-main.add_node("fan_out_dispatch", dispatcher)
-main.add_conditional_edges("section_writer", lambda s: "review_draft", {"review_draft": "review_draft"})
-main.add_conditional_edges("review_draft", lambda s: "edit" if s.get("sections") else "supervisor",
-    {"edit": "edit", "supervisor": "supervisor"})
-main.add_edge("edit", "supervisor")
-
-# Send 路径：从 review_research 出来后，要 fan_out → section_writer
-# LangGraph 推荐：用一个 conditional_edges 输出 Send 列表
-main.add_conditional_edges("review_research", fan_out_sections, ["section_writer"])
+g.add_edge(START, "research")
+g.add_edge("research", "review_research")
+g.add_conditional_edges("review_research", after_research_review, ["section_writer", "research"])
+g.add_edge("section_writer", "review_draft")    # 所有并行 worker 结束后才进入审稿
+g.add_conditional_edges("review_draft", lambda s: "edit" if s["stage"] == "editing" else END,
+                        {"edit": "edit", END: END})
+g.add_edge("edit", END)
 ```
 
-> 实际 demo 代码做了细节简化与组织，参考 `demos/langgraph/project_research_team.py`。
+这里不需要 supervisor 节点：它要做的只是看 research、sections、final 有没有值，依次往下转发，直接用边表达同样的顺序更简单。如果你的流程确实需要由模型决定下一步派哪个 agent，也别再用 `langgraph-supervisor` 库了：它的仓库已经归档，官方建议改成把子 agent 包装成工具、由主 agent 调用，做法见 LangGraph 第 08 篇。
 
 ---
 
-## 8. 运行 + Streaming
+## 7. 运行
 
 ```python
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import Command
+
 with SqliteSaver.from_conn_string("./research.db") as memory:
-    app = main.compile(checkpointer=memory)
+    app = g.compile(checkpointer=memory)
     cfg = {"configurable": {"thread_id": "research-001"}}
 
-    print("\n>>> 第一次启动")
-    out = app.invoke({"topic": "LangGraph 最佳实践", "sections": []}, config=cfg)
-    if "__interrupt__" in out:
-        print("【审核 research】", out["__interrupt__"][0].value)
-    final = app.invoke(Command(resume="yes"), config=cfg)
-    if "__interrupt__" in final:
-        print("【审核 draft】", final["__interrupt__"][0].value)
-    final = app.invoke(Command(resume="yes"), config=cfg)
-    print("\n=== 最终报告 ===\n", final["final"])
+    out = app.invoke({"topic": "LangGraph", "sections": [], "stage": "init"}, config=cfg)
+    print("【审核 research】", out["__interrupt__"][0].value["summary"][:120])
+
+    out = app.invoke(Command(resume="yes"), config=cfg)          # 批准研究 → 并行写作 → 暂停审稿
+    print("【审核 draft】", out["__interrupt__"][0].value)
+
+    final = app.invoke(Command(resume="yes"), config=cfg)        # 批准初稿 → 编辑润色
+    print(final["final"])
 ```
 
----
-
-## 9. 接 LangSmith / Studio
-
-- 加 `LANGSMITH_TRACING=true` 即可看到完整 trace（含子图）
-- `langgraph dev` 用 Studio 调试：可以中途修改某节点 state 再 resume
+在 langgraph 1.x 里，`invoke` 遇到 `interrupt` 会正常返回，中断信息放在结果的 `__interrupt__` 键里。
 
 ---
 
-## 10. 工程清单
+## 8. 接 LangSmith / Studio
 
-- [ ] tools 真接 Tavily / arxiv API
+设上 `LANGSMITH_TRACING=true` 就能看到包括子图在内的完整 trace。用 `langgraph dev` 打开 Studio 调试时，还可以中途改某个节点的 state，再 resume。
+
+---
+
+## 9. 工程清单
+
+- [ ] 检索工具接入真实的 Tavily / arxiv API
 - [ ] research summary 太长时做摘要
-- [ ] section 数量动态（从 topic 推断）
-- [ ] HITL 接 Slack bot（不开浏览器审）
+- [ ] 章节数量根据 topic 动态决定
+- [ ] HITL 接入 Slack bot，不用打开浏览器就能审批
 - [ ] 限速：max_concurrency
 - [ ] 评估：用 LangSmith dataset，定期跑回归
-- [ ] Postgres Checkpointer 上生产
+- [ ] 生产环境换成 Postgres Checkpointer
 
 ---
 
-## 11. 总结
-
-完整跑通这个项目，你就把本系列三大块技术：
-
-1. **LangChain**：模型、工具、检索
-2. **LangSmith**：可观测、评估
-3. **LangGraph**：状态机、HITL、多 Agent、子图、Map-Reduce
-
-全部应用了一遍。可以把这个 demo 当 starter，按业务场景改造成自己的 Agent 系统。
-
----
-
-## 12. 本章 demo
+## 10. 本章 demo
 
 [`demos/langgraph/project_research_team.py`](../../demos/langgraph/project_research_team.py)

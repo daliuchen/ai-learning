@@ -1,6 +1,6 @@
 # Agent 配置详解
 
-> **一句话**：`Agent(...)` 有 10 来个参数，按"我能控制它**说啥**、**调谁**、**给啥**"三类分组就好记。
+> `Agent(...)` 有十来个参数。记的时候可以按用途分三类：控制它怎么说（instructions、model、model_settings），它能调什么（tools、handoffs），以及它最后交出什么（output_type、guardrails）。
 
 ---
 
@@ -13,23 +13,28 @@ from agents.model_settings import ModelSettings
 
 agent = Agent(
     name="MyAgent",                     # 必填，trace 里看名字
-    instructions="你是助手...",          # 系统指令
-    model="gpt-4o-mini",                # 模型 ID 或 Model 对象
-    model_settings=ModelSettings(...),  # temperature 等
+    instructions="你是助手...",          # 系统指令（字符串 / 函数）
+    handoff_description="一句话说明我擅长什么",  # 别的 Agent 把我当 handoff 目标时，给模型看的描述
+    model="gpt-6-luna",                # 模型 ID 或 Model 对象；不写 → SDK 默认 gpt-5.6-luna
+    model_settings=ModelSettings(...),  # temperature / timeout / retry 等
     tools=[...],                        # 工具列表
+    mcp_servers=[...],                  # MCP 服务（见 06-integration/01-mcp）
     handoffs=[...],                     # 可委派的 Agent
     output_type=Recipe,                 # 结构化输出
+    tool_use_behavior="run_llm_again",  # 工具结果怎么处理（见第 10 节）
     input_guardrails=[...],             # 输入守卫
     output_guardrails=[...],            # 输出守卫
     hooks=...,                          # 生命周期 hooks
 )
 ```
 
+> 0.24 的 `Agent` 构造参数还有 `prompt`（引用 OpenAI 平台上托管的提示词模板，仅 Responses）、`mcp_config`、`reset_tool_choice`。`Agent` 对上下文类型是泛型的：`Agent[MyCtx]`。
+
 ---
 
 ## 2. instructions：系统指令
 
-支持字符串 / 动态函数：
+可以是字符串，也可以是函数：
 
 ### 静态字符串
 
@@ -47,7 +52,7 @@ def make_instr(ctx, agent):
 agent = Agent(name="A", instructions=make_instr)
 ```
 
-适合：根据用户、时间、A/B test 变体动态拼 prompt。
+函数形式适合按用户、时间或 A/B 实验分组来拼 prompt。
 
 ---
 
@@ -56,23 +61,27 @@ agent = Agent(name="A", instructions=make_instr)
 ### 字符串（默认走 OpenAI）
 
 ```python
-Agent(name="A", model="gpt-4o-mini")
-Agent(name="A", model="gpt-4o")
-Agent(name="A", model="o1-mini")
+Agent(name="A", model="gpt-6-luna")
+Agent(name="A", model="gpt-6.1-sol")
 ```
 
-### 通过 LiteLLM 接其它 provider
+### 默认模型
+
+`RunConfig(model=...)` 设了就会覆盖这次 run 里所有 agent 的 `model`。没设 RunConfig、agent 也没写 `model` 时，先看环境变量 `OPENAI_DEFAULT_MODEL`，再退到 SDK 内置默认（0.20 起 `gpt-5.6-luna`，`reasoning.effort="none"`）。想让行为稳定，就显式写 model：SDK 的内置默认在不同版本里换过，升级时很容易被悄悄换掉。
+
+### 接非 OpenAI 模型
 
 ```python
-from agents.extensions.models.litellm_model import LitellmModel
+# 方式 1：OpenAI 兼容端点（千问 / DeepSeek / 本地 vLLM），走 Chat Completions
+from agents import OpenAIChatCompletionsModel
+Agent(name="A", model=OpenAIChatCompletionsModel(model="qwen-flash", openai_client=client))
 
-Agent(
-    name="A",
-    model=LitellmModel("anthropic/claude-sonnet-4-6"),
-)
+# 方式 2：适配器（Any-LLM / LiteLLM）
+from agents.extensions.models.any_llm_model import AnyLLMModel
+Agent(name="A", model=AnyLLMModel(model="anthropic/claude-sonnet-5-5"))
 ```
 
-详见 [05-advanced/04-multi-provider.md](../05-advanced/04-multi-provider.md)。
+详见 [Multi-provider：接千问 / Claude / Gemini / 本地模型](../05-advanced/04-multi-provider.md)。
 
 ---
 
@@ -83,13 +92,14 @@ from agents.model_settings import ModelSettings
 
 agent = Agent(
     name="A",
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
     model_settings=ModelSettings(
         temperature=0.3,
         top_p=0.9,
         max_tokens=1024,
         parallel_tool_calls=True,
-        tool_choice="auto",      # 或 "required" / "none" / {"type": "function", "name": "x"}
+        tool_choice="auto",      # 或 "required" / "none" / 具体工具名字符串如 "get_weather"
+        timeout=30.0,            # 单次模型调用的超时（秒）
     ),
 )
 ```
@@ -101,6 +111,12 @@ agent = Agent(
 | max_tokens | 输出上限 | 视任务 |
 | parallel_tool_calls | 允许同时调多个 tool | True |
 | tool_choice | 强制 / 自动 / 禁用 tool | "auto" |
+| timeout | 单次模型调用超时（不含工具执行和重试退避） | 30.0 |
+| retry | 模型调用的重试策略（opt-in，见 [错误处理与重试](../07-production/03-error-handling.md)） | `ModelRetrySettings(...)` |
+| include_usage | 流式 + 第三方端点时要打开才有 token 用量 | True |
+| reasoning / verbosity | 推理模型（GPT-5 系列起）的推理强度、输出详尽度 | `Reasoning(effort="low")` |
+
+`ModelSettings` 是 dataclass，也可以传 dict（0.19 起统一支持，未知字段会报错）。Agent 上的设置和 `RunConfig(model_settings=...)` 会合并，冲突时以 RunConfig 为准。
 
 ---
 
@@ -116,7 +132,7 @@ def now() -> str:
 agent = Agent(name="A", instructions="...", tools=[now])
 ```
 
-工具规范见 [02-tools/01-function-tools.md](../02-tools/01-function-tools.md)。
+工具的写法见 [Function Tools：@function_tool 装饰器](../02-tools/01-function-tools.md)。
 
 ---
 
@@ -133,7 +149,7 @@ triage = Agent(
 )
 ```
 
-详见 [03-handoffs/01-handoffs-concept.md](../03-handoffs/01-handoffs-concept.md)。
+详见 [Handoffs 概念：与 Tool、Sub-Agent 的区别](../03-handoffs/01-handoffs-concept.md)。
 
 ---
 
@@ -154,9 +170,7 @@ agent = Agent(
 )
 ```
 
-`result.final_output` 就是 `Sentiment` 实例。
-
-不设 `output_type` 时，`final_output` 是字符串。
+`result.final_output` 就是 `Sentiment` 实例；不设 `output_type` 时它是字符串。
 
 ---
 
@@ -181,14 +195,14 @@ agent = Agent(
 )
 ```
 
-详见 [04-guardrails/01-input-guardrails.md](../04-guardrails/01-input-guardrails.md)。
+详见 [Input Guardrails：输入守卫](../04-guardrails/01-input-guardrails.md)。
 
 ---
 
 ## 9. hooks：生命周期回调
 
 ```python
-from agents.lifecycle import AgentHooks
+from agents import AgentHooks
 
 
 class MyHooks(AgentHooks):
@@ -196,93 +210,108 @@ class MyHooks(AgentHooks):
     async def on_handoff(self, ctx, agent, source): ...
     async def on_tool_start(self, ctx, agent, tool): ...
     async def on_tool_end(self, ctx, agent, tool, result): ...
+    async def on_llm_start(self, ctx, agent, system_prompt, input_items): ...   # 0.x 后期新增
+    async def on_llm_end(self, ctx, agent, response): ...
 
 
 agent = Agent(name="A", instructions="...", hooks=MyHooks())
 ```
 
-详见 [05-advanced/03-lifecycle-hooks.md](../05-advanced/03-lifecycle-hooks.md)。
+详见 [Lifecycle Hooks：生命周期钩子](../05-advanced/03-lifecycle-hooks.md)。
 
 ---
 
-## 10. clone：派生 Agent
+## 10. tool_use_behavior：工具结果要不要再交给模型
+
+```python
+Agent(name="A", tools=[get_weather], tool_use_behavior="run_llm_again")        # 默认：工具跑完，模型再组织一次回答
+Agent(name="A", tools=[get_weather], tool_use_behavior="stop_on_first_tool")   # 第一个工具的输出直接当 final_output
+from agents import StopAtTools
+Agent(name="A", tools=[a, b], tool_use_behavior=StopAtTools(stop_at_tool_names=["b"]))  # 调到 b 就停
+# 也可以传自定义函数，自己决定是否终止
+```
+
+如果工具的返回值本身就是答案，这样可以省掉一次 LLM 调用。另外，当输出守卫拦下这种直接作为最终结果的工具输出时，0.22 起 SDK 会在 session 里把它替换成固定文本 `Output withheld by an output guardrail.`，避免泄露。
+
+---
+
+## 11. clone：派生 Agent
 
 ```python
 chinese_agent = agent.clone(
     instructions="用中文回答",
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 ```
 
-适合做 A/B test 变体或者多语言版本。
+常用来做 A/B 实验的变体或多语言版本。
 
 ---
 
-## 11. 配置组合套路
+## 12. 几种常见组合
 
-### 套路 A：经典工具型 Agent
+### A：工具型 Agent
 
 ```python
 Agent(
     name="WeatherBot",
     instructions="用 get_weather 查天气",
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
     tools=[get_weather],
 )
 ```
 
-### 套路 B：分流 Agent（Triage）
+### B：分流 Agent（Triage）
 
 ```python
 Agent(
     name="Triage",
     instructions="按主题分流",
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
     handoffs=[billing, support],
     input_guardrails=[detect_pii],
 )
 ```
 
-### 套路 C：抽取器
+### C：信息抽取
 
 ```python
 Agent(
     name="Extractor",
     instructions="抽取联系人信息",
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
     model_settings=ModelSettings(temperature=0),
     output_type=Contact,
 )
 ```
 
-### 套路 D：研究型（带 web_search）
+### D：研究型（带 web_search）
 
 ```python
-from agents.tools import web_search_tool
+from agents import WebSearchTool   # hosted tool：仅 OpenAI Responses 模型可用，不能配 qwen 等第三方
 
 Agent(
     name="Researcher",
     instructions="研究问题，引用源",
-    model="gpt-4o",
-    tools=[web_search_tool()],
+    model="gpt-6.1-sol",
+    tools=[WebSearchTool()],
 )
 ```
 
 ---
 
-## 12. 常见坑
+## 13. 常见坑
 
 | 坑 | 表现 | 解 |
 |----|------|----|
 | `instructions` 没说怎么用 tool | 模型不调 tool | 显式 "When asked X, use Y tool" |
-| `output_type` 用了 dataclass 不是 Pydantic | 解析错 | 用 `pydantic.BaseModel` |
-| 多 tool 时 `parallel_tool_calls=False` 但模型并发 | 报错 | 加上 True 或别让模型同时调 |
-| `temperature=0` + structured output | 偶发乱码 | 改 0.1 试 |
+| `output_type` 想用别的类型 | 担心不支持 | Pydantic / dataclass / TypedDict / `list[...]` 都支持（`Contact` dataclass、`list[TypedDict]` 都能直接当 output_type）；也可用 `AgentOutputSchema(..., strict_json_schema=False)` 放宽 |
+| 想串行调用工具 | 模型一次返回好几个 tool call | `ModelSettings(parallel_tool_calls=False)`；它控制的是模型能不能一次发多个调用，SDK 同时执行几个由 `RunConfig(tool_execution=ToolExecutionConfig(max_function_tool_concurrency=N))` 控制 |
 
 ---
 
-## 13. 下一步
+## 14. 下一步
 
-- 📖 Runner 三种执行模式 → [04-runner.md](./04-runner.md)
-- 📖 RunResult 都能拿到啥 → [05-run-result.md](./05-run-result.md)
-- 📖 加 Sessions 持久化对话 → [06-sessions.md](./06-sessions.md)
+- [Runner 的三种运行方式：run / run_sync / run_streamed](./04-runner.md)
+- [RunResult 与 Usage：结果、中间步骤与 token 用量](./05-run-result.md)
+- [Sessions：会话状态自动管理](./06-sessions.md)

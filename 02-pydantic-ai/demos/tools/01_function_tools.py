@@ -37,7 +37,7 @@ class UserDeps(BaseModel):
 # ---------- 选择模型：有 key 用真模型，没 key 用 TestModel ----------
 def pick_model():
     if os.getenv('OPENAI_API_KEY'):
-        return 'openai:gpt-4o-mini'
+        return 'openai-chat:qwen-flash'
     # TestModel 会自动调用每个工具并返回模拟值，方便离线跑通
     return TestModel()
 
@@ -86,9 +86,9 @@ def get_weather(city: str, unit: str = 'c') -> dict:
         city: City English name, e.g. "Shanghai".
         unit: Temperature unit, must be 'c' or 'f'.
     """
-    if not city or len(city) < 2:
+    if not city.strip() or not city.isascii():
         raise ModelRetry(
-            f"Invalid city {city!r}. Provide a real city name, e.g. 'Shanghai'."
+            f"Invalid city {city!r}. Provide an English city name, e.g. 'Shanghai'."
         )
     if unit not in ('c', 'f'):
         raise ModelRetry(f"unit must be 'c' or 'f', got {unit!r}.")

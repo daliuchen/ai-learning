@@ -1,57 +1,65 @@
-# Pydantic AI 05-03：测试 Agent —— TestModel、FunctionModel 与 override
+# Pydantic AI 05-03：用 TestModel、FunctionModel 与 override 测试 Agent
 
-> **一句话**：Pydantic AI 的 `TestModel` / `FunctionModel` 配合 `agent.override(...)`，让你完全脱离真实 LLM 跑单测 —— 既快又便宜还可复现，CI 里跑 1000 个 case 也不烧一分钱。
+> Pydantic AI 的 `TestModel` / `FunctionModel` 配合 `agent.override(...)`，可以完全不调用真实 LLM 来跑单元测试。这样测试快、结果可复现，CI 里跑 1000 个 case 也不产生 API 费用。
+
+以 `pydantic-ai 2.64.0` 为准。
 
 ---
 
 ## 1. 为什么 Agent 单测很难
 
-LLM 应用第一次写单测的人，会发现传统单测套路全部失效：
+第一次给 LLM 应用写单元测试，会发现传统的那套做法都不太好用：
 
-- **不可复现**：同一个 prompt 跑两次结果不一样
-- **慢**：单 case 几秒到几十秒
-- **贵**：CI 每跑一次几块到几十块
-- **依赖网络**：CI 在飞机上 / 内网时直接全挂
-- **断言难写**：模型说"今天天气不错"和"今天天气挺好"算同一个意思吗？
+- 不可复现：同一个 prompt 跑两次，结果不一样
+- 慢：单个 case 要几秒到几十秒
+- 贵：CI 每跑一次就是几块到几十块钱
+- 依赖网络：在飞机上或者内网里，CI 直接全挂
+- 断言难写："今天天气不错"和"今天天气挺好"算不算同一个意思？
 
-直接 mock OpenAI SDK 也不优雅 —— 你要把 function calling、tool result、token usage 全部模拟一遍，case 多了维护成本爆炸。
+直接 mock OpenAI SDK 也麻烦，function calling、tool result、token usage 都得模拟一遍，case 一多就很难维护。
 
-Pydantic AI 的方案是**在 Model 这一层提供测试替身**，Agent 层完全不用改动：
+Pydantic AI 的做法是在 Model 这一层提供测试替身，Agent 层完全不用改：
 
 ```
 真实使用：Agent + OpenAIModel  ←→  调真实 API
 测试时：Agent + TestModel / FunctionModel  ←→  纯本地虚拟回复
 ```
 
-切换只是一行 `with agent.override(model=...)`。
+切换只需要一行 `with agent.override(model=...)`。
+
+分工也要先划清：单元测试测的是你自己的代码（工具、依赖、输出校验、失败处理），模型回答得好不好交给 evals（见 [Pydantic Evals 评测框架](../04-modules/02-evals.md)）。官方文档把这一页叫 *Unit testing*，也是这个意思。
 
 ---
 
-## 2. 三大测试工具速览
+## 2. 三个测试工具速览
 
 | 工具 | 作用 | 适合场景 |
 |------|------|----------|
-| **TestModel** | 自动按 schema 生成"看起来合理"的假数据 | 冒烟测试、跑通 happy path |
-| **FunctionModel** | 你写一个函数模拟 LLM 行为 | 复杂场景、覆盖分支、断言工具调用 |
-| **agent.override** | 临时替换 Agent 的 model / deps / system_prompt | 任何测试都先用它隔离副作用 |
+| TestModel | 按 schema 自动生成格式正确的假数据 | 冒烟测试、跑通 happy path |
+| FunctionModel | 你写一个函数模拟 LLM 行为 | 复杂场景、覆盖分支、断言工具调用 |
+| agent.override | 临时替换 Agent 的 model / deps / instructions | 所有测试都先用它隔离副作用 |
 
 辅助工具：
 
-- `dirty-equals` —— 模糊断言（比如 `IsNow()` 校验时间字段）
-- `inline-snapshot` —— 把第一次跑的结果 inline 写回测试代码作为期望值
-- `logfire.no_auto_trace` —— 测试里禁用 Logfire 上报
+- `dirty-equals`：模糊断言（比如用 `IsNow()` 校验时间字段）
+- `inline-snapshot`：把第一次跑出的结果直接写回测试代码，作为期望值
+- `logfire.configure(send_to_logfire=False)`：测试里不上报 Logfire
+- `models.ALLOW_MODEL_REQUESTS = False`（或在 conftest 里全局设置）：万一漏了 override，真实模型请求会直接报错，不会悄悄产生费用
+- `TestImageGenerationModel`：图片生成模型的测试替身
+
+`TestModel` 和 `FunctionModel` 在内存里实现了批处理 API，用到 `model_request_batch` 的代码也能离线测。
 
 ---
 
 ## 3. TestModel：零代码假数据
 
-最简单的姿势 —— 一行替换 model：
+最简单的用法是一行替换 model：
 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
-agent = Agent("openai:gpt-4o-mini", system_prompt="你是助手。")
+agent = Agent("openai-chat:qwen-flash", instructions="你是助手。")
 
 def test_agent_runs():
     with agent.override(model=TestModel()):
@@ -59,7 +67,7 @@ def test_agent_runs():
     assert result.output  # 不为空就行
 ```
 
-TestModel 会**根据 Agent 的 `output_type` 自动编造数据**：
+TestModel 会根据 Agent 的 `output_type` 自动编造数据：
 
 ```python
 from pydantic import BaseModel
@@ -68,7 +76,7 @@ class Profile(BaseModel):
     name: str
     age: int
 
-agent = Agent("openai:gpt-4o-mini", output_type=Profile)
+agent = Agent("openai-chat:qwen-flash", output_type=Profile)
 
 def test_structured():
     with agent.override(model=TestModel()):
@@ -79,7 +87,7 @@ def test_structured():
 
 ### 3.1 控制 TestModel 输出
 
-不想让 TestModel 完全随机？传 `custom_output_text` 或 `custom_output_args`：
+想让 TestModel 返回指定内容，就传 `custom_output_text` 或 `custom_output_args`：
 
 ```python
 TestModel(custom_output_text="固定文本输出")
@@ -88,7 +96,7 @@ TestModel(custom_output_args={"name": "张三", "age": 30})
 
 ### 3.2 工具调用的默认行为
 
-TestModel 默认会**把 Agent 的每个 tool 都调用一次**（用编造的参数），方便你测试"工具有没有被定义对"：
+TestModel 默认会用编造的参数把 Agent 的每个 tool 都调用一次，方便检查工具有没有定义对：
 
 ```python
 @agent.tool
@@ -99,13 +107,15 @@ with agent.override(model=TestModel()):
 # lookup 会被调用一次，参数是 TestModel 编的
 ```
 
-不想自动调？`TestModel(call_tools=[])`（空列表表示不调任何工具），或者 `call_tools=["lookup"]` 只调指定工具。
+不想让它自动调用，可以用 `TestModel(call_tools=[])`（空列表表示不调任何工具），或者 `call_tools=["lookup"]` 只调指定的工具。
+
+编造的字符串参数是占位值 `'a'`。如果工具里校验参数格式（比如必须是订单号），校验会一直失败，直到 `ModelRetry` 预算耗尽。这时要么让校验放过占位值，要么改用按脚本返回固定调用的 `FunctionModel`（见下一节）。
 
 ---
 
 ## 4. FunctionModel：完全自定义 LLM 行为
 
-`TestModel` 适合冒烟，**真正复杂的单测要用 `FunctionModel`** —— 你写一个函数，每次模型被调用时这个函数就被执行：
+`TestModel` 适合冒烟测试，复杂一些的单元测试要用 `FunctionModel`：你写一个函数，每次模型被调用时就执行这个函数：
 
 ```python
 from pydantic_ai.models.function import FunctionModel, AgentInfo
@@ -145,7 +155,7 @@ def llm(messages, info):
     return ModelResponse(parts=[TextPart(content="结果是 ok")])
 ```
 
-这种"两轮回合"几乎覆盖所有 tool use 测试场景。
+先调工具、再给答案，这两轮的结构能覆盖绝大多数 tool use 测试场景。
 
 ### 4.2 断言模型收到了什么
 
@@ -157,28 +167,28 @@ def llm(messages, info):
     return ModelResponse(parts=[TextPart(content="...")])
 ```
 
-非常适合验证 "system prompt 有没有把 deps 里的用户角色填进去"。
+用来验证 system prompt 有没有把 deps 里的用户角色填进去，很方便。
+
+### 4.3 流式请求要传 `stream_function`
+
+只传普通函数的 `FunctionModel` 不支持流式请求。被测代码用了 `run_stream`，或者挂了 `Coder` 这类内部走流式请求的 capability，就会报 `FunctionModel must receive a stream_function to support streamed requests`。这种情况要额外传 `stream_function`，让它按块产出文本或工具调用。
 
 ---
 
 ## 5. agent.override：测试的总开关
 
-`agent.override()` 是 context manager，能临时改三样东西：
+`agent.override()` 是一个 context manager，最常用的是临时替换下面三样（另外还能换 `tools` / `toolsets` / `model_settings` / `retries` 等）：
 
 ```python
 with agent.override(
     model=TestModel(),
     deps=MockDeps(db=fake_db, user_id=1),
-    system_prompt="测试用 system prompt",
+    instructions="测试用 system prompt",
 ):
     agent.run_sync("...")
 ```
 
-特点：
-
-- **嵌套安全**：内层 override 离开后自动恢复到外层值
-- **支持 async**：`async with agent.override(...): ...`
-- **测试 fixture 友好**：可以放在 `pytest` autouse fixture 里
+override 可以嵌套，内层退出后自动恢复成外层的值；支持 `async with agent.override(...): ...`；也可以放进 `pytest` 的 autouse fixture 里。
 
 ### 5.1 一个标准 fixture 模板
 
@@ -192,28 +202,32 @@ def isolated_agent():
         yield agent
 ```
 
-测试函数直接用 `isolated_agent` 就行，再也不用每个 case 写 `with override(...)`.
+测试函数直接用 `isolated_agent`，不用每个 case 都写一遍 `with override(...)`。
 
 ---
 
 ## 6. 工具调用的测试技巧
 
-工具调用是 Agent 里最容易出 bug 的地方，重点测试它的输入输出契约。
+工具调用是 Agent 里最容易出 bug 的地方，测试重点放在它的输入输出约定上。
 
 ### 6.1 Mock 整个工具
 
 如果某个 tool 调用了外部 API，单测里直接换成 mock 实现：
 
 ```python
+from pydantic_ai import Tool
+
 async def fake_lookup(ctx, user_id: int) -> str:
     return f"user-{user_id}"
 
-# 临时换掉
-original = agent._function_tools["lookup"]
-agent._function_tools["lookup"] = original.replace(function=fake_lookup)
+# 临时换掉 agent 的函数工具（override 的 tools 会替换 agent 自己注册的那组）
+with agent.override(tools=[Tool(fake_lookup, name="lookup")]):
+    ...
 ```
 
-更优雅的姿势是从一开始就把外部依赖放进 `deps`，单测里换 deps 即可：
+别去改 `agent` 上的私有属性，V2 里内部结构已经变过，私有字段随时可能再变。
+
+更好的做法是一开始就把外部依赖放进 `deps`，单元测试里换掉 deps 就行：
 
 ```python
 @dataclass
@@ -229,11 +243,11 @@ with agent.override(deps=Deps(user_repo=FakeUserRepo())):
     ...
 ```
 
-**架构纪律**：工具内部不要直接 `import requests / await db.connect()`，所有外部依赖通过 `ctx.deps`。这样测试时 0 改动就能 mock。
+工具内部不要直接 `import requests / await db.connect()`，所有外部依赖都通过 `ctx.deps` 拿。这样测试时不用改业务代码就能 mock。
 
 ### 6.2 验证工具被调用的次数和参数
 
-`FunctionModel` 里数 call_count 就行；如果想测"工具本身"是否被 Agent 正确调用：
+在 `FunctionModel` 里数 call_count 就行。如果想确认工具本身被 Agent 正确调用了：
 
 ```python
 from unittest.mock import AsyncMock
@@ -254,7 +268,7 @@ mock_fn.assert_called()
 
 ## 7. 输出校验的测试
 
-Pydantic 模型字段错了会自动 raise `ValidationError`，**测试要专门覆盖错误路径**：
+Pydantic 模型字段不合法时会抛 `ValidationError`，测试要专门覆盖这条错误路径：
 
 ```python
 class Out(BaseModel):
@@ -281,13 +295,13 @@ def test_invalid_output_recovers():
     assert calls == 2  # Pydantic AI 自动 ModelRetry
 ```
 
-这种 case 验证了 **Pydantic AI 的 ModelRetry 机制**有没有正确触发。
+这个 case 验证的是 Pydantic AI 的 ModelRetry 机制有没有正确触发。
 
 ---
 
 ## 8. 与 pytest 集成
 
-`pytest-asyncio` 是必须的：
+需要装 `pytest-asyncio`：
 
 ```ini
 # pyproject.toml or pytest.ini
@@ -308,7 +322,7 @@ async def test_agent_async():
 
 ## 9. Snapshot 测试：用 inline-snapshot
 
-每次更新 prompt 都担心改坏？用 `inline-snapshot` 把上次跑通的输出 inline 写到测试里：
+担心改 prompt 时改坏东西，可以用 `inline-snapshot` 把上次跑通的输出直接写进测试代码：
 
 ```python
 from inline_snapshot import snapshot
@@ -319,7 +333,7 @@ def test_prompt_unchanged():
     assert r.output == snapshot("你也好")
 ```
 
-第一次跑加 `--inline-snapshot=create` 参数自动写入；之后改了 prompt 跑 `--inline-snapshot=fix` 一键更新。比手写 `assert ==` 字符串方便很多。
+第一次运行时加 `--inline-snapshot=create` 参数自动写入；之后改了 prompt，跑一下 `--inline-snapshot=fix` 就能更新。比手写 `assert ==` 字符串方便。
 
 ### 9.1 用 dirty-equals 做模糊断言
 
@@ -335,29 +349,29 @@ def test_with_dirty_equals():
     }
 ```
 
-适合"字段格式我知道，但具体值我不在乎"的场景。
+适合只关心字段格式、不关心具体值的场景。
 
 ---
 
 ## 10. Logfire 在测试环境的处理
 
-Pydantic AI 默认会上报 Logfire span，在测试里要关掉：
+开了 Logfire 之后 span 会被上报，测试里要关掉：
 
 ```python
 import logfire
 logfire.configure(send_to_logfire=False)
 ```
 
-或者用环境变量 `LOGFIRE_SEND_TO_LOGFIRE=false`，CI 上一次设置全部测试生效。
+也可以用环境变量 `LOGFIRE_SEND_TO_LOGFIRE=false`，在 CI 上设一次，所有测试都生效。
 
-如果你想**验证测试里产生了哪些 span**（白盒测试），用 `logfire.testing.CaptureLogfire`：
+如果想检查测试里产生了哪些 span（白盒测试），用 `logfire.testing.CaptureLogfire`：
 
 ```python
 from logfire.testing import CaptureLogfire
 
 def test_spans(capfire: CaptureLogfire):
     agent.run_sync("...")
-    assert any("agent.run" in s.name for s in capfire.exporter.exported_spans)
+    assert any("invoke_agent" in s.name for s in capfire.exporter.exported_spans)   # 默认数据格式下 agent span 的名字
 ```
 
 ---
@@ -382,10 +396,10 @@ class Out(BaseModel):
     greeting: str
 
 agent = Agent(
-    "openai:gpt-4o-mini",
+    "openai-chat:qwen-flash",
     deps_type=Deps,
     output_type=Out,
-    system_prompt="问候用户。",
+    instructions="问候用户。",
 )
 
 @agent.tool
@@ -436,7 +450,7 @@ def test_uses_tool():
 └─ 集成测试（真实模型 + 真实 API）→ 不 override，跑少量"金标"用例
 ```
 
-**实际项目比例**：单测里 90% TestModel + 10% FunctionModel，外加每周跑一次 5-10 个真实模型的"金标"用例。
+实际项目里通常是：冒烟类用例大多用 TestModel，需要覆盖分支的少数用例用 FunctionModel，另外定期用真实模型跑一小批"金标"用例。
 
 ---
 
@@ -445,24 +459,24 @@ def test_uses_tool():
 | 现象 | 原因 | 解决 |
 |------|------|------|
 | `with agent.override(...)` 之外的代码还在用真实 model | override 是 context-scoped | 测试函数内完整覆盖，或用 fixture |
-| TestModel 工具调用炸了 | TestModel 默认会调所有 tool，但工具内部依赖真实 deps | `TestModel(call_tools=[])` 或同时 override deps |
+| TestModel 调工具时报错 | TestModel 默认会调所有 tool，但工具内部依赖真实 deps | `TestModel(call_tools=[])` 或同时 override deps |
 | FunctionModel 不知道返回什么类型 | 没看清 Agent 的 output_type | 看 `info.output_tools`，里面有 final_result 工具 schema |
-| inline-snapshot 死活更新不了 | 没传 `--inline-snapshot=fix` | `pytest --inline-snapshot=fix` |
+| inline-snapshot 怎么都更新不了 | 没传 `--inline-snapshot=fix` | `pytest --inline-snapshot=fix` |
 | 测试里 Logfire 报网络错误 | 默认开启上报，但 CI 没 token | `logfire.configure(send_to_logfire=False)` |
 | `pytest-asyncio` 报错 fixture 不识别 | `asyncio_mode` 没配 | 设 `asyncio_mode = "auto"` |
-| FunctionModel 拿不到 system prompt | system 已经被合并到 messages | 在 `messages[0]` 就能找到 |
+| FunctionModel 在 parts 里找不到 instructions | `instructions` 不是 part，挂在 `ModelRequest.instructions` 上 | 读 `info.instructions`，或 `messages[-1].instructions`；`system_prompt=` 产生的 `SystemPromptPart` 才在 `messages[0].parts` 里 |
 | 真实模型测试偶尔 fail | LLM 本身不确定 | 用 `dirty-equals` 做语义级断言，或用低 temperature + snapshot |
 
 ---
 
 ## 14. 生产环境建议
 
-1. **CI 必跑 TestModel 套件**：每个 PR 必过，秒级反馈
-2. **金标用例独立 job**：真实模型跑的测试单独一个 nightly job，失败发告警但不阻塞 PR
-3. **prompt 改动必加 snapshot**：用 inline-snapshot 把改动可见化，review 时一眼看出对话有没有变
-4. **deps 全部走依赖注入**：tool 里不要直接 import 全局对象，否则没法 mock
-5. **测错误路径**：单测要专门覆盖 ValidationError / ModelRetry / Timeout，这些是真实故障率最高的地方
-6. **Logfire 在 CI 关闭**：环境变量 `LOGFIRE_SEND_TO_LOGFIRE=false` 全局生效
+1. CI 每个 PR 都跑 TestModel 套件，几秒内就有结果
+2. 用真实模型的金标用例放在单独的 nightly job 里，失败时告警，但不阻塞 PR
+3. 改 prompt 时配合 inline-snapshot，让输出变化在 review 时直接可见
+4. 外部依赖全部走 deps 注入，tool 里不直接 import 全局对象，否则没法 mock
+5. 专门覆盖错误路径：ValidationError、ModelRetry、Timeout，线上出问题最多的就是这些地方
+6. CI 里关掉 Logfire，设环境变量 `LOGFIRE_SEND_TO_LOGFIRE=false` 即可
 
 ---
 
@@ -476,4 +490,6 @@ def test_uses_tool():
 pytest demos/patterns/03_testing.py -v
 ```
 
-下一篇：[04-embeddings.md](04-embeddings.md) — Pydantic AI 怎么对接向量库做 RAG。
+这 9 个用例都不需要 API key。
+
+下一篇：[Embeddings 与 RAG 集成](04-embeddings.md)，讲 Pydantic AI 怎么对接向量库做 RAG。

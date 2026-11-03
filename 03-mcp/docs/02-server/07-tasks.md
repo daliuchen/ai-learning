@@ -1,446 +1,276 @@
-# MCP Server 07：Tasks 扩展 —— 让长请求异步、可恢复、可查询
+# MCP Server 07：用 Tasks 扩展异步执行长请求
 
-> **一句话**：Tasks 是 2025-11-25 版规范引入的「**实验性**」扩展，把"一次请求 = 一次同步等待"改成"一次请求 = 拿到一个 task 句柄，后续轮询/订阅结果"。适合**几十秒到几小时**的长任务（视频转码、爬取、批处理、Agent 工作流）。
+> 普通请求是发出去之后一直同步等结果，Tasks 把它改成先拿到一个 task 句柄，之后再轮询、取回结果，适合跑几十秒到几小时的任务，比如视频转码、批处理、CI、人工审批。2026-07-28 把 Tasks 从核心协议里移出来，变成官方扩展 `io.modelcontextprotocol/tasks`，并重新设计了一遍；官方 Python SDK 2.3 目前还没有实现它。所以这篇先讲新协议，再给出现在就能在 Python 里用的替代做法。
 
-> ⚠️ **实验性**：标准 2025-11-25 引入、Python SDK 实现仍在演进中。本篇讲清协议设计，落地代码以 spec 为准。
+2025-11-25 的「实验性 Tasks」（`tasks/result`、`tasks/list`、请求里的 `task` 字段、`execution.taskSupport`）和 2026-07-28 的 Tasks 扩展互不兼容。Python SDK 从 2.0 起整个去掉了 v1 的 `mcp.*.experimental` Tasks API（迁移指南里的 "Experimental Tasks support removed"），`call_tool_as_task`、`server_capabilities_overrides` 之类的写法都不要再用。
 
 ---
 
 ## 1. 为什么需要 Tasks
 
-传统 MCP 请求是同步阻塞——`tools/call` 发出去就一直等响应。问题：
+普通的 MCP 请求是同步阻塞的，`tools/call` 发出去后一直等响应。这会带来几个问题：
 
-- HTTP 默认超时 30s，长任务被切断
-- Client 端 LLM 等待时无事可做，浪费上下文窗口
-- 任务跑一半 Client 崩了 → 重连后什么都拿不到
-- 远程 Server 多节点部署时，session 漂移到别的节点就丢了
+- 很多 HTTP 客户端和网关有几十秒级的超时，长任务会被切断
+- Client 端的 LLM 在等待期间什么也做不了
+- 任务跑到一半 Client 崩溃，重连之后什么都拿不到
+- 远程 Server 多节点部署时，把一个请求绑在某条连接上很脆弱（2026 版取消了会话，这个问题更明显）
 
-Tasks 把请求拆成两阶段：
+Tasks 把请求拆成两个阶段：
 
 ```
-[请求]
+[tools/call]
    ↓
-[立即返回 taskId + working 状态]
+[Server 立即返回 CreateTaskResult：taskId + 状态 working]   ← 任务在返回之前就已持久化
    ↓
-[Client 干别的、做轮询、订阅通知]
+[Client 按 pollIntervalMs 轮询 tasks/get]
    ↓
-[任务完成]
-   ↓
-[Client 调 tasks/result 拿真实结果]
+[status = completed → result 字段就是原请求同步返回时的结果]
 ```
 
 ---
 
-## 2. 核心概念
+## 2. 2026-07-28 版 Tasks 扩展
 
-| 术语 | 含义 |
+### 2.1 协商：走扩展机制，不是核心 capability
+
+- Client 在每个请求的 `_meta` 里声明：`io.modelcontextprotocol/clientCapabilities` → `extensions` → `"io.modelcontextprotocol/tasks": {}`
+- Server 在 `server/discover` 的 `capabilities.extensions` 里声明同一个标识符
+- 每个请求要不要创建 task 由 Server 决定。没声明这个扩展的 Client 永远不应该收到 task 结果（要么同步等，要么报错）。请求里的 `task` 字段和工具级的 `taskSupport` 都没有了
+
+### 2.2 创建：结果的 `resultType` 是 `"task"`
+
+2026 版的所有结果都有 `resultType`。普通结果是 `"complete"`，被转成任务的请求返回 `CreateTaskResult`（`resultType: "task"`）。
+
+下面是一个示意，字段名取自扩展 schema `ext-tasks/schema/2026-07-28`：
+
+```json
+{ "jsonrpc": "2.0", "id": 7, "result": {
+    "resultType": "task",
+    "task": { "taskId": "786512e2-9e0d-44bd-8f29-789f320fe840",
+              "status": "working", "ttlMs": 3600000, "pollIntervalMs": 5000,
+              "createdAt": "2026-11-03T08:00:00Z", "lastUpdatedAt": "2026-11-03T08:00:00Z" } } }
+```
+
+### 2.3 状态机
+
+| 状态 | 含义 |
 |------|------|
-| **Requestor** | 发起请求方（可能是 Client 也可能是 Server——sampling 反向请求也支持 task） |
-| **Receiver** | 接收方，生成 taskId、执行任务 |
-| **Task** | 一个状态机：`working` → `completed` / `failed` / `cancelled`，可能经过 `input_required` |
-| **TTL** | 任务保留时长（毫秒），过期后 Receiver 可清理 |
-| **pollInterval** | Receiver 建议的轮询间隔 |
+| `working` | 处理中 |
+| `input_required` | 需要客户端输入，`inputRequests` 里是具体问题（elicitation 等） |
+| `completed` | 完成，`result` 是最终结果 |
+| `failed` | 执行中出现 JSON-RPC 错误，详情在 `error` 字段 |
+| `cancelled` | 任务已被取消并停止。发出 `tasks/cancel` 不等于一定会进入这个状态（取消是协作式的，见下表） |
 
-任务状态机：
+后三个是终态，进入之后不会再变。`Task` 还带有 `statusMessage`（可读的进度说明）、`createdAt` / `lastUpdatedAt`、`ttlMs`（可以是 `null`，表示不过期）和 `pollIntervalMs`。
 
-```
-                  ┌─────────────┐
-                  │   working   │◀───┐
-                  └───┬─────┬───┘    │
-              ┌───────┘     └────────┤
-              ▼                      ▼
-       ┌────────────┐         ┌──────────────┐
-       │ completed  │         │input_required│ (need user/LLM intervention)
-       └────────────┘         └──────────────┘
-       ┌──────────┐
-       │  failed  │           最终态：completed / failed / cancelled
-       └──────────┘
-       ┌────────────┐
-       │ cancelled  │
-       └────────────┘
-```
+### 2.4 方法
+
+| 方法 | 作用 |
+|------|------|
+| `tasks/get` | 轮询，返回当前状态；到终态时直接带上 `result` / `error`（取代了 2025 版阻塞式的 `tasks/result`） |
+| `tasks/update` | Client 交回 `inputResponses`，回答 `input_required` 里的 `inputRequests`；Server 返回空结果 |
+| `tasks/cancel` | 协作式取消：Server 确认收到取消意图，但不一定能停下来 |
+| `notifications/tasks` | 可选的状态推送，Client 通过 `subscriptions/listen` 订阅，每条通知都带完整的任务状态 |
+
+被删掉的有 `tasks/list`（不再列出任务）和 `tasks/result`（阻塞取结果）。
+
+### 2.5 中途需要用户输入：和 MRTR 的关系
+
+任务执行中需要问用户时（比如「确认扣费吗？」），任务进入 `input_required` 状态，下一次 `tasks/get` 会带回 `inputRequests`（形状和 [Elicitation、Roots 与多轮请求（MRTR）](../03-client/04-roots-elicitation.md) 讲的 MRTR 的 `inputRequests` 一样），Client 再用 `tasks/update` 把答案交回去。整个过程不需要第二条连接，也不需要 Server 主动向 Client 发请求，符合 2026 版无状态设计的要求。
 
 ---
 
-## 3. Capability 协商
+## 3. Python SDK 现状（mcp 2.3.0，2026 年 11 月）
 
-Server 声明：
+官方 `mcp` 包没有实现 Tasks 扩展，迁移指南和 What's new 里都写明了 "this SDK does not implement yet"。SDK 提供了通用的 `Extension` 机制（`mcp.server.mcpserver.Extension`、`MCPServer(extensions=[...])`，见官方 Extensions 文档），理论上可以自己实现 `tasks/get` 等方法，但持久化、鉴权绑定、TTL 都要自己处理，工作量不小。
 
-```json
-{
-  "capabilities": {
-    "tasks": {
-      "list": {},
-      "cancel": {},
-      "requests": {
-        "tools": { "call": {} }
-      }
-    }
-  }
-}
-```
+TypeScript 那边有官方包 `@modelcontextprotocol/ext-tasks`（提供 requester 生命周期 API，以及对 2025-11-25 receiver 的支持）。
 
-含义：
-- `tasks.list` / `tasks.cancel`：支持列任务 / 取消任务
-- `tasks.requests.tools.call`：`tools/call` 可被 task 包装
+第三方独立包 `fastmcp`（当前 4.1.x，另有附加包 `fastmcp-tasks`）有自己的后台任务实现，API 和官方 SDK 不一样。按 Pydantic AI 官方文档的说法，FastMCP 4 用的是新的 Tasks 扩展（SEP-2663，由 Server 决定是否创建任务），FastMCP 3 用的是 2025-11-25 版（SEP-1686，按工具的 `execution.taskSupport` 声明），Pydantic AI 的 `MCPToolset` 作为 Client 两种都能用（见[在 Pydantic AI 中使用 MCP](../04-integration/04-pydantic-ai-mcp.md) 第 8 节）。Claude Code 作为 Client 也支持 MCP Tasks 扩展（公开 beta，见[在 Claude Code 中接入 MCP](../04-integration/01-claude-code.md)）。
 
-Client 声明：
-
-```json
-{
-  "capabilities": {
-    "tasks": {
-      "list": {},
-      "cancel": {},
-      "requests": {
-        "sampling": { "createMessage": {} },
-        "elicitation": { "create": {} }
-      }
-    }
-  }
-}
-```
-
-含义：Client 同意 Server 把 sampling / elicitation 请求做成 task。
+所以，目前在官方 Python SDK 上做长任务，用句柄模式。
 
 ---
 
-## 4. 工具级声明（tool-level negotiation）
+## 4. 现在就能用的做法：Server 生成句柄
 
-光 Server 声明能力还不够，**单个工具**还可以指定支不支持 task：
-
-```json
-{
-  "name": "render_video",
-  "inputSchema": {...},
-  "execution": {
-    "taskSupport": "required"   // 或 "optional" / "forbidden"
-  }
-}
-```
-
-三种值：
-
-| 值 | 含义 |
-|----|------|
-| `forbidden`（默认） | 这工具**不能**走 task 模式 |
-| `optional` | Client 可以选择走或不走 |
-| `required` | Client **必须**走 task 模式，普通调用 Server 会拒 |
-
-适合"required"的工具：视频转码、批量爬取、Agent 子任务（跑几十分钟）。
-适合"optional"的工具：可能快可能慢，让 Client 决定。
-适合"forbidden"的工具：纯计算 / 简单查询（默认）。
-
----
-
-## 5. 创建 Task：在请求里加 `task` 字段
-
-普通请求：
-
-```json
-{"method":"tools/call","params":{"name":"render","arguments":{...}}}
-```
-
-Task 版：
-
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "render",
-    "arguments": {...},
-    "task": {
-      "ttl": 3600000   // 1 小时，单位 ms
-    }
-  }
-}
-```
-
-立即返回（**不是真正结果**）：
-
-```json
-{
-  "result": {
-    "task": {
-      "taskId": "786512e2-9e0d-44bd-8f29-789f320fe840",
-      "status": "working",
-      "createdAt": "2026-05-20T10:30:00Z",
-      "lastUpdatedAt": "2026-05-20T10:30:00Z",
-      "ttl": 3600000,
-      "pollInterval": 5000
-    }
-  }
-}
-```
-
----
-
-## 6. 轮询 + 拿结果
-
-### 6.1 轮询状态
-
-```json
-{"method":"tasks/get","params":{"taskId":"786512e2-..."}}
-```
-
-响应里看 `status`。Client 按 `pollInterval` 节奏轮询。
-
-### 6.2 拿真实结果
-
-任务进入终态后调：
-
-```json
-{"method":"tasks/result","params":{"taskId":"786512e2-..."}}
-```
-
-返回**和不带 task 时一样的**结果（`CallToolResult`）：
-
-```json
-{
-  "result": {
-    "content": [{"type":"text","text":"渲染完成，文件: xxx.mp4"}],
-    "isError": false,
-    "_meta": {
-      "io.modelcontextprotocol/related-task": {"taskId": "786512e2-..."}
-    }
-  }
-}
-```
-
-`tasks/result` 在任务**未结束**时**阻塞**，直到终态——所以 Client 也可以"一上来就调 tasks/result 等"。
-
-### 6.3 异常路径
-
-任务失败：`status: failed`，`tasks/result` 返回 `isError: true` 的 CallToolResult。
-
-任务被取消：`status: cancelled`，`tasks/result` 返回 JSON-RPC error。
-
----
-
-## 7. 状态变更通知（可选）
-
-Server 可以主动推：
-
-```json
-{
-  "method": "notifications/tasks/status",
-  "params": {
-    "taskId": "786512e2-...",
-    "status": "completed",
-    "lastUpdatedAt": "2026-05-20T10:50:00Z",
-    "ttl": 3600000
-  }
-}
-```
-
-但 **Client 不能依赖**这个通知（spec 允许 Server 不发）——必须有轮询兜底。
-
----
-
-## 8. 取消与列出
-
-### 8.1 取消
-
-```json
-{"method":"tasks/cancel","params":{"taskId":"786512e2-..."}}
-```
-
-Server 尽力停（best-effort），并把 status 改成 `cancelled`。**已经终态**的任务不能取消，会返回 `-32602`。
-
-### 8.2 列出（带分页）
-
-```json
-{"method":"tasks/list","params":{"cursor":null}}
-```
-
-响应是 task 数组 + 可选 `nextCursor`（同 pagination 章节）。
-
-**只列出自己有权限的任务**——Receiver 必须做 auth context 绑定。
-
----
-
-## 9. input_required：任务中途需要更多信息
-
-特殊状态：任务跑一半发现需要用户输入（elicitation）或需要 LLM 采样（sampling）。
-
-### 9.1 流程
-
-```
-Server 在跑 task
-   ↓
-发现需要 elicitation（"请提供信用卡号"）
-   ↓
-Server 把 task 状态改为 input_required
-   ↓
-Client 轮询 tasks/get 时看到 input_required
-   ↓
-Client 立即调 tasks/result（不是为了拿结果，而是为了打开"渠道"）
-   ↓
-Server 在这条渠道上发 elicitation/create
-   ↓
-Client 弹 UI → 用户回答 → Client 返回 elicitation response
-   ↓
-Server 收到输入，task 回到 working
-   ↓
-继续跑直到 completed
-```
-
-这套机制让 task 支持"长流程 + 中途交互"——Agent 工作流的关键。
-
-### 9.2 `io.modelcontextprotocol/related-task`
-
-整个 task 生命周期里所有相关消息（progress、elicitation、log）都要带 `_meta`：
-
-```json
-{
-  "_meta": {
-    "io.modelcontextprotocol/related-task": {"taskId": "786512e2-..."}
-  }
-}
-```
-
-这样 Client 端能把消息关联到正确的 task。
-
----
-
-## 10. Python SDK 现状
-
-> ⚠️ 写作时（2026-05），Python SDK 对 Tasks 的支持还在落地。本节给出**理论代码框架**，实际用法以 SDK release notes 为准。
-
-### 10.1 Server 端声明工具支持 task
+2026-07-28 的变更清单里写得很明白：需要跨调用保持状态的 Server，应当使用由 Server 生成的显式句柄，作为普通的工具参数传递。长任务正好适用：`start_*` 立即返回 `job_id`，`get_*_status` 用来轮询，`cancel_*` 用来取消。它和 Tasks 扩展的语义一一对应，区别只是由模型（而不是协议层）去学会「先提交、再轮询」：
 
 ```python
-from mcp.server.fastmcp import Context, FastMCP
 import asyncio
+import secrets
+import time
+from dataclasses import dataclass, field
+from typing import Literal
 
-mcp = FastMCP(
-    "render-server",
-    # 声明 task 能力（具体 API 可能微调）
-    server_capabilities_overrides={
-        "tasks": {
-            "list": {},
-            "cancel": {},
-            "requests": {"tools": {"call": {}}},
-        }
-    },
-)
+from pydantic import BaseModel
+
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+mcp = MCPServer("render-server")
 
 
-@mcp.tool(
-    # 工具级别声明
-    execution={"taskSupport": "required"},
-)
-async def render_video(input_url: str, ctx: Context) -> str:
-    """渲染视频（耗时几十分钟）"""
-    for i in range(60):
-        await asyncio.sleep(60)  # 每分钟一次进度
-        await ctx.report_progress(progress=i + 1, total=60)
-    return "video_url=https://output/xxx.mp4"
-```
+@dataclass
+class Job:
+    owner: str  # 绑定调用者，防止别人猜 job_id 拿结果（生产里从鉴权上下文取）
+    status: Literal["working", "completed", "failed", "cancelled"] = "working"
+    progress: int = 0
+    result: str | None = None
+    created: float = field(default_factory=time.monotonic)
+    task: asyncio.Task | None = None
 
-### 10.2 Client 端走 task 模式
 
-```python
-# 伪代码——实际 SDK API 待定
-result = await session.call_tool_as_task(
-    name="render_video",
-    arguments={"input_url": "..."},
-    ttl=3600_000,
-)
+JOBS: dict[str, Job] = {}
+TTL_SECONDS = 3600
 
-task_id = result.task.taskId
 
-# 轮询
-while True:
-    status = await session.get_task(task_id)
-    if status.status in ("completed", "failed", "cancelled"):
-        break
-    await asyncio.sleep(status.pollInterval / 1000)
+class JobView(BaseModel):
+    job_id: str
+    status: str
+    progress: int
+    result: str | None = None
+    poll_after_ms: int = 500  # 对应 Tasks 扩展里的 pollIntervalMs
 
-# 拿结果
-final = await session.get_task_result(task_id)
-print(final.content[0].text)
-```
 
-### 10.3 自行实现的过渡方案
+async def _render(job: Job, steps: int) -> None:
+    try:
+        for i in range(steps):
+            await asyncio.sleep(0.1)  # 模拟耗时工作
+            job.progress = int((i + 1) / steps * 100)
+        job.status, job.result = "completed", "video_url=https://output/xxx.mp4"
+    except asyncio.CancelledError:
+        job.status = "cancelled"
+        raise
+    except Exception:
+        job.status = "failed"
 
-在 SDK 完整支持前，可以用**普通 Tool + 内部 Job 表**自己实现 task 语义：
 
-```python
-# 一个粗糙但能用的"task 雏形"
-import uuid
+def _gc() -> None:
+    now = time.monotonic()
+    for jid in [j for j, v in JOBS.items() if now - v.created > TTL_SECONDS and v.status != "working"]:
+        del JOBS[jid]  # 强制 TTL 清理，避免泄漏
 
-_jobs: dict[str, dict] = {}
 
-@mcp.tool()
-async def submit_render(input_url: str) -> dict:
-    """提交渲染任务，返回 jobId"""
-    job_id = str(uuid.uuid4())
-    _jobs[job_id] = {"status": "running", "result": None}
-    asyncio.create_task(_do_render(job_id, input_url))
-    return {"jobId": job_id, "status": "running"}
+def _get(job_id: str, owner: str) -> Job:
+    job = JOBS.get(job_id)
+    if job is None or job.owner != owner:  # 对「不存在」和「不是你的」返回同样的错误
+        raise ToolError(f"没有这个任务: {job_id}")
+    return job
+
 
 @mcp.tool()
-async def get_render_status(job_id: str) -> dict:
-    return _jobs.get(job_id, {"status": "not_found"})
+async def start_render(input_url: str, steps: int = 10) -> JobView:
+    """提交渲染任务，立即返回 job_id。随后用 get_render_status 轮询（按 poll_after_ms 间隔）。"""
+    _gc()
+    job_id = secrets.token_urlsafe(16)  # 高熵、不可猜
+    job = Job(owner="demo-user")
+    job.task = asyncio.create_task(_render(job, steps))
+    JOBS[job_id] = job
+    return JobView(job_id=job_id, status=job.status, progress=0)
+
 
 @mcp.tool()
-async def get_render_result(job_id: str) -> str:
-    job = _jobs[job_id]
-    if job["status"] != "completed":
-        raise ToolError(f"任务未完成: {job['status']}")
-    return job["result"]
+async def get_render_status(job_id: str) -> JobView:
+    """查询任务状态；status=completed 时 result 就是最终结果。"""
+    job = _get(job_id, "demo-user")
+    return JobView(job_id=job_id, status=job.status, progress=job.progress, result=job.result)
+
+
+@mcp.tool()
+async def cancel_render(job_id: str) -> JobView:
+    """请求取消任务（协作式：已完成的任务取消无效）。"""
+    job = _get(job_id, "demo-user")
+    if job.status == "working" and job.task:
+        job.task.cancel()
+        await asyncio.sleep(0)
+    return JobView(job_id=job_id, status=job.status, progress=job.progress, result=job.result)
 ```
 
-这是不规范的"穷人版 task"——LLM 要学会先调 submit、再 status、再 result。规范版 task 让协议层处理这些。
+自测（`python demos/server/07_long_job_handle.py`，进程内运行，实际输出）：
+
+```
+提交: working
+  轮询: working 0%
+  轮询: working 20%
+  ...
+  轮询: completed 100%
+结果: video_url=https://output/xxx.mp4
+取消后: cancelled
+猜 id: True Error executing tool get_render_status: 没有这个任务: guess
+```
+
+这个版本有几处是有意做的安全设计，对应 Tasks 规范对 Receiver 的要求：
+
+| 风险 | 做法（代码里已经实现） |
+|------|---------------------|
+| 句柄被猜到 | 用 `secrets.token_urlsafe(16)` 生成，熵足够高 |
+| 读到别人的任务 | `Job.owner` 绑定调用者；「不存在」和「不是你的」返回同一条错误，不暴露任务是否存在 |
+| 资源泄漏 | `_gc()` 强制按 TTL 清理；生产环境再加上每用户并发上限和队列长度监控 |
+| 取消不彻底 | 取消是协作式的，`task.cancel()` 之后以任务自己写入的状态为准 |
+
+> 这个示例把任务放在进程内存里，进程一重启任务就丢了；多副本部署时，句柄也只在创建它的那个副本上有效。要做到崩溃后还能取回结果，任务状态必须存到共享存储（Redis、数据库）里，工作线程也要能从存储中恢复。Tasks 扩展要求任务在返回响应之前就完成持久化，原因就在这里。
+
+### 要不要让模型来轮询
+
+句柄模式把轮询交给了 LLM，每次 `get_render_status` 都是一轮工具调用，既费 token 也不稳定。有几种折中办法：
+
+- 在 Server 端多等一会儿：`get_render_status(job_id, wait_seconds=20)` 在 Server 里最多等 20 秒再返回，减少无效轮询
+- 任务本身只要一两分钟的话，直接用 `ctx.report_progress`（见[日志、进度、取消与 Ping](06-logging-progress-ping.md)）并调高客户端超时就够了
+- 由 Host 轮询：Agent 框架在 Host 端封装轮询逻辑，模型只看到「提交」和「完成」
 
 ---
 
-## 11. 什么时候**该**用 Tasks
+## 5. 什么时候该用异步长任务
 
-| 场景 | 用 Task 吗 |
+| 场景 | 要不要 |
 |------|-----------|
-| 快速查询、几百毫秒 | ❌ 普通调用 |
-| 1-10 秒，可能有进度 | ⚠️ 不必，progress notification 就够 |
-| 30 秒 - 几分钟 | ✅ 强烈推荐 |
-| 几十分钟 - 数小时 | ✅ 必需 |
-| 需要中途让用户确认 | ✅ 用 input_required |
-| 失败可能要重试拿结果 | ✅ task 有 TTL 缓存 |
-| 跨 session 也想拿到结果 | ✅ task 是持久化的 |
+| 快速查询，几百毫秒 | 不需要，普通调用即可 |
+| 1–10 秒，可能有进度 | 不必，progress 通知就够了 |
+| 10–30 秒 | 先看客户端和网关的超时设置：够用就用普通调用加 progress 通知，接近上限就按下一行处理 |
+| 30 秒到几分钟 | 用句柄模式（或 Tasks 扩展），同时调高客户端超时 |
+| 几十分钟到几小时 | 必须用，而且状态要持久化 |
+| 需要中途让用户确认 | 句柄模式下让 `get_*` 返回「待确认」，再配一个 `confirm_*` 工具；协议层面用 `input_required` + `tasks/update` |
+| 希望客户端崩溃重连后还能拿到结果 | 句柄必须持久化 |
 
 ---
 
-## 12. 安全考虑
+## 6. 安全考虑
 
 | 风险 | 缓解 |
 |------|------|
-| **task id 被猜出来** | 必须高熵 UUID v4 / v7 |
-| **跨用户拿别人的 task** | Receiver 必须把 task 绑定到 auth context |
-| **DoS（用户疯狂提交 task）** | 限流 + 每用户并发上限 + 强制 TTL 上限 |
-| **资源泄漏** | 严格 TTL 清理；监控 task 队列长度 |
+| task id 被猜到 | 用高熵的 UUID v4/v7 或 `secrets.token_urlsafe` |
+| 拿到别人的 task | 把任务绑定到鉴权主体（OAuth `subject`） |
+| DoS（用户大量提交任务） | 限流、每用户并发上限、强制的 TTL 上限 |
+| 资源泄漏 | 严格按 TTL 清理，监控队列长度 |
+| 任务结果里有敏感数据 | TTL 到期就删除，日志里不要打印结果 |
 
 ---
 
-## 13. 常见坑
+## 7. 常见坑
 
 | 坑 | 排查 |
 |----|------|
-| **Client 没声明 tasks 能力却发 task 请求** | Server 应忽略 task 字段、按普通请求处理 |
-| **Server 要求 required taskSupport 但 Client 不走 task** | Server 返回 -32601 |
-| **轮询太频繁** | 遵守 `pollInterval`，别 100ms 一次 |
-| **拿到 input_required 但不知道做什么** | 立即调 tasks/result 开渠道，等 elicitation/sampling |
-| **TTL 过期后丢结果** | 程序设计要把"拿到结果就立刻处理掉"放优先级，别长时间不取 |
+| 照着 2025 版的文章写 `tasks/result`、`tasks/list`、`taskSupport` | 2026-07-28 的扩展里这些都没有了，改用 `tasks/get`（终态直接带结果）、`tasks/update`、`tasks/cancel` |
+| 以为 `mcp` 2.3 自带 Tasks | 没有；用句柄模式，或者基于 `Extension` 自己实现 |
+| 轮询太频繁 | 遵守 `pollIntervalMs`（句柄模式下自己返回 `poll_after_ms`），别每 100ms 查一次 |
+| 任务只存在进程内存里 | 重启就丢；多副本时句柄只在创建它的副本上有效 |
+| TTL 过期后结果没了 | 拿到结果就马上处理，别放着不取 |
+| 以为取消一定生效 | 取消是协作式的，以任务最终的状态为准 |
 
 ---
 
-## 14. 下一步
+## 8. 下一步
 
-- 📖 错误处理（Tasks 错误码 + 普通错误） → [08-errors-validation.md](./08-errors-validation.md)
-- 📖 客户端 Sampling（task 的杀手锏场景） → 03-client/03-sampling
-- 📖 远程部署（task 在多节点场景） → 05-production/01-remote-mcp
+- 错误处理：[错误处理与参数校验](./08-errors-validation.md)
+- Server 中途问用户（MRTR，Tasks 的 `input_required` 和它形状相同）：[Elicitation、Roots 与多轮请求（MRTR）](../03-client/04-roots-elicitation.md)
+- 远程部署，多副本下的任务状态：[用 Streamable HTTP 部署远程 MCP](../05-production/01-remote-mcp.md)
 
 ## 参考资料
 
-- Tasks spec：https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks
-- SEP-1686 Tasks 提案：https://modelcontextprotocol.io/seps/1686-tasks
-- Tools 中 taskSupport 字段：https://modelcontextprotocol.io/specification/2025-11-25/server/tools
+- Tasks 扩展概览：https://modelcontextprotocol.io/extensions/tasks/overview
+- 扩展规范与 schema：https://github.com/modelcontextprotocol/ext-tasks
+- SEP-2663（Tasks 扩展）：https://modelcontextprotocol.io/seps/2663-tasks-extension
+- 变更清单（Tasks 移出核心）：https://modelcontextprotocol.io/specification/2026-07-28/changelog
+- Python SDK 迁移指南 "Experimental Tasks support removed"：https://py.sdk.modelcontextprotocol.io/migration/
+- 2025-11-25 版 Tasks：https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks

@@ -1,4 +1,4 @@
-"""自检脚本：验证 MCP SDK 安装 & 基本功能
+"""自检脚本：验证 MCP SDK 安装 & 基本功能（mcp 2.x）
 
 跑法:
     python demos/basics/00_self_check.py
@@ -10,44 +10,46 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from importlib.metadata import PackageNotFoundError, version
 
 
 def check_python_version() -> bool:
     major, minor = sys.version_info[:2]
-    ok = (major, minor) >= (3, 10)
-    print(f"{'✅' if ok else '❌'} Python {major}.{minor} (需要 >=3.10)")
+    ok = (major, minor) >= (3, 11)
+    print(f"{'✅' if ok else '❌'} Python {major}.{minor} (需要 >=3.11)")
     return ok
 
 
 def check_mcp_import() -> bool:
     try:
-        import mcp  # noqa: F401
-        from mcp.server.fastmcp import FastMCP  # noqa: F401
-        from mcp import ClientSession  # noqa: F401
-        from mcp.client.stdio import stdio_client, StdioServerParameters  # noqa: F401
+        from mcp import Client, StdioServerParameters  # noqa: F401
+        from mcp.server import MCPServer  # noqa: F401
 
-        version = getattr(mcp, "__version__", "unknown")
-        print(f"✅ mcp == {version}")
+        try:
+            v = version("mcp")
+        except PackageNotFoundError:
+            v = "unknown"
+        major = int(v.split(".")[0]) if v[0].isdigit() else 0
+        print(f"{'✅' if major >= 2 else '⚠️ '} mcp == {v} (本手册基于 2.x)")
         return True
     except ImportError as e:
         print(f"❌ mcp 导入失败：{e}")
-        print("   修复：pip install -U mcp")
+        print("   修复：pip install -U 'mcp>=2.3'")
+        print("   若你的环境是 mcp 1.x，把 `from mcp.server import MCPServer` 换成 `from mcp.server.fastmcp import FastMCP`")
         return False
 
 
 async def check_client_server_roundtrip() -> bool:
-    """启一个临时 Server，自己当 Client 连它，跑一遍完整 initialize/list/call"""
-    import os
+    """启一个临时 Server，自己当 Client 连它，跑一遍完整流程"""
     import pathlib
     import tempfile
 
-    from mcp import ClientSession
-    from mcp.client.stdio import StdioServerParameters, stdio_client
+    from mcp import Client, StdioServerParameters
 
     inline_server = """
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
-mcp = FastMCP("self-check")
+mcp = MCPServer("self-check")
 
 @mcp.tool()
 def ping(msg: str = "hi") -> str:
@@ -61,28 +63,19 @@ mcp.run()
 
     params = StdioServerParameters(command=sys.executable, args=[str(tmp)])
     try:
-        async with stdio_client(params) as (r, w):
-            async with ClientSession(r, w) as session:
-                init = await session.initialize()
-                assert init.serverInfo.name == "self-check", f"serverInfo 异常: {init.serverInfo}"
-
-                tools = await session.list_tools()
-                assert any(t.name == "ping" for t in tools.tools), "ping 工具没找到"
-
-                result = await session.call_tool("ping", {"msg": "ok"})
-                text = result.content[0].text
-                assert "pong: ok" in text, f"返回值异常: {text}"
-
-                print("✅ Client/Server 完整流程跑通 (initialize → list_tools → call_tool)")
-                return True
+        async with Client(params) as client:
+            assert client.server_info and client.server_info.name == "self-check", client.server_info
+            tools = await client.list_tools()
+            assert any(t.name == "ping" for t in tools.tools), "ping 工具没找到"
+            result = await client.call_tool("ping", {"msg": "ok"})
+            assert "pong: ok" in result.content[0].text, result
+            print(f"✅ Client/Server 完整流程跑通 (协议 {client.protocol_version}: 协商 → list_tools → call_tool)")
+            return True
     except Exception as e:
         print(f"❌ Client/Server 自检失败：{e!r}")
         return False
     finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        tmp.unlink(missing_ok=True)
 
 
 def main() -> int:

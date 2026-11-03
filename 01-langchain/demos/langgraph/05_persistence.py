@@ -5,6 +5,8 @@ Checkpointer + Store：多轮 + 跨会话偏好。
 """
 from typing_extensions import Annotated, TypedDict
 
+import os
+
 from dotenv import load_dotenv
 
 from langchain_core.messages import BaseMessage
@@ -21,7 +23,7 @@ class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash"), temperature=0)
 
 
 def chat(state: State, *, store, config):

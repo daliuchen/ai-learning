@@ -1,78 +1,78 @@
 # MCP Server 08：错误处理与参数校验
 
-> **一句话**：MCP 错误分两类——**协议错误**（JSON-RPC error，模型看不到、不能自我纠正）和**工具执行错误**（result.isError=true，模型能看到、可自我修正）。区分好这两种 + 输入用 Pydantic 严格校验 = 90% 错误处理工作。
+> Python SDK 2.x 里，工具出错有三种去向：`ToolError` 让模型看到错误并自行纠正；`MCPError` 是协议错误，模型看不到；其它异常算崩溃，模型只知道失败了，堆栈留在 Server 日志里。再加上 schema 校验会在函数被调用之前拦下大部分坏参数。把这几条分清楚，错误处理的大部分工作就完成了。
 
 ---
 
-## 1. 两类错误的本质区别
+## 1. 错误的三种去向
 
-| 维度 | 协议错误（Protocol Error） | 工具执行错误（Tool Execution Error） |
-|------|---------------------------|--------------------------------------|
-| 表现形式 | JSON-RPC `error` 字段 | Result `isError: true` |
-| 错误码 | -32xxx | 无（在 content text 里） |
-| 模型能否看见 | 多数 Host **不会**转给模型 | **会**转给模型 |
-| 是否可自我纠正 | 几乎不可能 | 是 |
-| 典型例子 | 工具名不存在、参数 schema 不匹配 | 业务规则违反、外部 API 失败、值越界 |
+| 你做的事 | Client 收到什么 | 模型看到什么 | 服务端日志 |
+|---------|-----------------|------------|-----------|
+| `raise ToolError("...")` | 正常结果，`is_error=True`，消息在 `content` 里（带 `Error executing tool xxx:` 前缀） | 消息原文 | 一行 INFO，无堆栈 |
+| `raise MCPError(code, message, data)` | JSON-RPC error，`call_tool` 直接抛出 `MCPError` | 没有结果可读，由 Host 处理 | 视情况而定 |
+| 抛出其它任何异常（`KeyError` 等） | `is_error=True`，内容只有 `Error executing tool xxx` | 只知道失败了，不知道原因（内部细节不外泄） | ERROR + 完整堆栈 |
+| 参数不符合 schema | SDK 在调用你的函数之前就拒绝，同样是 `is_error=True`，附 Pydantic 校验信息 | 能看到，可以纠正 | INFO |
+| 资源不存在 | `-32602`，`data` 里带 URI | 不适用（资源没有 isError 这条路） | INFO |
 
-**判断标准**：错误信息**对 LLM 有用、能让它换种方式重试**吗？
+判断用哪种，只要问一句：**更聪明的模型能避免这个错误吗？** 能，就用 `ToolError`；不能（缺权限、Server 状态不对、请求本身就该被拒绝），就用 `MCPError`。
 
-- 有用 → ToolError / isError
-- 没用（说明是 bug） → 让它变成协议错误
+> 在 v2 SDK 里，Pydantic 校验失败不会变成协议错误 -32602，坏参数得到的是 `is_error=True` 的工具结果，模型读得到，也能重试；工具里抛出真实异常也不会得到 -32603，模型只会收到 `Error executing tool xxx`。只有 `MCPError` 才是协议错误。v1 的 `McpError` 改名为 `MCPError`，导入路径是 `from mcp import MCPError`。
 
 ---
 
 ## 2. 标准 JSON-RPC 错误码
 
-| Code | 名称 | MCP 里何时出现 |
+| Code | 名称 | 在 MCP 里何时出现 |
 |------|------|----------------|
-| -32700 | Parse error | 收到了非 JSON / 损坏 JSON |
-| -32600 | Invalid Request | 不是合法 JSON-RPC 2.0 / task 要求未满足 |
-| -32601 | Method not found | 调用了 Server 不支持的 method |
-| -32602 | Invalid params | 参数缺失 / 类型错 / task 取消时已终态 |
-| -32603 | Internal error | Server 内部异常 |
-| -32000..-32099 | Server-defined | Server 自定义业务错误 |
+| -32700 | Parse error | 收到的不是 JSON，或 JSON 已损坏 |
+| -32600 | Invalid Request | 不是合法的 JSON-RPC 2.0 |
+| -32601 | Method not found | 调用了 Server 不支持的 method（包括 2026 版已移除的 `ping`；在 `MCPServer` 上调用不存在的工具名不算，那是 `is_error=True`） |
+| -32602 | Invalid params | 参数缺失或类型错误；资源不存在也用它（2025 版是 -32002） |
+| -32603 | Internal error | Server 内部异常（消息会被抹掉） |
+| -32000..-32019 | 实现自定义 | 各 SDK 和 Server 自行使用（已有用法保留）；SDK 的请求超时是 -32001（v1 是 408） |
+| -32020..-32099 | MCP 规范保留 | 2026-07-28 起划出的区段 |
 
-### MCP 应用层错误码（在 -32000..-32099 区段）
+2026-07-28 在保留段里定义的错误：
 
 | Code | 含义 |
 |------|------|
-| -32002 | Resource not found |
-| 其它 | 由 spec 后续约定 |
+| -32020 | HeaderMismatch：HTTP 的 `Mcp-Method` / `Mcp-Name` 头与 body 不一致 |
+| -32021 | MissingRequiredClientCapability：Server 需要的 Client 能力没有声明 |
+| -32022 | UnsupportedProtocolVersion：`data.supported` 里列出支持的版本 |
+
+这些常量在 `mcp.types` 里有定义，比如 `INVALID_PARAMS`、`INTERNAL_ERROR`、`METHOD_NOT_FOUND`，不要在代码里写魔法数字。
 
 ---
 
 ## 3. Server 端：输入校验
 
-最常见的"参数错"——Pydantic 已经帮你做掉一大半：
+最常见的参数错误，Pydantic 在你的函数被调用之前就拦住了：
 
 ```python
-from typing import Literal
-from pydantic import BaseModel, Field
-from mcp.server.fastmcp import FastMCP
+from typing import Annotated, Literal
+from pydantic import Field
+from mcp.server import MCPServer
 
-mcp = FastMCP("orders")
-
-class OrderSearchInput(BaseModel):
-    user_id: str = Field(min_length=1, max_length=64)
-    days: int = Field(default=7, ge=1, le=90)
-    status: Literal["paid", "shipped", "refunded"] | None = None
+mcp = MCPServer("orders")
 
 @mcp.tool()
-def search_orders(user_id: str, days: int = 7, status: str | None = None) -> list:
+def search_orders(
+    user_id: Annotated[str, Field(min_length=1, max_length=64)],
+    days: Annotated[int, Field(ge=1, le=90)] = 7,
+    status: Literal["paid", "shipped", "refunded"] | None = None,
+) -> list[dict]:
     """搜索订单"""
-    # FastMCP 已经按签名做了 Pydantic 校验：
-    # - user_id 不能为空字符串
-    # - days 1-90
-    # - status 必须是三个之一
-    # 校验失败 → SDK 自动返回 -32602 协议错误
+    # 能走到这里，说明：user_id 非空、days 在 1-90、status 是三个之一
     return []
 ```
 
-但 Pydantic 防御不了**业务规则**：
+校验失败时，模型收到的是类似 `Input should be less than or equal to 90` 的工具错误，它会自己改参数重试。类型注解已经保证的东西，就不要在函数里再校验一遍了。
+
+Pydantic 管不了业务规则，业务规则用 `ToolError`：
 
 ```python
-from mcp.server.fastmcp.exceptions import ToolError
 from datetime import date
+from mcp.server.mcpserver.exceptions import ToolError
 
 @mcp.tool()
 def book_flight(date_str: str, seats: int) -> dict:
@@ -80,21 +80,13 @@ def book_flight(date_str: str, seats: int) -> dict:
     try:
         flight_date = date.fromisoformat(date_str)
     except ValueError:
-        # 业务校验失败：返回友好错误让 LLM 自我纠正
-        raise ToolError(
-            f"日期格式错误: '{date_str}'，请用 ISO 格式 YYYY-MM-DD，比如 2026-05-20"
-        )
-
+        raise ToolError(f"日期格式错误: '{date_str}'，请用 ISO 格式 YYYY-MM-DD，比如 2026-12-25") from None
     if flight_date < date.today():
         raise ToolError(f"日期 {flight_date} 已过去，不能预订")
-
-    if seats < 1 or seats > 9:
-        raise ToolError(f"座位数必须在 1-9 之间，你给的是 {seats}")
-
     return {"booking_id": "abc"}
 ```
 
-`ToolError` → FastMCP 自动转成 `result.isError = true` + 错误文本，LLM 能看见并重试。
+> 低层 `Server` 类不会替你校验入参 schema（在 v2 的低层 API 里，schema 只是一个声明）。用低层 API 时要自己校验，而且异常不会自动变成 `is_error`，需要自己返回 `CallToolResult(is_error=True, ...)`。
 
 ---
 
@@ -102,10 +94,11 @@ def book_flight(date_str: str, seats: int) -> dict:
 
 ```python
 import httpx
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 
-mcp = FastMCP("external")
+mcp = MCPServer("external")
 
 @mcp.tool()
 async def fetch_user(user_id: str, ctx: Context) -> dict:
@@ -113,38 +106,34 @@ async def fetch_user(user_id: str, ctx: Context) -> dict:
     try:
         r = await app.http.get(f"/users/{user_id}")
     except httpx.TimeoutException:
-        # 超时是"可重试"错误，告诉 LLM 它可以再试一次
-        raise ToolError(f"上游 API 超时，请稍后重试")
+        raise ToolError("上游 API 超时，可以稍后重试一次") from None
     except httpx.NetworkError:
-        # 网络错误：让 LLM 知道是临时问题
-        raise ToolError("网络异常，请稍后重试")
+        raise ToolError("网络异常，请稍后重试") from None
 
     if r.status_code == 404:
         raise ToolError(f"用户不存在: {user_id}")
     if r.status_code == 429:
         raise ToolError("被限流，请稍后再试")
     if r.status_code >= 500:
-        # 5xx 是 Server 端 bug，**抛真异常**——Host 端会包成 -32603
-        # 这样 LLM 不会一直重试一个失败的服务
+        # 上游 5xx：不是模型的错、也不是它能修的。让异常冒出去：
+        # 模型只会看到 "Error executing tool fetch_user"，堆栈进你的 ERROR 日志，
+        # 于是生产日志在 WARNING 级别能「平时安静、真出事才响」
         r.raise_for_status()
-
     return r.json()
 ```
 
-**判断**：
-- 4xx（输入错） → `ToolError`，告诉 LLM 改输入
-- 408 / 429 / 503（临时问题） → `ToolError`，提示 LLM 稍后重试
-- 5xx（服务问题） → 抛真异常 → 协议错误，让 Host 终止重试
+（这里的 `httpx` 是你自己代码的依赖；官方 SDK 2.x 内部换成了 `httpx2`，两者可以共存。）
+
+按状态码区分处理：4xx 是输入有问题，用 `ToolError` 告诉 LLM 去改输入；408、429 是临时问题，也用 `ToolError`，提示稍后重试；5xx 是上游服务出了问题，直接抛出真实异常，模型只知道失败了，原因你从日志里查（503 这类明确可以稍后重试的，也可以像 429 一样单独转成 `ToolError`）。
 
 ---
 
 ## 5. Server 端：内部异常
 
-未捕获异常 → SDK 自动包成 `-32603 Internal error`。但你应该**永远**主动 catch：
+意料之外的异常由 SDK 自动处理：给模型返回 `Error executing tool xxx`，把堆栈记为 ERROR。SQL、文件路径、token 片段这些内部细节不会泄漏给模型，这是 v2 默认的安全做法。所以没必要为了防泄漏到处写 `except Exception`，只有想给模型一个有用的提示时，才主动转成 `ToolError`：
 
 ```python
 import logging
-
 log = logging.getLogger(__name__)
 
 @mcp.tool()
@@ -153,42 +142,41 @@ async def risky_op(x: int) -> int:
         return some_business_logic(x)
     except KeyError as e:
         log.exception("missing key in result")
-        raise ToolError(f"内部数据缺失: {e}，请联系管理员")
-    except Exception as e:
-        log.exception("unexpected error")
-        # 不暴露内部堆栈给 LLM——只给安全的提示
-        raise ToolError("发生了内部错误，已记录日志，请稍后重试")
+        raise ToolError("内部数据缺失，已记录日志，请换个输入再试") from None   # from None：别把原异常链带出去
 ```
 
-**安全提醒**：错误消息**不要泄漏内部信息**（数据库 schema、文件路径、token 片段）。LLM 是不可信终端，Host 可能把它转给最终用户。
+> 写进 `ToolError` 的消息会原样交给模型，Host 还可能把它展示给最终用户，所以别把数据库 schema、文件路径、token 片段放进去。
 
 ---
 
 ## 6. Resource 错误
 
-Resource 错误用标准 JSON-RPC error，**不**用 isError：
+资源没有 `isError`，只有协议错误：
 
 ```python
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ResourceError, ResourceNotFoundError
 
-mcp = FastMCP("docs")
+mcp = MCPServer("docs")
 
 @mcp.resource("docs://{name}")
 def doc(name: str) -> str:
     path = SAFE_DOCS_DIR / name
-    if not path.exists():
-        # ✅ 让 SDK 包成 -32002
-        raise FileNotFoundError(name)
+    if not path.is_file():
+        raise ResourceNotFoundError(f"没有这篇文档: {name}")   # → -32602，data 里带 {"uri": "docs://..."}
     return path.read_text()
 ```
 
-FastMCP 把 `FileNotFoundError` / `KeyError` 等标准 Python 异常映射到合适的 MCP 错误码。
+- `ResourceNotFoundError` 对应 `-32602`，`data.uri` 是请求的 URI
+- `ResourceError` 对应 `-32603` 加上你的消息（属于预料之中的失败，记 INFO 日志，不带堆栈）
+- 其它异常对应 `-32603`，只带 URI，堆栈写进 ERROR 日志
+- 在 Client 侧，资源不存在在 v1 里是 `-32002`，现在统一为 `-32602`；写客户端的兜底逻辑时两个码都要处理
 
 ---
 
-## 7. 错误信息写作模板
+## 7. 错误信息怎么写
 
-LLM 读你的错误信息时是想"我该怎么改请求"。好的错误：
+LLM 读错误信息，是为了知道下一次请求该怎么改。好的错误信息是这样的：
 
 ```
 ❌ 不好的：
@@ -202,33 +190,33 @@ LLM 读你的错误信息时是想"我该怎么改请求"。好的错误：
 "用户不存在: u_123（提示：用户 ID 应为 u_ 前缀 + 6 位数字）"
 ```
 
-模板：**[问题][实际值] + [期望值或纠正方法]**。
+写法可以套一个模板：问题是什么、实际值是多少，再加上期望值或纠正方法。
 
 ---
 
-## 8. Client 端：消费错误
+## 8. Client 端：处理错误
 
 ```python
-result = await session.call_tool("book_flight", {"date_str": "wrong"})
+from mcp import Client, MCPError
 
-if result.isError:
-    # 工具执行错误：拿到错误内容，决定是否让 LLM 重试
-    error_text = result.content[0].text
-    print(f"工具失败但可重试: {error_text}")
+result = await client.call_tool("book_flight", {...})
+if result.is_error:
+    # 工具执行错误（含 ToolError、崩溃、schema 校验失败）：消息在 content 里，交给模型决定是否重试
+    print("工具失败:", result.content[0].text)
 else:
-    print(f"成功: {result.content[0].text}")
+    print("成功:", result.structured_content or result.content[0].text)
 ```
 
-**如果是协议错误**（参数 schema 错、工具不存在），SDK 直接抛 `mcp.shared.exceptions.McpError`：
+协议错误（Server 手动抛出的 `MCPError`、版本不支持、方法不存在、请求超时等）会让 `call_tool` 直接抛出 `MCPError`，不会有 result：
 
 ```python
-from mcp.shared.exceptions import McpError
-
 try:
-    result = await session.call_tool("nonexistent_tool", {})
-except McpError as e:
-    print(f"协议错误: code={e.error.code}, msg={e.error.message}")
+    await client.call_tool("admin_only", {})
+except MCPError as e:
+    print(f"协议错误: code={e.code}, msg={e}")     # v2：e.code；v1 是 e.error.code
 ```
+
+> 调用 `MCPServer` 上不存在的工具并不会抛异常，而是返回 `is_error=True` 和 `Unknown tool: xxx`。只有 Server 回的是 JSON-RPC error 时，`Client` 才会抛 `MCPError`。
 
 ---
 
@@ -237,18 +225,26 @@ except McpError as e:
 ```python
 # demos/server/08_errors_booking.py
 import asyncio
+import hashlib
+import logging
+import sys
 from datetime import date
+from typing import Annotated
 
 from pydantic import BaseModel, Field
-from mcp.server.fastmcp import Context, FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
 
-mcp = FastMCP("booking")
+from mcp import MCPError
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import INVALID_PARAMS, ToolAnnotations
 
-FAKE_DB = {
-    "u_001": {"name": "Alice", "tier": "vip"},
-    "u_002": {"name": "Bob", "tier": "standard"},
-}
+logger = logging.getLogger("booking")
+mcp = MCPServer("booking")
+
+FAKE_DB = {"u_001": {"name": "Alice", "tier": "vip"}, "u_002": {"name": "Bob", "tier": "standard"}}
+IDEMPOTENT_RESULTS: dict[str, dict] = {}
+
 
 class BookingResult(BaseModel):
     booking_id: str
@@ -257,99 +253,88 @@ class BookingResult(BaseModel):
     user_name: str
 
 
-@mcp.tool()
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True))
 async def book_flight(
-    user_id: str = Field(min_length=1),
-    flight_no: str = Field(pattern=r"^[A-Z]{2}\d{2,4}$"),
-    date_str: str = Field(description="YYYY-MM-DD"),
-    seats: int = Field(ge=1, le=9),
-    ctx: Context = None,
+    user_id: Annotated[str, Field(min_length=1)],
+    flight_no: Annotated[str, Field(pattern=r"^[A-Z]{2}\d{2,4}$", description="航班号，如 CA1981")],
+    date_str: Annotated[str, Field(description="YYYY-MM-DD")],
+    seats: Annotated[int, Field(ge=1, le=9)],
+    idempotency_key: Annotated[str, Field(description="客户端生成的幂等键；重试用同一个")],
 ) -> BookingResult:
-    """订机票。
+    """订机票：校验日期 / 用户 / 座位数；相同 idempotency_key 重试不会重复下单。"""
+    if (hit := IDEMPOTENT_RESULTS.get(idempotency_key)) is not None:
+        return BookingResult(**hit)  # 重放保护
 
-    会做：
-    1. 日期格式 / 不能过去
-    2. 用户存在性
-    3. VIP / Standard 限座位数
-    """
-    # 1. 日期校验
     try:
         flight_date = date.fromisoformat(date_str)
     except ValueError:
-        raise ToolError(
-            f"日期格式错: '{date_str}'，期望 YYYY-MM-DD，例如 2026-12-25"
-        )
+        # 模型能纠正的错误 → ToolError（模型读得到消息）
+        raise ToolError(f"日期格式错: '{date_str}'，期望 YYYY-MM-DD，例如 2026-12-25") from None
     if flight_date < date.today():
-        raise ToolError(f"日期 {flight_date} 已过去")
+        raise ToolError(f"日期 {flight_date} 已过去，不能预订")
 
-    # 2. 用户校验
-    if user_id not in FAKE_DB:
-        raise ToolError(
-            f"用户不存在: {user_id}（提示：UID 应为 u_xxx 格式）"
-        )
-    user = FAKE_DB[user_id]
-
-    # 3. 业务规则
+    user = FAKE_DB.get(user_id)
+    if user is None:
+        raise ToolError(f"用户不存在: {user_id}（提示：UID 应为 u_ + 3 位数字）")
     if user["tier"] == "standard" and seats > 4:
-        raise ToolError(
-            f"普通用户单次最多订 4 个座位，你的等级 'standard' 申请 {seats} 个"
-        )
+        raise ToolError(f"普通用户单次最多订 4 个座位，你申请了 {seats} 个")
 
-    await ctx.info(f"为 {user['name']} 订 {flight_no} 共 {seats} 座")
-    await asyncio.sleep(0.5)  # 模拟下单
-
-    return BookingResult(
-        booking_id="bk_" + str(abs(hash(f"{user_id}{flight_no}{date_str}")))[:8],
-        flight=flight_no,
-        seats=seats,
-        user_name=user["name"],
-    )
+    await asyncio.sleep(0.05)  # 模拟下单
+    booking_id = "bk_" + hashlib.sha1(f"{user_id}{flight_no}{date_str}".encode()).hexdigest()[:8]
+    result = BookingResult(booking_id=booking_id, flight=flight_no, seats=seats, user_name=user["name"])
+    IDEMPOTENT_RESULTS[idempotency_key] = result.model_dump()
+    return result
 
 
-if __name__ == "__main__":
-    mcp.run()
+@mcp.tool()
+def admin_only(ctx: Context) -> str:
+    """演示 MCPError：模型再聪明也救不了的错误（请求本身该被拒绝）→ 协议错误，模型看不到"""
+    raise MCPError(INVALID_PARAMS, "caller lacks the required scope 'admin'")
+
+
+@mcp.tool()
+def buggy() -> str:
+    """演示崩溃：未预料的异常。模型只会看到 'Error executing tool buggy'，堆栈在 Server 日志"""
+    return {}["missing"]  # KeyError
 ```
 
-在 Inspector 里试：
+进程内自测（`python demos/server/08_errors_booking.py --selftest`，实际输出）：
 
-- `book_flight("u_001", "CA1981", "2026-12-25", 2)` → ✅ 成功
-- `book_flight("u_001", "CA1981", "2020-01-01", 2)` → isError: 日期已过去
-- `book_flight("u_002", "CA1981", "2026-12-25", 8)` → isError: 标准用户超限
-- `book_flight("u_999", "CA1981", "2026-12-25", 2)` → isError: 用户不存在
-- `book_flight("u_001", "invalid", "2026-12-25", 2)` → **协议错误**（Pydantic 拦下，pattern 不匹配）
+```
+成功     : False {'booking_id': 'bk_e9b8237e', 'flight': 'CA1981', 'seats': 2, 'user_name': 'Alice'}
+幂等重放 : True
+日期已过     : is_error=True | Error executing tool book_flight: 日期 2020-01-01 已过去，不能预订
+普通用户超限   : is_error=True | Error executing tool book_flight: 普通用户单次最多订 4 个座位，你申请了 8 个
+用户不存在    : is_error=True | Error executing tool book_flight: 用户不存在: u_999（提示：UID 应为 u_ + 3 位数字）
+pattern 不匹配: is_error=True | Error executing tool book_flight: 1 validation error for book_flightAr
+崩溃     : True | Error executing tool buggy
+MCPError : -32602 | caller lacks the required scope 'admin'
+```
 
-LLM 看到这些错误能学到 → 自动改输入重试。
+从这段输出可以总结出规则：除了 `MCPError`，其它所有失败都是「调用成功，`is_error=True`」，区别只在模型读到的内容。`ToolError` 和 schema 校验给的是原文，崩溃只给一句 `Error executing tool xxx`。
 
 ---
 
-## 10. 重试策略与幂等性
+## 10. 重试与幂等
 
-重试是 Client / Host 的事，Server 写代码时要让重试**安全**：
+重试由 Client 或 Host 负责，Server 写代码时要保证重试是安全的：
 
-| 工具类型 | 重试安全？ | 怎么做 |
+| 工具类型 | 重试安全吗 | 怎么做 |
 |---------|----------|--------|
-| 只读查询 | ✅ 默认安全 | 无需特殊处理 |
-| 幂等写（PUT、UPSERT） | ✅ 安全 | annotations 加 `idempotentHint: true` |
-| 非幂等写（CREATE、扣费） | ❌ 不能重试 | 接受 client-provided idempotency key |
+| 只读查询 | 默认安全 | `ToolAnnotations(read_only_hint=True)` |
+| 幂等写（PUT、UPSERT） | 安全 | `idempotent_hint=True` |
+| 非幂等写（CREATE、扣费） | 不能盲目重试 | 接受客户端提供的幂等键（比如上面 demo 里的 `idempotency_key`） |
 
-```python
-@mcp.tool(annotations={"idempotentHint": False, "destructiveHint": True})
-def create_order(idempotency_key: str, amount: float) -> dict:
-    """创建订单（不幂等，但接受 key）"""
-    if existing := _check_existing(idempotency_key):
-        return existing  # 重放保护
-    order = _create(amount)
-    _record(idempotency_key, order)
-    return order
-```
+2026-07-28 又多了一个必须做幂等的理由：Streamable HTTP 不再支持断点续传，响应流一断，这个请求就丢了，Client 必须用新的请求 ID 重发。写操作如果没有幂等键，就可能被执行两次。
 
 ---
 
 ## 11. 调试错误的工具
 
-- **Inspector 的 Console**：看完整 JSON-RPC，错误响应一眼看清
-- **ctx.error(msg)**：让错误同时进日志通道（不只是返回里）
-- **`structlog` 或 `loguru`** 输出到 stderr：本地 stdio Server 别 print
+- Inspector 的 Console 和消息历史：能看到完整的 JSON-RPC，错误响应一目了然
+- 标准库 `logging` 输出到 stderr（`ctx.error()` 等协议层日志已弃用）：服务端的堆栈都在这里，`ToolError` 是 INFO，崩溃是 ERROR
+- `structlog` 或 `loguru` 输出到 stderr：本地 stdio Server 不要用 `print`
+- pytest 加 `Client(mcp)`：断言 `result.is_error` 和文本内容，崩溃堆栈用 `caplog` 抓
 
 ---
 
@@ -357,23 +342,26 @@ def create_order(idempotency_key: str, amount: float) -> dict:
 
 | 坑 | 排查 |
 |----|------|
-| **业务错误抛 ValueError** | 改成 ToolError，LLM 才能看见 |
-| **错误信息泄露内部细节** | 错误消息打日志一份、给 LLM 简化一份 |
-| **协议错误 / 工具错误用反了** | 模型错误用 isError；程序 bug 用协议错误 |
-| **没区分可重试 / 不可重试** | 临时错误（429、超时）用 ToolError；永久错误（404）也 ToolError 但要说明 "不要重试" |
-| **Pydantic 校验被绕开** | FastMCP 自动用类型注解 + Field 做校验；低层 Server 类要自己写 |
-| **错误码不规范** | 内部错误用 -32603；自定义业务错码 -32000..-32099 |
+| 业务错误抛了 ValueError | 改成 `ToolError`，否则模型只能看到 `Error executing tool xxx` |
+| 想让模型读到错误，却 `raise MCPError` | `MCPError` 是协议错误，模型看不到，改用 `ToolError` |
+| `return` 了一条错误字符串 | 结果是 `is_error=False`，所有客户端都会认为调用成功、这就是答案；一定要用 `raise` |
+| 错误信息泄露内部细节 | `ToolError` 的文本会原样交给模型和最终用户；细节写进日志，给模型的版本要简化 |
+| 没区分能不能重试 | 临时错误（429、超时）在消息里写明可以稍后重试，永久错误写明不要重试 |
+| 在函数里重复做类型校验 | 类型注解加 `Field` 已经在调用前校验过了，函数里只写业务规则 |
+| Pydantic 校验被绕过 | 低层 `Server` 不校验入参，要自己写 |
+| 客户端只认 -32002 | 在 2026-07-28 里，资源不存在是 -32602 |
 
 ---
 
 ## 13. 下一步
 
-- 02-server 全部 8 篇结束。下一章进入 03-client。
-- 📖 客户端怎么处理错误 → 03-client/01-client-basics
-- 📖 安全：错误消息的攻击面 → 05-production/04-security
+Server 部分的 8 篇到这里结束，下一章讲 Client，从[自己写 Client（连接、发现与调用工具）](../03-client/01-client-basics.md)开始。
+
+- 客户端怎么处理错误：[自己写 Client（连接、发现与调用工具）](../03-client/01-client-basics.md)
+- 错误消息带来的安全风险：[防范 Prompt 注入、Tool 投毒与路径越权](../05-production/04-security.md)
 
 ## 参考资料
 
-- Tools spec - Error Handling：https://modelcontextprotocol.io/specification/2025-11-25/server/tools#error-handling
-- Resources error codes：https://modelcontextprotocol.io/specification/2025-11-25/server/resources#error-handling
-- JSON-RPC 2.0 Error Codes：https://www.jsonrpc.org/specification#error_object
+- Tools spec - Error Handling：https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+- 错误码分配策略：https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes
+- Python SDK Handling errors：https://py.sdk.modelcontextprotocol.io/servers/handling-errors/

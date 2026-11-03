@@ -1,6 +1,6 @@
 # 混合存储：Vector + Metadata + Filter
 
-> **一句话**：生产 RAG 几乎一定要"按用户 / 时间 / 标签 / 权限"过滤——把 embedding 跟 metadata 一起存、合理建 payload index，才能在大数据集里高效精准检索。
+> 生产环境的 RAG，几乎都要按用户、时间、标签或权限做过滤。embedding 要和 metadata 存在一起，再给常用的过滤字段建好 payload index，大数据集上的检索才能又快又准。这篇讲 metadata 怎么设计，以及在几个主流向量库里怎么存、怎么过滤。
 
 ---
 
@@ -13,7 +13,7 @@
            AND (visibility='public' OR owner=current_user)
 ```
 
-**没有 filter 的向量搜索基本是 demo，不是生产**。
+不带 filter 的向量搜索，只能算演示，上不了生产。
 
 ---
 
@@ -23,33 +23,33 @@
 
 ```python
 {
-    "id": "doc_12345",                  # 业务 ID（跟主库一致）
+    "doc_id": "doc_12345",              # 业务 ID（跟主库一致）
     "text": "原文（短摘要 / 不要全文）",   # 用于显示和 rerank
     "source": "kb_article",             # 来源类型
     "lang": "zh",                       # 语言
     "category": "billing",              # 业务分类
     "tags": ["refund", "subscription"], # 标签
-    "created_at": 1715817600,           # 时间
+    "created_at": 1778889600,           # 时间（unix 秒，这里是 2026-05-16）
     "version": 3,                        # 版本号
     "visibility": "public",             # 权限
 }
 ```
 
-### 2.2 别在 metadata 里放啥
+### 2.2 哪些东西别放进 metadata
 
 | 别放 | 理由 |
 |------|------|
-| 原文全文 | 长 → 序列化慢 / 网络重 |
-| binary（图片） | 用 URL 引用，存对象存储 |
-| 频繁变的字段（如 view_count）| 每次都要 reindex |
-| 嵌套很深的 JSON | filter 索引建不上 |
+| 原文全文 | 太长，序列化慢，网络传输重 |
+| 二进制数据（图片） | 存对象存储，metadata 里只放 URL |
+| 频繁变化的字段（如 view_count）| 每次变化都要重新写索引 |
+| 嵌套很深的 JSON | 建不了 filter 索引 |
 
 ### 2.3 命名规范
 
 - 用 snake_case
-- 时间一律 unix timestamp（秒）
-- 类别 / 标签用枚举值（不要自由文本）
-- 加 prefix 防混淆：`doc_id` 而不是单 `id`
+- 时间统一用 unix timestamp（秒）
+- 类别和标签用枚举值，不要用自由文本
+- 加前缀避免歧义，比如用 `doc_id` 而不是单独一个 `id`
 
 ---
 
@@ -72,7 +72,7 @@ client.upsert(
                 "text": "如何取消订阅...",
                 "category": "billing",
                 "tags": ["refund"],
-                "created_at": 1715817600,
+                "created_at": 1778889600,
                 "visibility": "public",
             },
         ),
@@ -88,17 +88,17 @@ filt = Filter(
     must=[
         FieldCondition(key="category", match=MatchValue(value="billing")),
         FieldCondition(key="visibility", match=MatchValue(value="public")),
-        FieldCondition(key="created_at", range=Range(gte=1715000000)),
+        FieldCondition(key="created_at", range=Range(gte=1777593600)),
     ],
 )
 
 
-hits = client.search(
+hits = client.query_points(
     collection_name="docs",
-    query_vector=q_emb,
+    query=q_emb,
     query_filter=filt,
     limit=5,
-)
+).points
 ```
 
 ### 3.2 Pinecone
@@ -113,7 +113,7 @@ index.upsert(vectors=[
             "text": "...",
             "category": "billing",
             "tags": ["refund"],
-            "created_at": 1715817600,
+            "created_at": 1778889600,
         },
     },
 ])
@@ -125,7 +125,7 @@ results = index.query(
     filter={
         "category": "billing",
         "tags": {"$in": ["refund"]},
-        "created_at": {"$gte": 1715000000},
+        "created_at": {"$gte": 1777593600},
     },
 )
 ```
@@ -178,9 +178,9 @@ post-filter: 先向量搜 top-N，再 metadata 过滤
   缺点：可能"前 N 全被过滤掉"，召回率掉
 ```
 
-主流向量库（Qdrant / Pinecone / Milvus）做的是**带 filter 的 ANN**——边搜边过滤，混合策略。
+Qdrant、Pinecone、Milvus 这些主流向量库做的是带 filter 的 ANN，在图上搜索的同时过滤，算是两种策略的折中。
 
-但需要 **payload index** 才能高效（详见 [03-qdrant.md](./03-qdrant.md) #6）：
+不过要搜得快，前提是给过滤字段建了 payload index（见 [Qdrant：自托管向量库](./03-qdrant.md) 第 6 节）：
 
 ```python
 client.create_payload_index(
@@ -194,7 +194,7 @@ client.create_payload_index(
 
 ## 5. 多租户隔离方案
 
-### 方案 A：filter（推荐小中规模）
+### 方案 A：filter（适合中小规模）
 
 ```python
 client.upsert(
@@ -206,37 +206,36 @@ client.upsert(
     )],
 )
 
-hits = client.search(
+hits = client.query_points(
     collection_name="docs",
-    query_vector=q,
+    query=q,
     query_filter=Filter(must=[
         FieldCondition(key="tenant_id", match=MatchValue(value="tenant_42")),
     ]),
-)
+).points
 ```
 
-简单，但**安全完全靠 filter**——别忘加。
+做法简单，但隔离完全依赖 filter，任何一次查询忘了加都会串数据。
 
-### 方案 B：每租户一个 collection
+### 方案 B：每个租户一个 collection
 
 ```python
 client.create_collection(collection_name="tenant_42", ...)
 client.upsert(collection_name="tenant_42", ...)
 ```
 
-- 真隔离
-- 但租户多（> 1000）会爆 collection 数
+这是物理隔离，但租户一多（超过 1000），collection 数量会失控。
 
-### 方案 C：每租户一个 namespace（Pinecone）
+### 方案 C：每个租户一个 namespace（Pinecone）
 
 ```python
 index.upsert(vectors=[...], namespace="tenant_42")
 index.query(vector=[...], namespace="tenant_42")
 ```
 
-Pinecone 专属，类似 B 但更轻量。
+Pinecone 特有，效果接近方案 B，但更轻量。
 
-### 决策
+### 怎么选
 
 ```
 < 100 租户：A（filter）就行
@@ -248,13 +247,13 @@ Pinecone 专属，类似 B 但更轻量。
 
 ## 6. 软删除
 
-不要物理 delete，加个 `deleted_at`：
+不要直接物理删除，而是加一个 `deleted_at` 字段：
 
 ```python
 client.set_payload(
     collection_name="docs",
     payload={"deleted_at": int(time.time())},
-    points=[doc_id],
+    points=[point_id],   # Qdrant 的点 ID（int 或 UUID），不是业务 doc_id
 )
 
 
@@ -264,7 +263,7 @@ filt = Filter(must_not=[
 ])
 ```
 
-定期物理清理：
+再定期做物理清理：
 
 ```python
 client.delete(
@@ -279,7 +278,7 @@ client.delete(
 
 ## 7. 多版本共存
 
-新模型 / 新策略上线时不要 in-place 覆盖：
+换模型或换策略时，不要在原地覆盖：
 
 ```python
 # 旧
@@ -293,38 +292,39 @@ def search(query):
     return search_in(collection_v1, query)
 ```
 
-跑稳后下 v1。
+v2 跑稳以后，再下线 v1。
 
 ---
 
-## 8. metadata × vector 联合排序
+## 8. metadata 和向量分数联合排序
 
 ```python
-# Qdrant 不直接支持，但可以拿 top-N 后自己 rerank
-hits = client.search(
+# Qdrant 1.14 起可以用 FormulaQuery 在库内按公式重算分数（含时间衰减函数）；
+# 这里演示通用做法：取 top-N 后在应用层自己算
+hits = client.query_points(
     collection_name="docs",
-    query_vector=q,
+    query=q,
     limit=20,
-)
+).points
 
 # 自定义 score
 def final_score(hit, query):
     vec_score = hit.score   # 0-1
-    freshness = max(0, 1 - (now() - hit.payload["created_at"]) / 365*86400)
+    age = time.time() - hit.payload["created_at"]
+    freshness = max(0, 1 - age / (365 * 86400))   # 一年内线性衰减到 0
     return vec_score * 0.7 + freshness * 0.3
 
 
 ranked = sorted(hits, key=lambda h: -final_score(h, query))[:5]
 ```
 
-或加 rerank 模型（详见 [02-models/05-rerank.md](../02-models/05-rerank.md)）。
+也可以接一个 rerank 模型（见 [Rerank 模型：召回之后的精排](../02-models/05-rerank.md)）。
 
 ---
 
-## 9. 完整 demo
+## 9. 完整示例
 
 ```python
-# demos/vector_db/07_hybrid.py
 import time
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -391,9 +391,9 @@ q = "如何取消订阅"
 q_emb = oai.embeddings.create(model="text-embedding-3-small", input=[q]).data[0].embedding
 
 
-hits = client.search(
+hits = client.query_points(
     collection_name="docs",
-    query_vector=q_emb,
+    query=q_emb,
     query_filter=Filter(must=[
         FieldCondition(key="category", match=MatchValue(value="billing")),
         FieldCondition(key="lang", match=MatchValue(value="zh")),
@@ -401,7 +401,7 @@ hits = client.search(
         FieldCondition(key="created_at", range=Range(gte=now - 60*86400)),
     ]),
     limit=3,
-)
+).points
 
 
 for h in hits:
@@ -414,27 +414,27 @@ for h in hits:
 
 | 坑 | 解 |
 |----|----|
-| 没建 payload index | filter 慢 |
-| metadata 塞全文 | 序列化 / 网络重，只存 ID + 关键字段 |
-| 跨租户没 filter | 数据泄漏，必须 enforce |
-| metadata 频繁更新 | 重 embedding 不必要的话，用单独表存动态字段 |
-| 时间用字符串 | 改用 int timestamp，filter 才能 range |
+| 没建 payload index | filter 会很慢，给过滤字段建索引 |
+| metadata 里塞全文 | 序列化和网络都重，只存 ID 和关键字段 |
+| 多租户查询漏了 filter | 会泄漏数据，必须在代码层强制加上 |
+| metadata 频繁更新 | 动态字段单独存一张表，避免不必要的重写 |
+| 时间存成字符串 | 改成 int timestamp，才能做 range 过滤 |
 
 ---
 
-## 11. 章节小结
+## 11. 向量库这一章回顾
 
-03-vector-db 完结。你现在应该会：
+读到这里，你应该能做到：
 
 - 按场景选向量库
-- 跑 Pinecone / Qdrant / pgvector / Chroma
-- 理解 HNSW / IVF 怎么工作的
-- 用 metadata + filter 做精确搜索
+- 跑通 Pinecone、Qdrant、pgvector、Chroma
+- 理解 HNSW 和 IVF 的工作方式
+- 用 metadata 加 filter 做精确检索
 
 ---
 
 ## 12. 下一步
 
-- 📖 chunking 策略（很重要）→ [04-chunking/01-why-chunking.md](../04-chunking/01-why-chunking.md)
-- 📖 混合检索 → [05-retrieval/02-bm25-fusion.md](../05-retrieval/02-bm25-fusion.md)
-- 📖 增量索引 → [07-production/01-incremental.md](../07-production/01-incremental.md)
+- 切分策略，这一步对效果影响很大：[为什么 Chunking 决定 RAG 的上限](../04-chunking/01-why-chunking.md)
+- 混合检索：[BM25 + Dense 融合：RRF / Weighted](../05-retrieval/02-bm25-fusion.md)
+- 增量索引：[增量索引：文档新增 / 修改 / 删除](../07-production/01-incremental.md)

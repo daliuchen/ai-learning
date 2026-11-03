@@ -1,23 +1,23 @@
 # PE Practice 02：Research Agent 的 5 版迭代史
 
-> **一句话**：从一个"会调搜索工具的 Agent"到生产级 research agent 的真实迭代史——5 个版本，每版讲清楚改了什么、为什么改、效果如何。读完你会建立"复杂 Agent prompt 怎么演化"的体感。
+> 这篇记录一个 research agent 从"会调搜索工具"到能上生产的五个版本。每一版都写清楚改了什么、为什么改、效果怎样。复杂 agent 的 prompt 是怎么一步步演化的，看完这五版会有直观的感觉。
 
 ---
 
 ## 1. 项目目标
 
-写一个 research agent：给定一个研究问题，agent 自己搜资料 → 综合 → 引用源 → 给报告。
+做一个 research agent：给它一个研究问题，它自己搜资料、综合、标注来源，最后交一份报告。
 
 工具：
 - `search_web(query)` 搜索
 - `fetch_url(url)` 读网页
 - `python(code)` 计算 / 处理
 
-目标输出：500-1000 字研究报告 + 引用源。
+目标输出：500-1000 字的研究报告，附引用来源。
 
 ---
 
-## 2. v1: 朴素 ReAct（baseline）
+## 2. v1：朴素 ReAct（基线）
 
 ```python
 SYSTEM_V1 = """你是研究助手。
@@ -33,25 +33,21 @@ SYSTEM_V1 = """你是研究助手。
 """
 ```
 
-跑 5 个测试问题：
+用 5 个测试问题来看 v1 会出哪些问题（下表和后面各版的对比都是示意）：
 
 | 问题 | 结果 |
 |------|------|
-| "2024 年全球电动车销量 top 5" | 部分对，没引用源 |
-| "GPT-4 论文是哪年发的" | 工具调了 3 次仍出错 |
-| "斯坦福创校时间" | 1 个 search 就对 |
-| "Tesla 最新季度财报营收" | 用了 outdated 数据没标 |
-| "如何评估 RAG 系统" | 列了一堆通用观点，没真正搜 |
+| "2024 年全球电动车销量 top 5" | 部分对，没有引用来源 |
+| "GPT-4 论文是哪年发的" | 调了 3 次工具仍然答错 |
+| "斯坦福创校时间" | 搜一次就答对 |
+| "Tesla 最新季度财报营收" | 用了过时数据，也没说明 |
+| "如何评估 RAG 系统" | 列了一堆泛泛的观点，其实没去搜 |
 
-问题：
-- 不引用源 → 用户不可验证
-- 工具调用乱用
-- 输出长度漂移
-- 时间敏感问题用 stale 数据
+暴露出来的问题有四个：没有引用来源，用户没法核实；工具乱调；输出长度忽长忽短；时效性问题用了过时数据。
 
 ---
 
-## 3. v2: 加引用 + 时间约束
+## 3. v2：加引用和时间约束
 
 ```diff
 +约束：
@@ -63,21 +59,21 @@ SYSTEM_V1 = """你是研究助手。
 +当前日期: {now}
 ```
 
-跑同样测试：
+同样 5 个问题，换成 v2 来看：
 
 | 问题 | v1 | v2 |
 |------|----|----|
-| 电动车销量 | 部分对 | ✅ 有引用 |
-| GPT-4 论文 | 失败 | ✅ 1 次 search 对 |
-| 斯坦福创校 | 对 | ✅ 对 |
-| Tesla 财报 | stale | ✅ search 最新 |
-| RAG 评估 | 通用观点 | 改进，但仍不深 |
+| 电动车销量 | 部分对 | 对，有引用 |
+| GPT-4 论文 | 失败 | 对，搜一次就找到 |
+| 斯坦福创校 | 对 | 对 |
+| Tesla 财报 | 数据过时 | 对，搜到了最新数据 |
+| RAG 评估 | 泛泛而谈 | 有改进，但仍然不深 |
 
-通过 5/5 但深度不够。
+5 题里 4 题答对并带上了引用；RAG 评估那题有改进，但内容仍然不深。
 
 ---
 
-## 4. v3: 加 plan-then-execute
+## 4. v3：先规划再执行
 
 ```diff
 +流程：
@@ -88,16 +84,11 @@ SYSTEM_V1 = """你是研究助手。
 +不要直接搜——先 plan。
 ```
 
-效果：
-
-- 模型先列计划，分解清晰
-- 搜索更聚焦
-- 报告结构更好（按 sub-question 组织）
-- 但 cost 涨 30%（多了 plan 步骤 + 多次 search）
+改完以后，模型会先列计划，问题拆得很清楚，搜索更聚焦，报告也按子问题组织，结构好了很多。代价是平均成本从 $0.08 涨到 $0.11（见第 7 节），因为多了规划这一步，搜索次数也变多了。
 
 ---
 
-## 5. v4: 加 self-critique
+## 5. v4：加自我检查
 
 ```diff
 +生成报告后，必须做一次 self-review：
@@ -113,16 +104,16 @@ SYSTEM_V1 = """你是研究助手。
 
 效果：
 
-- 引用率从 80% → 95%
-- 平衡性显著提升（自动加 "另一方面"）
-- 长度更稳定（critique 后会精简）
-- cost 涨 40%（draft + critique + refine）
+- 引用率从 85% 升到 95%
+- 观点平衡明显变好，模型会主动补上"另一方面"
+- 长度更稳定，critique 之后会主动精简
+- 平均成本从 $0.11 涨到 $0.16（初稿、审查、修改三步）
 
 ---
 
-## 6. v5: 拆 sub-agent
+## 6. v5：拆成子 agent
 
-发现 v4 在长任务（10+ search）容易跑偏：
+v4 在长任务上（搜索 10 次以上）容易跑偏，于是改了架构：
 
 ```diff
 +架构改成：
@@ -143,32 +134,33 @@ async def research_agent(question: str):
     return await writer.compose(question, findings)
 ```
 
-每个 sub-agent 有自己的 system prompt——聚焦、短、好维护。
+每个子 agent 有自己的 system prompt，短小、专注，也好维护。
 
 效果：
 
-- 复杂问题（10+ 个事实点）成功率 70% → 92%
-- 总成本反而降（每个 sub-agent 用 mini，main 用 sonnet）
-- 调试容易（看每个 sub-agent 的 trace）
+- 通过率从 88% 升到 92%（25 题里从 22 题到 23 题），多通过的那题是涉及 10 个以上事实点的复杂问题
+- 总成本反而下降了，因为 researcher 用 Haiku，只有 planner 和 writer 用 Sonnet
+- 调试容易了，可以逐个看每个子 agent 的 trace
 
 ---
 
-## 7. 全 5 版数据汇总
+## 7. 五个版本的数据
 
-| 版本 | 通过率 | 平均 cost | 平均 latency | 引用率 | 备注 |
-|------|--------|-----------|--------------|--------|------|
-| v1 | 40% | $0.05 | 8s | 30% | 基线，烂 |
-| v2 | 65% | $0.08 | 12s | 80% | + 引用 + 时间 |
-| v3 | 80% | $0.11 | 18s | 85% | + plan-then-execute |
-| v4 | 88% | $0.16 | 25s | 95% | + critique |
-| v5 | 92% | $0.13 | 22s | 95% | + sub-agent（cost 降！）|
+下表是示意数据，用来说明各版本之间的变化方向和量级。通过率不是前面那 5 道题的结果，而是在另一份 25 条问题的评测集上统计的（通过数 / 25）；引用率按报告里的 claim 计，指带有效来源的 claim 占比；成本和延迟是每条问题的平均值。
+
+| 版本 | 通过数 | 通过率 | 平均成本 | 平均延迟 | 引用率 | 备注 |
+|------|--------|--------|-----------|--------------|--------|------|
+| v1 | 10 | 40% | $0.05 | 8s | 30% | 基线，效果很差 |
+| v2 | 16 | 64% | $0.08 | 12s | 80% | + 引用 + 时间约束 |
+| v3 | 20 | 80% | $0.11 | 18s | 85% | + 先规划再执行 |
+| v4 | 22 | 88% | $0.16 | 25s | 95% | + 自我检查 |
+| v5 | 23 | 92% | $0.13 | 22s | 95% | + 子 agent（成本下降） |
 
 ---
 
-## 8. 完整 v5 代码
+## 8. v5 完整代码
 
 ```python
-# demos/practice/02_research_agent.py
 """Research Agent v5 - 多 sub-agent 架构"""
 from pydantic_ai import Agent, Tool
 from pydantic import BaseModel
@@ -191,9 +183,9 @@ class Report(BaseModel):
 
 # === Planner ===
 planner = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5-5",
     output_type=Plan,
-    system_prompt="""你把研究问题拆成 3-5 个 sub-questions。
+    instructions="""你把研究问题拆成 3-5 个 sub-questions。
 每个 sub-question 应该独立、可被搜索回答。""",
 )
 
@@ -204,10 +196,10 @@ def search_web(query: str) -> list[dict]:
     return [{"title": "...", "url": "...", "snippet": "..."}]
 
 researcher = Agent(
-    "anthropic:claude-haiku-4-5-20251001",
+    "anthropic:claude-haiku-5-5",
     output_type=Finding,
     tools=[Tool(search_web)],
-    system_prompt="""研究一个 sub-question。
+    instructions="""研究一个 sub-question。
 
 流程：
 1. search_web 找资料
@@ -220,9 +212,9 @@ researcher = Agent(
 
 # === Writer（含 critique）===
 writer = Agent(
-    "anthropic:claude-sonnet-4-6",
+    "anthropic:claude-sonnet-5-5",
     output_type=Report,
-    system_prompt="""综合 findings 写报告 500-1000 字。
+    instructions="""综合 findings 写报告 500-1000 字。
 
 约束：
 - 每条 claim 加 [Source: url]
@@ -255,32 +247,32 @@ async def research(question: str) -> Report:
 
 ---
 
-## 9. 关键设计决策回顾
+## 9. 设计决策回顾
 
-| 决策 | 为啥这么决定 |
+| 决策 | 原因 |
 |------|--------------|
-| 引用源进 prompt | 让模型可验证 |
-| Plan 步骤 | 复杂问题拆 sub-question |
-| Critique | 提质量 + 防单边 |
-| Sub-agent 架构 | 复杂任务可观测、cost 优化 |
-| Researcher 用 Haiku | 单 sub-question 不需要 Sonnet |
-| Writer 用 Sonnet | 综合 + 质量优 |
+| prompt 里强制引用来源 | 让结论可以核实 |
+| 加规划步骤 | 复杂问题先拆成子问题 |
+| 加自我检查 | 提高质量，避免观点一边倒 |
+| 拆子 agent | 复杂任务更好观察，成本也降下来 |
+| Researcher 用 Haiku | 单个子问题用不着 Sonnet |
+| Writer 用 Sonnet | 综合写作对质量要求高 |
 
 ---
 
-## 10. 教训总结
+## 10. 回头看
 
-1. **复杂 Agent 别一上来用单 prompt**：从 ReAct 开始，看哪里挂再拆
-2. **引用 / source 强制是防幻觉的最强工具**
-3. **plan-then-execute 比纯 ReAct 稳**
-4. **拆 sub-agent 不只是工程化——cost / quality 反而双优**
-5. **complex prompt 调到一定程度，瓶颈是 architecture 不是 prompt**
+复杂 agent 不要一上来就写一个大 prompt。我的做法是从最朴素的 ReAct 开始，看它在哪里出问题，再针对性地拆。
+
+这五版里收益最大的一步，是强制引用来源，它是防幻觉最有效的手段。先规划再执行也比纯 ReAct 稳定。
+
+拆子 agent 除了让工程结构更整洁，在这组示意数据里成本和质量也同时变好。v4 之后 prompt 已经写得比较完整，v5 没有再加约束，改的是调用结构：planner、researcher、writer 各用一段短 prompt，researcher 换成更便宜的 Haiku。通过率从 88% 升到 92%，平均成本从 $0.16 降到 $0.13。
 
 ---
 
 ## 11. 下一步
 
-- 📖 Claude Code 当 prompt 优化器 → [03-claude-code-as-optimizer.md](./03-claude-code-as-optimizer.md)
-- 📖 ReAct 基础 → [04-advanced/01-react.md](../04-advanced/01-react.md)
-- 📖 Self-critique → [03-techniques/08-self-critique.md](../03-techniques/08-self-critique.md)
-- 📖 跨手册：LangGraph 多 agent → ../../../01-langchain/docs/03-langgraph/08-multi-agent.md
+- [用 Claude Code 当 Prompt 优化器](./03-claude-code-as-optimizer.md)
+- ReAct 基础：[ReAct（Reasoning + Acting）](../04-advanced/01-react.md)
+- [Self-Critique（自我反思）](../03-techniques/08-self-critique.md)
+- 多 agent 的完整写法见 LangChain 手册：[LangGraph 08：多 Agent 编排](../../../01-langchain/docs/03-langgraph/08-multi-agent.md)

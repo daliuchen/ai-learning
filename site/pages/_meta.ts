@@ -8,6 +8,8 @@ export default {
       sidebar: false,
       pagination: false,
       typesetting: 'article',
+      layout: 'full',
+      timestamp: false,
     },
   },
   docs: {

@@ -1,6 +1,6 @@
 # 缓存策略：Embedding Cache / Query Cache / Result Cache
 
-> **一句话**：3 层缓存——**embedding cache**（已 embed 的文本不重 embed）+ **query cache**（同 query 不重搜）+ **result cache**（同 query 同 context 不重 LLM）能省 50%+ 成本和延迟。
+> RAG 链路里有好几处可以缓存：已经 embed 过的文本不必再 embed，相同的 query 不必再检索，相同 query 加相同 context 也不必再调一次 LLM。几层缓存配合起来，重复请求多的场景能省下相当一部分成本和延迟，具体省多少取决于请求的重复程度。这篇逐层讲 key 怎么设计、多久失效、怎么监控命中率。
 
 ---
 
@@ -24,7 +24,7 @@ LLM 生成
 [Answer]
 ```
 
-不同层 hit rate / 失效条件不同。
+各层的命中率和失效条件都不一样，要分开设计。
 
 ---
 
@@ -34,6 +34,7 @@ LLM 生成
 
 ```python
 import hashlib
+import json
 import redis
 
 
@@ -44,7 +45,6 @@ def embed_with_cache(text: str, model: str = "text-embedding-3-small"):
     key = f"emb:{model}:{hashlib.md5(text.encode()).hexdigest()}"
     cached = r.get(key)
     if cached:
-        import json
         return json.loads(cached)
     
     vec = embed_actual(text, model)
@@ -52,16 +52,9 @@ def embed_with_cache(text: str, model: str = "text-embedding-3-small"):
     return vec
 ```
 
-**Key 设计**：
+key 里要包含三样东西：模型名（不同模型的向量不能混用）、input_type（Cohere 这类区分输入类型的模型需要）、文本 hash。
 
-- 包含 model 名（不同模型不能共享）
-- 包含 input_type（Cohere 多类型时）
-- 文本 hash
-
-**命中场景**：
-
-- 文档没变（content_hash 一致）→ 重 embed 同文本
-- 增量索引时跳过未变 chunk
+命中的情况主要有两种：文档没变（content_hash 一致）却被触发了重新 embed；增量索引时跳过没改动的 chunk。
 
 ---
 
@@ -80,13 +73,9 @@ def embed_query_cached(query, ttl=3600):
     return vec
 ```
 
-**TTL 短点**（1 小时）——query embedding 比文档便宜，重要的是省 latency。
+TTL 设短一点（1 小时）就行。query embedding 比文档便宜，这层缓存主要是为了省延迟。
 
-实战 hit rate：
-
-- C 端聊天：~30%（热门问题）
-- 客服：~50%（FAQ 集中）
-- 长尾内容搜索：~10%
+命中率随业务差别很大：客服类问题集中在 FAQ，重复度高，命中率也高；C 端聊天有一批热门问题，命中率居中；长尾内容搜索的 query 很少重复，命中率很低。具体数字要上线后按第 9 节的方法自己统计。
 
 ---
 
@@ -105,12 +94,9 @@ def retrieve_cached(query, top_k=5, ttl=600):
     return results
 ```
 
-**TTL 中等**（10 分钟）——文档库变更频率决定。
+TTL 取中等（10 分钟），具体由文档库的更新频率决定。
 
-注意：
-
-- 文档库改了要 invalidate（按 doc_id pattern 删 cache）
-- 不同用户的 filter 不同 → key 要含 user / tenant
+有两点要处理：文档库变了要主动 invalidate（按 doc_id pattern 删缓存）；不同用户的 filter 不同，key 里要带上 user 或 tenant。
 
 ---
 
@@ -130,12 +116,9 @@ def answer_cached(query, contexts, ttl=600):
     return answer
 ```
 
-LLM 是最贵的——这层省钱最多。
+LLM 调用最贵，所以这一层省的钱最多。
 
-但**注意**：
-
-- 答案 cache 跨 user 共享要小心（不能含个人信息）
-- 文档库变了 → 答案要更新
+答案缓存跨用户共享时要格外小心：内容里不能带个人信息；文档库变了，缓存的答案也要更新。
 
 ---
 
@@ -160,7 +143,7 @@ key = make_cache_key({
 })
 ```
 
-明确每层 key 包含什么变量，方便 debug。
+把每层 key 包含哪些变量写清楚，出问题时排查起来方便很多。
 
 ---
 
@@ -172,7 +155,7 @@ key = make_cache_key({
 r.setex(key, ttl, value)
 ```
 
-各层不同 TTL：
+各层 TTL 不同：
 
 - Embedding：30 天
 - Query embedding：1 小时
@@ -181,7 +164,7 @@ r.setex(key, ttl, value)
 
 ### 7.2 主动 invalidate
 
-文档变了主动清相关 cache：
+文档变了，主动清掉相关缓存：
 
 ```python
 def invalidate_doc(doc_id):
@@ -194,7 +177,7 @@ def invalidate_doc(doc_id):
             r.delete(key)
 ```
 
-实战常用 versioning：
+实际项目里更常用版本号：
 
 ```python
 # 全库版本号
@@ -208,7 +191,7 @@ key = f"retr:{corpus_version}:{md5(query)}"
 
 ### 7.3 LRU（内存有限）
 
-Redis 配置 `maxmemory-policy=allkeys-lru`，热门保留、冷的自动淘汰。
+Redis 配置 `maxmemory-policy=allkeys-lru`，热数据留着，冷数据自动淘汰。
 
 ---
 
@@ -217,12 +200,13 @@ Redis 配置 `maxmemory-policy=allkeys-lru`，热门保留、冷的自动淘汰�
 ```python
 async def smart_retrieve(query, top_k=5, user=None):
     # Layer 1: 查询级答案 cache
-    answer_key = f"ans:{md5(query)}:{user.tenant if user else 'public'}"
+    tenant = user.tenant if user else "public"
+    answer_key = f"ans:{md5(query)}:{tenant}"
     if answer := await r.get(answer_key):
         return {"answer": answer, "cache_hit": "answer"}
     
     # Layer 2: 检索结果 cache
-    retr_key = f"retr:{md5(query)}"
+    retr_key = f"retr:{md5(query)}:{tenant}"   # 不同租户的 filter 不同，检索结果不能共用
     if cached_retr := await r.get(retr_key):
         contexts = json.loads(cached_retr)
         # 答案需要重新生成（用户 / 时间不同？）
@@ -268,18 +252,13 @@ def cached_call(layer, key, ttl, compute_fn):
     return value
 ```
 
-Grafana dashboard 看每层 hit rate。低 hit rate 说明：
-
-- TTL 太短
-- key 设计太精细
-- 流量太分散
+在 Grafana dashboard 上看每层的命中率。命中率偏低，一般是 TTL 太短、key 设计得太细，或者流量本身太分散。
 
 ---
 
 ## 10. 完整 demo
 
 ```python
-# demos/production/03_caching.py
 import asyncio
 import hashlib
 import json
@@ -343,7 +322,7 @@ async def main():
 asyncio.run(main())
 ```
 
-输出：
+输出形如：
 
 ```
 First call: 0.32s, hit=False
@@ -356,15 +335,15 @@ Second call: 0.0001s, hit=True
 
 | 坑 | 解 |
 |----|----|
-| Cache key 没含 model 版本 | 升级模型后污染 |
-| TTL 太长 → 不同步 | 平衡 / 主动 invalidate |
-| Cross-user cache 信息泄漏 | 加 tenant_id 到 key |
-| Cache miss storm（同时多请求 build 同 key） | 加 lock / single-flight |
+| key 里没带模型版本 | 升级模型后新旧向量混在一起 |
+| TTL 太长，数据不同步 | 缩短 TTL，或主动 invalidate |
+| 跨用户缓存泄漏信息 | key 里加 tenant_id |
+| Cache miss storm（多个请求同时重建同一个 key） | 加锁或 single-flight |
 
 ---
 
 ## 12. 下一步
 
-- 📖 部署形态 → [04-deployment.md](./04-deployment.md)
-- 📖 监控 → [05-monitoring.md](./05-monitoring.md)
-- 📖 完整 RAG → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
+- [部署形态选型](./04-deployment.md)
+- [监控：召回率 / Latency / Cost](./05-monitoring.md)
+- [完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)

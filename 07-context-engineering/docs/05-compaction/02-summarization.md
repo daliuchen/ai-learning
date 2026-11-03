@@ -1,12 +1,12 @@
 # CE 05-02：摘要式压缩（Summarization）
 
-> **一句话**：摘要式压缩就是用一次额外的 LLM 调用，把一大段旧历史**总结**成一小段文字，再用这段摘要替换原文塞回上下文。它是信息密度最高的压缩手段——能把 100K 历史压成 1K 还保住语义。代价是要多跑一次 LLM（有延迟、有 token 成本、有丢信息风险），所以摘要 prompt 怎么写、保什么丢什么，就是这整套技术的胜负手。
+> 摘要式压缩是用一次额外的 LLM 调用，把一大段旧历史总结成一小段文字，再用这段摘要替换原文放回上下文。在各种压缩手段里，它的信息密度最高，能把历史压到原来的几十分之一，仍保住任务需要的信息；但一步压得太狠会丢细节。代价是多跑一次 LLM，有延迟、有 token 成本，也有丢信息的风险，所以摘要 prompt 怎么写、保留什么、丢掉什么，决定了这套做法的成败。
 
 ---
 
-## 1. 核心思路：原文换摘要
+## 1. 思路：用摘要替换原文
 
-最朴素的摘要压缩，结构是这样的：
+最朴素的摘要压缩长这样：
 
 ```
 压缩前的上下文：
@@ -24,15 +24,15 @@
   [第 41 轮 user]  ← 当前
 ```
 
-旧的几十轮原文被一条摘要消息顶替。模型看到的历史变短了，但「故事梗概」还在。
+几十轮旧原文被一条摘要消息顶替，模型看到的历史变短了，但来龙去脉还在。
 
 ---
 
-## 2. 摘要 prompt 怎么写——保决策、保事实、保未完成
+## 2. 摘要 prompt 怎么写：保决策、保事实、保未完成
 
-摘要质量 = prompt 质量。一个垃圾摘要 prompt（「总结一下上面的对话」）会丢掉所有关键信息，留一堆「用户和助手友好地讨论了项目」的废话。
+摘要好不好，基本取决于 prompt。像「总结一下上面的对话」这样的 prompt 会把关键信息全丢掉，只剩「用户和助手友好地讨论了项目」这类空话。
 
-好的摘要 prompt 必须**明确指定保留维度**：
+好的摘要 prompt 要**明确写出必须保留哪几类信息**：
 
 ```python
 SUMMARY_PROMPT = """\
@@ -61,20 +61,20 @@ SUMMARY_PROMPT = """\
 """
 ```
 
-「踩过的坑」这一条经常被忽略，但它对 Agent 极其关键——没有它，模型会反复尝试已经失败过的方案。
+「踩过的坑」这一条常被忽略，对 Agent 却特别重要。少了它，模型会一遍遍去试已经失败过的方案。
 
 ---
 
 ## 3. 一段「历史超阈值就摘要」的完整代码
 
-下面是可直接套用的实现：累计 token 超过阈值，就把除最近几轮外的历史摘要掉。
+下面的实现可以直接套用：累计 token 超过阈值，就把除最近几条之外的历史摘要掉。
 
 ```python
 import openai
 import tiktoken
 
 client = openai.OpenAI()
-enc = tiktoken.encoding_for_model("gpt-4o")
+enc = tiktoken.get_encoding("o200k_base")
 
 THRESHOLD_TOKENS = 6000   # 历史超过这个就触发摘要
 KEEP_RECENT = 4           # 保留最近几条原样（摘要可能丢近期细节）
@@ -88,7 +88,7 @@ def summarize_history(messages: list[dict]) -> str:
     """把一批消息压成一段摘要文本。"""
     history_text = "\n".join(f"[{m['role']}] {m['content']}" for m in messages)
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",   # 摘要用便宜模型即可
+        model="gpt-6-luna",   # 摘要用便宜模型即可
         messages=[
             {"role": "system", "content": SUMMARY_PROMPT.format(history=history_text)}
         ],
@@ -119,16 +119,62 @@ def compact(messages: list[dict]) -> list[dict]:
 messages = compact(messages)
 ```
 
-几个工程要点：
-- **摘要用便宜模型**（`gpt-4o-mini` / Haiku），这是省钱关键，主对话用强模型、摘要用弱模型。
-- **`temperature=0`**，摘要要的是稳定还原事实，不是创意。
-- **保留最近 KEEP_RECENT 条原文**，因为近期细节（当前正在改的那个函数）摘要容易糊掉。
+几个工程上的考虑。摘要用便宜模型（`gpt-6-luna` 或 Haiku），主对话用强模型，省钱主要靠这一点。示例里给 `gpt-6-luna` 设了 `temperature=0`，摘要要的是稳定地还原事实，不需要发挥（GPT-6 是否接受这个参数以模型页为准）。换成 Haiku 时去掉这个参数：Claude 5.x 不接受 `temperature`，传了会返回 400，想要稳定就靠摘要 prompt 写清楚「只总结、不推断」和固定的输出结构。最近 KEEP_RECENT 条保留原文，因为近期细节（比如当前正在改的那个函数）一摘要就容易变模糊。
 
 ---
 
-## 4. 递归摘要：summary of summaries
+## 4. 平台和框架的内置实现
 
-会话超级长时，单段摘要也会慢慢变长，最终又撑满。解法是**递归摘要**——把「旧摘要 + 新增历史」再摘要成一段新摘要：
+上面的 `compact()` 是为了讲清原理，生产里优先用内置的。下面三个例子的语法取自官方文档，后两段需要对应平台的 API key 才能运行：
+
+```python
+# ① LangChain 1.x：SummarizationMiddleware（trigger/keep 的取值：tokens / messages / fraction）
+from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
+
+agent = create_agent(
+    model="openai:gpt-6.1-sol",
+    tools=[],
+    middleware=[
+        SummarizationMiddleware(
+            model="openai:gpt-6-luna",           # 摘要用便宜模型
+            trigger=("tokens", 6000),            # 超过 6000 token 触发
+            keep=("messages", 20),               # 保留最近 20 条原文
+        ),
+    ],
+)
+```
+
+```python
+# ② Anthropic 服务端 compaction（beta）：服务端按阈值写摘要
+response = client.beta.messages.create(
+    betas=["compact-2026-01-12"],
+    model="claude-opus-5-5",
+    max_tokens=4096,
+    messages=messages,
+    context_management={"edits": [{"type": "compact_20260112",
+                                   "trigger": {"type": "input_tokens", "value": 150000}}]},
+)
+messages.append({"role": "assistant", "content": response.content})  # 含 compaction 块，原样带回
+```
+
+```python
+# ③ OpenAI Responses 服务端 compaction
+response = client.responses.create(
+    model="gpt-6.1-sol",
+    input=conversation,
+    store=False,
+    context_management=[{"type": "compaction", "compact_threshold": 200000}],
+)
+```
+
+有了这些，自己实现的理由只剩两个：要自定义摘要内容（② 里可以用 `instructions` 整体替换默认的摘要提示），或者要在不同厂商之间保持一致的行为。
+
+---
+
+## 5. 递归摘要：summary of summaries
+
+会话特别长时，单段摘要也会慢慢变长，最后又把窗口撑满。办法是递归摘要，把「旧摘要 + 新增历史」再压成一段新摘要：
 
 ```
 轮 1-40：   原文 ──摘要──►  摘要A (1K)
@@ -142,55 +188,55 @@ def recursive_compact(prev_summary: str, new_messages: list[dict]) -> str:
     new_text = "\n".join(f"[{m['role']}] {m['content']}" for m in new_messages)
     combined = f"=== 已有摘要 ===\n{prev_summary}\n\n=== 新增对话 ===\n{new_text}"
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[{"role": "system", "content": SUMMARY_PROMPT.format(history=combined)}],
         temperature=0,
     )
     return resp.choices[0].message.content
 ```
 
-递归摘要让摘要长度**恒定**（不随会话增长），代价是越早的信息经过越多轮压缩，损失越大——这是个固有取舍。Claude Code 的 auto-compaction 本质就是这种递归思路：每次触发都基于上一份总结继续滚动压缩。
+递归摘要能让摘要长度保持恒定，不随会话增长。代价是越早的信息经过的压缩轮次越多，损失越大，这个取舍绕不开。Claude Code 这类会多次 auto-compact 的工具，后一次压缩的输入里本来就带着上一次的总结，效果上也是这样一层层滚动的。
 
 ---
 
-## 5. 摘要丢信息的风险与缓解
+## 6. 摘要丢信息的风险与缓解
 
-摘要是「有损压缩」，必然丢东西。典型翻车场景和对策：
+摘要是有损压缩，一定会丢东西。常见的出错情况和对策：
 
 | 风险 | 现象 | 缓解措施 |
 |------|------|----------|
 | 丢具体值 | 摘要写「配置了数据库」但丢了连接串 | prompt 明确要求保留「具体值：路径/ID/配置」 |
 | 丢失败记录 | 模型重试已失败的方案 | prompt 强制保留「踩过的坑」 |
-| 近期细节糊化 | 当前在改的代码细节被概括没了 | 保留最近 N 条原文不摘要 |
-| 摘要本身幻觉 | LLM 摘要时编造没发生的事 | `temperature=0` + 要求「只总结，不推断」 |
-| 一次性全压丢太多 | 100K 一把压成 500 字，信息密度过载 | 控制压缩比，别太激进（见下） |
-| 不可逆 | 摘要后原文没了，发现丢了关键信息无法找回 | **原文外置存储**（落盘/DB），摘要只是窗口里的代理 |
+| 近期细节变模糊 | 当前在改的代码细节被概括没了 | 保留最近 N 条原文不摘要 |
+| 摘要本身幻觉 | LLM 摘要时编造没发生的事 | 要求「只总结，不推断」并固定输出结构；能设 temperature 的模型设为 0（Claude 5.x 不接受这个参数） |
+| 一次性全压丢太多 | 一步压得太狠（比如 100K 直接压成 500 字），细节丢光 | 控制每一步的压缩比，或分段、递归地压 |
+| 不可逆 | 摘要后原文没了，发现丢了关键信息无法找回 | 原文外置存储（落盘/DB），摘要只是窗口里的代理 |
 
-最后一条最重要的工程实践：**摘要进窗口，原文进外部存储**。窗口里放摘要省 token，但原始历史另存一份（文件 / 向量库），需要时能检索回来。这样摘要的「有损」就有了兜底——这也是 [04-memory](../04-memory/01-short-vs-long.md) 章节「外置记忆」的思路衔接点。
+最后一条是我认为最重要的工程实践：摘要进窗口，原文进外部存储。窗口里放摘要省 token，原始历史另存一份（文件或向量库），需要时可以检索回来，摘要丢了东西也有兜底。这和记忆一章（[短期记忆 vs 长期记忆](../04-memory/01-short-vs-long.md)）讲的外置记忆是同一个思路。
 
 ---
 
-## 6. 什么时候用摘要、什么时候别用
+## 7. 什么时候用摘要、什么时候别用
 
 | 场景 | 适合摘要吗 |
 |------|-----------|
-| 长对话客服 / 助手，需要记住早期需求 | ✅ 很适合，能保住语义 |
-| 长程 Agent，需要记住任务目标和进度 | ✅ 适合，但务必保留 TODO 和坑 |
-| 只需要最近几轮的简单 QA | ❌ 杀鸡用牛刀，滑窗就够（见 [03](./03-sliding-window.md)） |
-| 对延迟极敏感的实时场景 | ⚠️ 摘要要多跑一次 LLM，有延迟，考虑异步预压缩 |
-| 历史里全是结构化大 JSON | ⚠️ 先做字段剪枝（见 [04](./04-pruning.md)）更精准 |
+| 长对话客服 / 助手，需要记住早期需求 | 很适合，能保住语义 |
+| 长程 Agent，需要记住任务目标和进度 | 适合，但一定要保留 TODO 和踩过的坑 |
+| 只需要最近几轮的简单 QA | 不必，滑窗就够（见 [03](./03-sliding-window.md)） |
+| 对延迟极敏感的实时场景 | 慎用：摘要要多跑一次 LLM，有延迟，考虑异步预压缩 |
+| 历史里全是结构化大 JSON | 慎用：先做字段剪枝（见 [04](./04-pruning.md)）更精准 |
 
 ---
 
-## 7. 下一步
+## 8. 下一步
 
-- 📖 滑动窗口与截断：不跑 LLM 的最简压缩 → [03-sliding-window.md](./03-sliding-window.md)
-- 📖 重要性评分与剪枝：按价值取舍而非一刀切 → [04-pruning.md](./04-pruning.md)
-- 📖 何时触发摘要：阈值与时机权衡 → [05-when-to-compact.md](./05-when-to-compact.md)
-- 📖 为什么要压缩（回看动机） → [01-why-compact.md](./01-why-compact.md)
-- 📖 原文外置：把历史存进外部记忆 → [../04-memory/01-short-vs-long.md](../04-memory/01-short-vs-long.md)
+- 不跑 LLM 的最简压缩：[滑动窗口与截断](./03-sliding-window.md)
+- 按价值取舍而非一刀切：[重要性评分与剪枝](./04-pruning.md)
+- 摘要什么时候触发：[何时触发压缩](./05-when-to-compact.md)
+- 回看压缩的动机：[为什么要压缩上下文](./01-why-compact.md)
+- 把历史原文存进外部记忆：[短期记忆 vs 长期记忆](../04-memory/01-short-vs-long.md)
 
 ## 参考资料
 
-- LangChain, "Summarization" / `SummarizationNode`: https://langchain-ai.github.io/langgraph/how-tos/memory/add-summary-conversation-history/
+- LangGraph, "How to add summary of the conversation history": https://langchain-ai.github.io/langgraph/how-tos/memory/add-summary-conversation-history/
 - Anthropic, "Effective context engineering for AI agents": https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents

@@ -1,16 +1,16 @@
 # 完整 RAG Pipeline 实战
 
-> **一句话**：把前面 7 章学的拼起来——**chunk → embed → 索引 → 召回 → rerank → LLM** 一个完整生产级 RAG，能跑、能评、能上线。
+> 这一篇把前面七章的内容拼到一起，按 chunk、embed、索引、召回、rerank、LLM 生成的顺序，搭一个能跑、能评测、也能部署上线的完整 RAG。和手册其他篇默认用千问 `text-embedding-v4` 不同，这篇的 embedding 和 rerank 用本地开源模型（`BAAI/bge-base-zh-v1.5` 和 `BAAI/bge-reranker-large`，通过 sentence-transformers 加载），运行前要装好 torch，第一次运行会下载模型权重；只有最后的生成步骤调用 OpenAI 兼容接口。
 
 ---
 
 ## 1. 项目目标
 
-搭一个公司内部知识库问答：
+目标是搭一个公司内部知识库的问答服务，要求如下：
 
 - 索引 1 万-100 万条文档
 - 用户用自然语言问，秒级返回带引用的答案
-- 准确（faithfulness > 0.9）
+- 检索要准：评测集里绝大多数问题（比如 90% 以上），正确文档都出现在召回的 top-5 里
 - 实时增量更新
 
 ---
@@ -24,15 +24,15 @@
 [Ingestion Pipeline]
   1. 解析文档 → Markdown
   2. Chunking（结构感知 + small-to-big）
-  3. Embed（BGE-large-zh）
+  3. Embed（bge-base-zh-v1.5）
   4. 写 Qdrant
        ↓
 [Query Pipeline]
-  1. Self-query 解析 filter
+  1. Self-query 解析 filter（下面的代码里省略，做法见 Self-Query 篇）
   2. Embed query
   3. Vector + BM25 + RRF 混合召回
   4. Rerank (bge-reranker-large)
-  5. LLM 生成（gpt-4o-mini）+ 引用
+  5. LLM 生成（gpt-6-luna）+ 引用
        ↓
 [Response]
   - answer
@@ -44,10 +44,10 @@
 ## 3. 全部代码
 
 ```python
-# demos/applications/01_full_rag.py
 import asyncio
 import hashlib
 import json
+import uuid
 import time
 import numpy as np
 from collections import defaultdict
@@ -100,7 +100,9 @@ def chunk_doc(doc):
         
         for i, sub in enumerate(char_splitter.split_text(mc.page_content)):
             child_items.append({
-                "id": hashlib.md5(f"{parent_id}:{i}".encode()).hexdigest(),
+                # 用标准 UUID 字符串：Qdrant 返回的 id 是带连字符的 UUID，
+                # BM25 这一路也要用同样的写法，RRF 才能把两路的同一个 chunk 对上
+                "id": str(uuid.UUID(hashlib.md5(f"{parent_id}:{i}".encode()).hexdigest())),
                 "parent_id": parent_id,
                 "text": sub,
                 "doc_id": doc["id"],
@@ -145,7 +147,7 @@ async def index_docs(docs):
     texts = [c["text"] for c in all_children]
     embeddings = embedder.encode(texts, normalize_embeddings=True, show_progress_bar=False)
     
-    # 3. 写 Qdrant
+    # 3. 写 Qdrant（示例只建一次索引；后续增量写入见增量索引篇）
     qd.create_collection(
         COLLECTION,
         vectors_config=VectorParams(size=768, distance=Distance.COSINE),
@@ -185,14 +187,14 @@ def rrf(rankings, k=60, top_k=20):
 async def hybrid_retrieve(query, top_recall=20, top_final=5, filter_lang="zh"):
     # 1. Vector
     q_vec = encode_query(query)
-    vec_hits = qd.search(
+    vec_hits = qd.query_points(
         COLLECTION,
-        query_vector=q_vec.tolist(),
+        query=q_vec.tolist(),
         query_filter=Filter(must=[
             FieldCondition(key="lang", match=MatchValue(value=filter_lang)),
         ]),
         limit=top_recall,
-    )
+    ).points
     vec_ids = [h.id for h in vec_hits]
     
     # 2. BM25
@@ -252,7 +254,7 @@ async def rag_answer(query):
     context_text = "\n\n".join(contexts)
     
     resp = await client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": """你是公司知识库助手。基于以下文档回答用户问题。
 
@@ -337,7 +339,7 @@ asyncio.run(main())
 
 ---
 
-## 4. 跑出来效果
+## 4. 示例输出（数值仅示意）
 
 ```
 Q: 怎么取消订阅
@@ -367,7 +369,7 @@ EVALSET = [
 ]
 
 
-async def eval():
+async def run_eval():
     results = []
     for case in EVALSET:
         retrieved = await hybrid_retrieve(case["query"], top_final=5)
@@ -379,7 +381,7 @@ async def eval():
     print(f"\n评测: {passed}/{len(results)} 通过 = {passed/len(results):.0%}")
 
 
-asyncio.run(eval())
+asyncio.run(run_eval())
 ```
 
 ---
@@ -409,17 +411,19 @@ async def index(docs: list[dict]):
 
 ## 7. 生产化清单
 
-- [ ] 索引：增量更新（详见 [07-production/01-incremental.md](../07-production/01-incremental.md)）
-- [ ] 缓存：3 层缓存（详见 [07-production/03-caching.md](../07-production/03-caching.md)）
-- [ ] 评测：跑 evalset（详见 [06-evaluation](../06-evaluation)）
-- [ ] 监控：质量 / 延迟 / 成本（详见 [07-production/05-monitoring.md](../07-production/05-monitoring.md)）
-- [ ] 部署：TEI / Qdrant 集群（详见 [07-production/04-deployment.md](../07-production/04-deployment.md)）
+上线前还要补齐下面几件事：
+
+- [ ] 索引支持增量更新，见[增量索引：文档新增 / 修改 / 删除](../07-production/01-incremental.md)
+- [ ] 加三层缓存，见[缓存策略：Embedding Cache / Query Cache / Result Cache](../07-production/03-caching.md)
+- [ ] 定期跑 evalset，见[评测](../06-evaluation)一章
+- [ ] 监控质量、延迟和成本，见[监控：召回率 / Latency / Cost](../07-production/05-monitoring.md)
+- [ ] 部署 TEI 和 Qdrant 集群，见[部署形态选型](../07-production/04-deployment.md)
 
 ---
 
 ## 8. 下一步
 
-- 📖 语义搜索（电商类）→ [02-semantic-search.md](./02-semantic-search.md)
-- 📖 多模态：图搜图 / 文搜图 → [03-multimodal.md](./03-multimodal.md)
-- 📖 推荐系统 with embedding → [04-recommendation.md](./04-recommendation.md)
-- 📖 去重 / 聚类 → [05-deduplication.md](./05-deduplication.md)
+- 电商、内容类的语义搜索：[语义搜索：电商与内容场景](./02-semantic-search.md)
+- 图搜图、文搜图：[多模态：图搜图 / 文搜图 / 图搜文](./03-multimodal.md)
+- 用 embedding 做推荐：[用 Embedding 做推荐系统](./04-recommendation.md)
+- 去重和聚类：[用 Embedding 做去重、聚类与异常检测](./05-deduplication.md)

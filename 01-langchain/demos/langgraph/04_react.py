@@ -2,19 +2,21 @@
 04_react.py
 ===========
 两种 ReAct Agent 实现对比：
-1) create_react_agent（prebuilt 5 行版）
+1) langchain.agents.create_agent（官方现行的 5 行版；langgraph.prebuilt.create_react_agent 已弃用）
 2) 手写 StateGraph（理解原理）
 """
+import os
 from typing_extensions import Annotated, TypedDict
 
 from dotenv import load_dotenv
 
+from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode, create_react_agent, tools_condition
+from langgraph.prebuilt import ToolNode, tools_condition
 
 load_dotenv()
 
@@ -32,14 +34,14 @@ def calc(expr: str) -> str:
 
 
 tools = [get_weather, calc]
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash"), temperature=0)
 
 
 def prebuilt_version():
-    print("\n========== prebuilt create_react_agent ==========")
-    agent = create_react_agent(
+    print("\n========== create_agent ==========")
+    agent = create_agent(
         model, tools,
-        state_modifier="你是一位严谨的助手，思考清楚再调工具。",
+        system_prompt="你是一位严谨的助手，思考清楚再调工具。",
     )
     out = agent.invoke({"messages": [("human", "北京天气？再算 (3+5)*2")]})
     print(out["messages"][-1].content)

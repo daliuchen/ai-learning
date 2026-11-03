@@ -12,7 +12,7 @@ Pydantic Graph 实战 demo：发票处理工作流。
 - 每个节点是 dataclass，继承 BaseNode
 - 节点之间的连接靠 run() 的返回类型自动识别
 - 没 API Key 时 Agent 自动 fallback 到 TestModel
-- 末尾打印 mermaid_code 给非技术同事看
+- 末尾打印 mermaid 图（graph.render()）给非技术同事看
 
 运行：
     python demos/modules/03_graph.py
@@ -27,7 +27,7 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
-from pydantic_graph import BaseNode, End, Graph, GraphRunContext
+from pydantic_graph import BaseNode, End, GraphBuilder, GraphRunContext, StepContext
 
 load_dotenv()
 
@@ -58,9 +58,9 @@ class State:
 def build_extract_agent() -> Agent[None, Invoice]:
     if os.getenv("OPENAI_API_KEY"):
         return Agent(
-            "openai:gpt-4o-mini",
+            "openai-chat:qwen-flash",
             output_type=Invoice,
-            system_prompt="从用户输入里提取发票字段。",
+            instructions="从用户输入里提取发票字段。",
         )
     # TestModel 默认会按 schema 凭空造一个合法对象
     return Agent(TestModel(), output_type=Invoice)
@@ -138,9 +138,26 @@ class Reject(BaseNode[State, None, str]):
 # =====================================================================
 # 组装图
 # =====================================================================
-graph: Graph[State, None, str] = Graph(
-    nodes=[Extract, Validate, Save, Notify, Reject],
+# 新版 pydantic-graph：用 GraphBuilder 装配，build() 得到可执行的 Graph。
+# 节点之间的边仍然由 run() 的返回类型推断；入口通过一个 start 步骤接上 g.start_node。
+g = GraphBuilder(state_type=State, input_type=str, output_type=str)
+
+
+@g.step
+async def start(ctx: StepContext[State, None, str]) -> Extract:
+    return Extract()
+
+
+g.add(
+    g.node(Extract),
+    g.node(Validate),
+    g.node(Save),
+    g.node(Notify),
+    g.node(Reject),
+    g.edge_from(g.start_node).to(start),
 )
+
+graph = g.build()
 
 
 # =====================================================================
@@ -148,10 +165,10 @@ graph: Graph[State, None, str] = Graph(
 # =====================================================================
 async def run_case(raw: str) -> None:
     state = State(raw=raw)
-    result = await graph.run(Extract(), state=state)
+    output = await graph.run(state=state, inputs=raw)  # 直接返回 End 里的值
 
     print(f"\n========== Input ==========\n{raw}")
-    print(f"========== Output ==========\n{result.output}")
+    print(f"========== Output ==========\n{output}")
     print("========== Log ==========")
     for line in state.log:
         print(" -", line)
@@ -169,7 +186,7 @@ async def main() -> None:
 
     # Demo B：导出 mermaid
     print("\n========== Mermaid 拓扑 ==========")
-    print(graph.mermaid_code(start_node=Extract))
+    print(graph.render())
 
 
 if __name__ == "__main__":

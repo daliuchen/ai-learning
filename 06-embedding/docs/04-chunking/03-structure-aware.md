@@ -1,6 +1,6 @@
 # 文档结构感知切分：PDF / Markdown / HTML / 表格
 
-> **一句话**：文档有 heading / table / code block / list 时，**按结构切**比纯字符切好得多——chunk 保留完整逻辑单元，metadata 自动带上 section 信息。
+> 文档里有标题、表格、代码块、列表的时候，按结构切比按字符切好得多：每个 chunk 都是一个完整的逻辑单元，section 信息也能顺手记进 metadata。这篇按文档类型逐个讲怎么切。
 
 ---
 
@@ -51,13 +51,13 @@ for c in chunks:
 {"h1": "账户安全", "h2": "修改密码"} → 设置 → 安全 → 修改密码
 ```
 
-每个 chunk 自动带 heading 路径——LLM 拿到时能理解上下文。
+每个 chunk 都自动带上了 heading 路径，LLM 拿到它时能知道这段内容在文档里的位置。
 
 ---
 
 ## 2. Markdown 复合切分
 
-heading 切完一些 chunk 仍太大 → 再用 recursive 切：
+按 heading 切完，有些 chunk 还是太大，这时在内部再用 recursive 切一遍：
 
 ```python
 from langchain_text_splitters import (
@@ -113,18 +113,18 @@ html = """
 """
 
 
-chunks = splitter.split_text_from_url(url="https://...")
-# 或直接 split_text(html)
+chunks = splitter.split_text(html)
+# 线上页面可以用 splitter.split_text_from_url(url="https://...")
 ```
 
 ---
 
 ## 4. PDF：用 unstructured 提结构
 
-PDF 没明确 heading 但有视觉结构（字体大小 / 加粗 / 段落）。
+PDF 没有显式的 heading，但有字体大小、加粗、段落这些视觉结构，可以借工具把它们识别出来。
 
 ```python
-# pip install unstructured pypdf
+# pip install "unstructured[pdf]"
 from unstructured.partition.pdf import partition_pdf
 
 
@@ -136,7 +136,7 @@ for el in elements:
     # Title / NarrativeText / ListItem / Table / FigureCaption ...
 ```
 
-`unstructured` 把 PDF 拆成结构化 elements。按 category 组装 chunk：
+`unstructured` 会把 PDF 拆成带类别的 elements，再按 category 组装成 chunk：
 
 ```python
 chunks = []
@@ -165,7 +165,7 @@ if current:
 
 ## 5. 处理 Table
 
-表格切碎了完全没用。两种处理：
+表格一旦被切碎就没法用了。处理方式有两种。
 
 ### 5.1 把表格转 markdown / CSV 整体当 chunk
 
@@ -196,7 +196,7 @@ def table_to_row_chunks(table_data, doc_title):
     return chunks
 ```
 
-按"是否需要逐行检索"选。
+选哪种，看你是否需要逐行检索。
 
 ---
 
@@ -219,9 +219,7 @@ js_splitter = RecursiveCharacterTextSplitter.from_language(
 )
 ```
 
-LangChain 内置 Python / JS / TS / Markdown / HTML / Solidity / Go / Rust / C++ 等 splitter——按对应语言的 keyword（`def`, `class`, `function`）切。
-
-或者用 **tree-sitter** 解析 AST 后按节点切（更精准）。
+LangChain 内置了 Python、JS、TS、Markdown、HTML、Solidity、Go、Rust、C++ 等语言的 splitter，按各语言的关键字（`def`、`class`、`function`）来切。想更精确，可以用 tree-sitter 解析 AST，按语法节点切。
 
 ---
 
@@ -245,19 +243,19 @@ def chunk_json(data, prefix=""):
     return chunks
 ```
 
-但通常 JSON 数据更适合**字段级 embed**（每个 key-value 单独 embed）。
+不过 JSON 数据通常更适合字段级 embed，也就是每个 key-value 单独 embed。
 
 ---
 
 ## 8. 论文 / 长报告
 
-PDF 论文有明显结构：
+论文 PDF 的结构很明显：
 
 ```
 Abstract → Intro → Method → Experiments → Conclusion → References
 ```
 
-按 section 切：
+直接按 section 切：
 
 ```python
 sections = ["Abstract", "Introduction", "Methods", "Results", "Discussion", "References"]
@@ -285,7 +283,6 @@ def split_paper(text):
 ## 9. 完整 demo：Markdown 文档
 
 ```python
-# demos/chunking/03_structure.py
 from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 
 
@@ -335,7 +332,7 @@ for c in final:
     print(f"{c['metadata']}: {c['text'][:60]}...")
 ```
 
-输出：
+输出如下：
 
 ```
 {'h1': '用户手册', 'h2': '第一章 注册账号', 'h3': '1.1 邮箱注册'}: 访问 example.com，点击"注册"，输入邮箱和密码。验证邮件...
@@ -360,7 +357,7 @@ for c in final:
     # embed + index
 ```
 
-LLM 拿到 chunk 时也能看到 section path，回答更准。
+这样 LLM 拿到 chunk 时也能看到它属于哪个 section，回答会更准。
 
 ---
 
@@ -368,16 +365,16 @@ LLM 拿到 chunk 时也能看到 section path，回答更准。
 
 | 坑 | 解 |
 |----|----|
-| PDF 用纯字符切 | 用 unstructured / pdfplumber 提取结构 |
-| 表格切碎 | 整表 markdown 或行级 chunk |
-| 代码按字符切 | 用 Language splitter |
-| heading 切完不再细切 | 太长的 chunk 还要二次切 |
-| metadata 丢失 | 切之前先记好 doc / section / page |
+| PDF 按纯字符切 | 用 unstructured / pdfplumber 先提取结构 |
+| 表格被切碎 | 整表转 markdown，或者按行做 chunk |
+| 代码按字符切 | 换成 Language splitter |
+| 按 heading 切完就不管了 | 过长的 chunk 还要再切一次 |
+| metadata 丢了 | 切之前先记下 doc / section / page |
 
 ---
 
 ## 12. 下一步
 
-- 📖 多粒度（small-to-big）→ [04-small-to-big.md](./04-small-to-big.md)
-- 📖 chunk metadata 设计 → [05-metadata.md](./05-metadata.md)
-- 📖 检索：让 small chunk 召回，big chunk 给 LLM → [05-retrieval](../05-retrieval)
+- 多粒度切分：[多粒度切分：Small-to-Big / Parent Document](./04-small-to-big.md)
+- chunk 的 metadata 怎么设计：[Chunk Metadata 设计](./05-metadata.md)
+- 切好之后怎么检索：[纯向量 vs 关键词 vs 混合](../05-retrieval/01-vector-vs-keyword.md)

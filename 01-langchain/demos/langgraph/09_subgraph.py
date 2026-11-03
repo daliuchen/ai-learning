@@ -3,18 +3,20 @@
 ==============
 团队子图：研究团队（web + paper）独立 state，主图只看 summary。
 """
+import os
 from typing_extensions import Annotated, TypedDict
 
 from dotenv import load_dotenv
 
+from langchain.agents import create_agent
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import create_react_agent
 
 load_dotenv()
+QWEN = os.environ.get("QWEN_MODEL", "qwen-flash")
 
 
 # ----------------- 团队子图 -----------------
@@ -35,8 +37,8 @@ def arxiv_search(q: str) -> str:
     return f"[arxiv] 找到 {q} 相关论文 3 篇"
 
 
-web_agent = create_react_agent(ChatOpenAI(model="gpt-4o-mini"), [web_search])
-paper_agent = create_react_agent(ChatOpenAI(model="gpt-4o-mini"), [arxiv_search])
+web_agent = create_agent(ChatOpenAI(model=QWEN), [web_search])
+paper_agent = create_agent(ChatOpenAI(model=QWEN), [arxiv_search])
 
 
 def web_node(state):
@@ -54,7 +56,7 @@ def summarize(state):
         m.content for m in state["messages"]
         if isinstance(m, HumanMessage) and m.name in ("web", "paper")
     )
-    s = ChatOpenAI(model="gpt-4o-mini").invoke(f"用一段话总结：\n{text}").content
+    s = ChatOpenAI(model=QWEN).invoke(f"用一段话总结：\n{text}").content
     return {"summary": s}
 
 
@@ -83,7 +85,7 @@ def call_team(state: MainState):
 
 
 def write_answer(state: MainState):
-    ans = ChatOpenAI(model="gpt-4o-mini").invoke(
+    ans = ChatOpenAI(model=QWEN).invoke(
         f"基于研究内容：\n{state['research_summary']}\n\n回答用户问题：{state['question']}"
     ).content
     return {"answer": ans}

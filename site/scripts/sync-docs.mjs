@@ -12,7 +12,7 @@
  *
  * 自动生成 _meta.ts、修复 markdown 相对链接、把 demo 链接展开成代码块。
  */
-import { promises as fs, existsSync, readFileSync } from 'node:fs'
+import { promises as fs, existsSync, readFileSync, readdirSync as readdirSyncSafe } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -23,14 +23,14 @@ const DST_DOCS = path.join(SITE_ROOT, 'pages', 'docs')
 const DST_DEMOS = path.join(SITE_ROOT, 'public', 'demos')
 
 const MANUAL_TITLES = {
-  '01-langchain': '🦜 LangChain 全家桶',
-  '02-pydantic-ai': '🤖 Pydantic AI',
-  '03-mcp': '🔌 MCP（Model Context Protocol）',
-  '04-prompt-engineering': '✍️ Prompt Engineering 实战',
-  '05-openai-agents-sdk': '🧭 OpenAI Agents SDK',
-  '06-embedding': '🔍 Embedding & 向量检索',
-  '07-context-engineering': '🧩 Context Engineering 上下文工程',
-  '08-enterprise-kb': '🏢 企业知识库实战',
+  '01-langchain': 'LangChain 全家桶',
+  '02-pydantic-ai': 'Pydantic AI',
+  '03-mcp': 'MCP 协议',
+  '04-prompt-engineering': 'Prompt Engineering',
+  '05-openai-agents-sdk': 'OpenAI Agents SDK',
+  '06-embedding': 'Embedding 与向量检索',
+  '07-context-engineering': 'Context Engineering',
+  '08-enterprise-kb': '企业知识库实战',
 }
 
 const SECTION_TITLES = {
@@ -145,8 +145,69 @@ function inlineDemoCode(content, manualRoot, manualSlug) {
   )
 }
 
-function fixLinks(content, manualSlug, manualRoot) {
+// 把任意相对链接按源文件位置解析成站点路由：
+//   <repo>/0X-book/docs/<rest>.md  → /docs/0X-book/<rest>
+//   <repo>/0X-book/docs/<dir>/     → 该目录下第一篇
+//   <repo>/0X-book/README.md 等    → GitHub 原文件
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+const GITHUB_BLOB = 'https://github.com/daliuchen/ai-learning/blob/main/'
+function firstDoc(dir) {
+  const walk = (d) => {
+    const items = require_readdir(d).sort()
+    for (const it of items) {
+      const full = path.join(d, it)
+      if (it.endsWith('.md')) return full
+      if (!it.includes('.')) {
+        const r = walk(full)
+        if (r) return r
+      }
+    }
+    return null
+  }
+  return walk(dir)
+}
+function require_readdir(d) {
+  try { return readdirSyncSafe(d) } catch { return [] }
+}
+function resolveRelLink(target, srcPath) {
+  const [p0, hash] = target.split('#')
+  if (!p0) return null
+  const abs = path.resolve(path.dirname(srcPath), p0)
+  const rel = path.relative(REPO_ROOT, abs).split(path.sep).join('/')
+  if (rel.startsWith('..')) return null
+  const m = rel.match(/^(0\d-[^/]+)\/docs\/(.+)$/)
+  const anchor = hash ? '#' + hash : ''
+  if (m) {
+    let rest = m[2]
+    if (rest.endsWith('.md')) return `/docs/${m[1]}/${rest.slice(0, -3)}${anchor}`
+    const fd = existsSync(abs) ? firstDoc(abs) : null
+    if (fd) {
+      const r2 = path.relative(path.join(REPO_ROOT, m[1], 'docs'), fd).split(path.sep).join('/')
+      return `/docs/${m[1]}/${r2.slice(0, -3)}${anchor}`
+    }
+    return null
+  }
+  if (/^0\d-[^/]+\/demos\//.test(rel)) return null // demos 交给原有规则
+  if (existsSync(abs)) return GITHUB_BLOB + rel + anchor
+  return null
+}
+
+function fixLinks(content, manualSlug, manualRoot, srcPath) {
   content = inlineDemoCode(content, manualRoot, manualSlug)
+  // 先按源文件位置处理所有带 ../ 或 ./ 的相对链接（跳过代码块）
+  if (srcPath) {
+    const parts = content.split(/(```[\s\S]*?```)/g)
+    content = parts
+      .map((seg, i) => {
+        if (i % 2 === 1) return seg
+        return seg.replace(/\]\(((?:\.\.?\/)[^)\s]*)\)/g, (all, t) => {
+          if (/^\.\.\/\.\.\/demos\//.test(t)) return all
+          const r = resolveRelLink(t, srcPath)
+          return r ? `](${r})` : all
+        })
+      })
+      .join('')
+  }
   content = content.replace(
     /\(\.\.\/\.\.\/demos\//g,
     `(/demos/${manualSlug}/`,
@@ -172,11 +233,13 @@ const PROMO_FOOTER = `
 
 ---
 
-## 📬 持续追更
-
-如果这篇对你有帮助，欢迎关注公众号「**Ethan 的 LLM 工程手册**」，新章节同步更新。
-
-<img src="/qrcode.png" alt="公众号 Ethan 的 LLM 工程手册" width="200" style="border-radius: 8px; margin: 12px 0;" />
+<div class="al-follow-card">
+  <img src="/qrcode.jpg" alt="公众号 Ethan 的 LLM 工程手册" width="96" height="96" />
+  <div>
+    <strong>Ethan 的 LLM 工程手册</strong>
+    <p>新章节会先发在这个公众号，扫码关注。</p>
+  </div>
+</div>
 `
 
 async function copyDocs(src, dst, manualSlug, manualRoot) {
@@ -190,7 +253,7 @@ async function copyDocs(src, dst, manualSlug, manualRoot) {
     if (entry.name.endsWith('.md')) {
       const d = path.join(dst, entry.name)
       const raw = await fs.readFile(s, 'utf8')
-      const fixed = fixLinks(raw, manualSlug, manualRoot) + PROMO_FOOTER
+      const fixed = fixLinks(raw, manualSlug, manualRoot, s) + PROMO_FOOTER
       await fs.writeFile(d, fixed, 'utf8')
     }
   }

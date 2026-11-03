@@ -1,12 +1,12 @@
 # State vs Context：不是所有状态都该进上下文
 
-> **一句话**：Agent 要记的东西分两类——「模型必须**看到**才能决策的」放上下文，「程序**记着就行**、模型用时才需要」放外部 state（变量、数据库、scratchpad），按需才注入。把待办清单、中间变量反复挂在窗口里，是上下文累积的隐形大头。
+> Agent 要记的东西分两类。模型做决策时必须读到的，放进上下文；程序记着就行、模型偶尔才用的，放到外部 state（变量、数据库、scratchpad），用时再注入。待办清单、中间变量每一步都挂在窗口里，是上下文累积里很容易被忽略的一大块。
 
 ---
 
-## 1. 一个根本区分：看到 vs 记着
+## 1. 先分清：模型要看到，还是程序记着就行
 
-新手 Agent 最常见的浪费：把所有状态都当对话历史塞进上下文。但很多状态模型**根本不需要每步都看到**：
+刚上手写 Agent 时最常见的浪费，是把所有状态都当成对话历史塞进上下文。其实很多状态模型并不需要每一步都看到：
 
 | 状态 | 该放哪 | 理由 |
 |------|--------|------|
@@ -14,10 +14,10 @@
 | 已确认的关键事实 | 上下文 | 直接影响下一步推理 |
 | 完整待办清单（20 项，已完成 15 项） | 外部 state | 模型只需知道「下一项」，不必每步重读全部 |
 | 计数器 / 循环次数 / 重试次数 | 外部 state | 纯程序逻辑，模型不需要看 |
-| 大段中间产物（抓回的网页全文） | 外部 state（句柄） | 用时才取回（见 [02-tool-results.md](./02-tool-results.md)） |
+| 大段中间产物（抓回的网页全文） | 外部 state（句柄） | 用时才取回（见[工具结果的上下文管理](./02-tool-results.md)） |
 | 工具调用的原始日志 | 外部 state | 调试用，模型不需要 |
 
-判断口诀：**「这个东西，模型这一步推理时真的要读它的内容吗？」** 否 → 进外部 state，别占窗口。
+判断时问自己一句：模型这一步推理，要不要读这个东西的内容？不要，就放外部 state，别占窗口。
 
 ```python
 # ❌ 反模式：把整个待办清单每步重发进上下文
@@ -35,7 +35,7 @@ messages.append({"role": "user", "content": f"当前任务：{current.title}"})
 
 ## 2. Scratchpad 模式：把思考外置成可读写的草稿纸
 
-scratchpad（草稿纸）是一块 Agent 能读写、但**不必每步全量进上下文**的外部存储。Agent 把中间笔记、计划、已知事实写进去，需要时再读相关片段进窗口。
+scratchpad（草稿纸）是一块 Agent 能读能写、但不必每一步都整份放进上下文的外部存储。Agent 把中间笔记、计划、已知事实写进去，需要时再把相关的片段读回窗口。
 
 ```python
 class Scratchpad:
@@ -56,22 +56,22 @@ class Scratchpad:
 # 上下文里常驻的只是「草稿纸里有哪些条目」，全文按需 read 回来
 ```
 
-好处：Agent 跑到第 30 步还能 `scratchpad_read("初始需求")` 把最初目标拉回来——而不靠把它一直挂在窗口里（那样早被后面的轨迹淹没了）。
+这样 Agent 跑到第 30 步，还能用 `scratchpad_read("初始需求")` 把最初的目标拉回来。要是靠把目标一直挂在窗口里，早就被后面的轨迹淹没了。
 
 ---
 
-## 3. LangGraph 的 state：一等公民的外部状态
+## 3. LangGraph 的 state：框架内建的外部状态
 
-LangGraph 把这个理念做成了框架核心：图里流转的不是「一条 messages」，而是一个**结构化 state 对象**。哪些字段进 LLM、哪些只在程序里流转，由你显式控制。
+LangGraph 把这个思路做成了框架的核心。图里流转的是一个结构化的 state 对象，不只是一列 messages。哪些字段送进 LLM、哪些只在程序里流转，由你显式决定。
 
 ```python
 from typing import TypedDict, Annotated
 from langgraph.graph import StateGraph, END
+from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
-import operator
 
 class AgentState(TypedDict):
-    messages: Annotated[list[BaseMessage], operator.add]  # 进 LLM 的对话上下文
+    messages: Annotated[list[BaseMessage], add_messages]  # 进 LLM 的对话上下文（add_messages 会把 ("user", ...) 元组转成消息对象）
     todo: list[str]            # 待办清单 —— 程序读写，不必整个进 prompt
     retry_count: int           # 计数器 —— 纯控制流，模型永远看不到
     artifacts: dict[str, str]  # 落盘句柄 —— 按需注入
@@ -91,17 +91,17 @@ graph.add_node("planner", planner)
 # ... 边和条件略
 ```
 
-精髓：**`messages` 字段才是上下文窗口，其他字段（todo / retry_count / artifacts）是程序状态，模型看不到，也不该看到。** LangGraph 让你把这条边界画得清清楚楚。
+只有 `messages` 字段是上下文窗口，todo、retry_count、artifacts 都是程序状态，模型看不到，也不该看到。用 LangGraph 写，这条边界会清楚地落在 state schema 里。
 
 ---
 
-## 4. State 外置的三类典型对象
+## 4. 适合外置的三类对象
 
 | 对象 | 为什么外置 | 上下文里留什么 |
 |------|-----------|----------------|
-| **待办 / 计划清单** | 几十项全量重发是纯浪费 | 只留「当前项」+「剩余几项」 |
-| **大中间产物**（网页、文件、查询结果） | 体积大、不一定再用 | 摘要 + 句柄，按需取回 |
-| **控制流变量**（循环数、状态机、标志位） | 模型决策完全不需要 | 什么都不留，纯程序持有 |
+| 待办 / 计划清单 | 几十项全量重发是纯浪费 | 只留「当前项」+「剩余几项」 |
+| 大中间产物（网页、文件、查询结果） | 体积大、不一定再用 | 摘要 + 句柄，按需取回 |
+| 控制流变量（循环数、状态机、标志位） | 模型决策完全不需要 | 什么都不留，纯程序持有 |
 
 ```
        上下文窗口（贵、有限、模型每步重读）
@@ -119,18 +119,18 @@ graph.add_node("planner", planner)
 
 ## 5. 落地准则
 
-- **默认外置**：新增一个要"记住"的东西时，先问"模型每步推理需要读它吗"，默认放 state，确实需要看再放上下文。
-- **上下文只放"目录 + 当前焦点"**：清单留当前项，产物留句柄目录，让模型知道"有什么、去哪取"，而非把全文常驻。
-- **控制流绝不进窗口**：计数、标志、状态机切换是程序的事，一个 token 都别花。
-- **用框架画边界**：LangGraph 的 state schema、或自己的 `Scratchpad`，把"进窗口"和"留程序"显式分开，避免随手 append 导致窗口失控。
+- 默认外置。新增一个要记住的东西时，先问模型每步推理是否需要读它，默认放 state，确实需要才进上下文。
+- 上下文里只放目录和当前焦点。清单留当前项，产物留句柄目录，让模型知道有什么、去哪取，不必把全文常驻。
+- 控制流不进窗口。计数、标志、状态机切换是程序的事，一个 token 都不用花。
+- 用框架把边界画出来。LangGraph 的 state schema 或者自己写的 `Scratchpad`，都能把「进窗口」和「留在程序里」分开，避免随手 append 让窗口失控。
 
-这正是上一篇隔离窗口之间的协调方式——子 Agent 不靠共享上下文，而靠读写共享的外部 state 传递信息。
+上一篇讲的隔离窗口之间也是这样协调的：子 Agent 不共享上下文，靠读写共享的外部 state 传递信息。
 
 ---
 
 ## 下一步
 
-- [06-failure-modes.md](./06-failure-modes.md)：state 用不好会怎样——脏 state 导致的失败模式
-- [02-tool-results.md](./02-tool-results.md)：句柄机制是 state 外置在工具结果上的应用
-- [04-isolation.md](./04-isolation.md)：隔离窗口靠外部 state 协调
-- 跨章：[../05-compaction/01-why-compact.md](../05-compaction/01-why-compact.md) 上下文确实满了之后的压缩裁剪
+- [上下文相关的 Agent 失败模式](./06-failure-modes.md)：state 管得不好会出什么问题，比如脏 state 引起的失败
+- [工具结果的上下文管理](./02-tool-results.md)：句柄机制是 state 外置在工具结果上的应用
+- [上下文隔离](./04-isolation.md)：隔离的窗口靠外部 state 协调
+- 跨章：[为什么要压缩上下文](../05-compaction/01-why-compact.md)，上下文确实满了以后怎么压缩裁剪

@@ -1,92 +1,60 @@
-# MCP Server 06：Logging / Progress / Ping / Cancellation —— 长任务的"心电图"
+# MCP Server 06：日志、进度、取消与 Ping
 
-> **一句话**：Server 把工具执行过程通过 **logging notification** 告诉 Client、用 **progress notification** 上报百分比、用 **ping** 双向探活、收到 **cancellation notification** 时优雅终止。这一篇把这四件事和 Python SDK 落地一次性讲完。
-
----
-
-## 1. 四个 utility 一张表对照
-
-| Utility | 方向 | 何时发 | Capability |
-|---------|------|--------|------------|
-| **Logging** | Server → Client | 任何想让用户/开发者看到的运行时信息 | Server 声明 `logging` |
-| **Progress** | Server → Client（或反向） | 长任务进度更新 | 隐式（带 progressToken 时自动） |
-| **Ping** | 双向 | 探测对方还活着 | 无需声明（始终可用） |
-| **Cancellation** | 任一方 → 对方 | 取消还在跑的请求 | 无需声明 |
+> 一个跑得久的工具要处理好三件事：用 progress 通知上报进度，被取消时干净地收尾，给运维留下日志。2026-07-28 弃用了协议层 Logging，删除了 `ping`，日志回到 Python 标准库 `logging` 和 OpenTelemetry，探活交给传输层。这篇讲这几件事在 Python SDK 2.x 里怎么做。
 
 ---
 
-## 2. Logging
+## 1. 四个 utility 的现状（2026-07-28 之后）
 
-### 2.1 协议
+| Utility | 方向 | 状态 | 怎么做 |
+|---------|------|------|--------|
+| Logging（`notifications/message`、`logging/setLevel`） | Server → Client | 已弃用（SEP-2577）；`logging/setLevel` 在 2026 版里已移除 | stdio 下写 stderr；HTTP 下用标准库 `logging` + OpenTelemetry |
+| Progress | Server → Client | 保留；2026 起只剩 Server → Client 方向 | `ctx.report_progress(...)` |
+| Ping | 双向 | 删除（2025 版老连接上仍可用） | 用 `server/discover`、`tools/list` 或 HTTP 健康检查探活 |
+| Cancellation | 任一方 → 对方 | 保留 | SDK 自动取消处理函数，你负责写好 `finally` |
 
-Server 声明能力：
+---
 
-```json
-{"capabilities":{"logging":{}}}
-```
+## 2. Logging：回到标准库
 
-Server 发：
+### 2.1 为什么被弃用
 
-```json
-{
-  "method": "notifications/message",
-  "params": {
-    "level": "info",
-    "logger": "weather-server",
-    "data": "正在查询 Beijing 的天气..."
-  }
-}
-```
+协议层日志的做法是：Server 通过 `ctx.info()` 之类的方法，把日志作为通知推给 Client。2026-07-28 认为这个能力很少有客户端认真用，和 stderr、OpenTelemetry 重复，还把运维日志和协议流量混在了一起。SEP-2577 把它标成 Deprecated（功能至少保留 12 个月，但不建议新实现再用），官方的建议是：
 
-`level` 支持：`debug` / `info` / `notice` / `warning` / `error` / `critical` / `alert` / `emergency`（syslog 级别）。
+- stdio 下写 stderr
+- 其它情况用 OpenTelemetry（见[调试与可观测（Inspector、日志与追踪）](../05-production/05-debugging-inspector.md)）
+- 过渡期内，Client 如果还想要协议日志，就在每个请求的 `_meta` 里带上 `io.modelcontextprotocol/logLevel`；请求里没有这个字段时，Server 不得发送 `notifications/message`（2025 版会话级的 `logging/setLevel` 已经删了）
 
-Client 可以发请求设过滤等级：
+在 Python SDK 里调用 `ctx.info()` / `ctx.warning()` 仍然有效，但会触发 `MCPDeprecationWarning`（它是一个 `UserWarning`，默认会打印出来）。
 
-```json
-{
-  "method": "logging/setLevel",
-  "params": {"level": "warning"}
-}
-```
-
-### 2.2 Python SDK
-
-最方便的是 `Context.info` / `warning` / `error` 等：
+### 2.2 推荐写法
 
 ```python
-from mcp.server.fastmcp import Context, FastMCP
+import logging
+from mcp.server import MCPServer
 
-mcp = FastMCP("demo")
+logger = logging.getLogger(__name__)     # 模块顶层建一次
+mcp = MCPServer("demo", log_level="DEBUG")   # 构造时已帮你 basicConfig，handler 指向 stderr；默认 INFO
 
 @mcp.tool()
-async def heavy_task(n: int, ctx: Context) -> str:
-    await ctx.debug(f"开始处理 n={n}")
+def heavy_task(n: int) -> str:
+    logger.info("开始处理 n=%s", n)
     try:
         result = compute(n)
-    except Exception as e:
-        await ctx.error(f"出错: {e}")
+    except Exception:
+        logger.exception("出错")   # 工具里未捕获的异常 SDK 也会记 ERROR 带堆栈
         raise
-    await ctx.info(f"完成: result={result}")
     return str(result)
 ```
 
-Client 端可以注册回调接收：
+- 日志是给运维看的，模型永远看不到。想让模型读到的内容，用 `return` 或 `raise ToolError`
+- stdio 下 stdout 是协议通道，别用 `print()`。SDK 会把已经 flush 的零散 stdout 输出转到 stderr，但没 flush 的 `print` 可能在进程退出时才写进协议流。`logging` 的 handler 每条都会 flush，所以用它
+- 如果你已经自己配置过 logging，`MCPServer` 不会覆盖（`basicConfig` 不替换已有的 handler）
+- 想追踪每个请求的耗时和成败，别靠日志。SDK 默认就把每条消息包成 OpenTelemetry span，只有装了 exporter 才会产生开销
 
-```python
-async def on_log(params):
-    print(f"[{params.level}] {params.data}")
+### 2.3 日志级别怎么用
 
-async with ClientSession(read, write, logging_callback=on_log) as session:
-    ...
-```
-
-### 2.3 设计建议
-
-- **info**：默认级别，给用户看的进展（"正在查询..."）
-- **debug**：详细 trace，开发用，生产关
-- **warning**：能继续但有问题（缓存失效、降级）
-- **error**：抛错前留一笔，便于排查
-- **不要在 logging 里塞秘密**：Logging 会被 Host 展示，可能被截图、被采集
+info 记关键节点，debug 记详细过程（生产环境关掉），warning 记能继续但有问题的情况，error 在抛错前留一笔。日志里不要放 token、用户隐私这类敏感信息。需要结构化日志时可以用 `structlog` 之类的库，把 JSON 输出到 stderr，再交给采集器。
 
 ---
 
@@ -94,7 +62,7 @@ async with ClientSession(read, write, logging_callback=on_log) as session:
 
 ### 3.1 协议
 
-调方在请求的 `_meta` 里塞 `progressToken`：
+调用方在请求的 `_meta` 里放一个 `progressToken`：
 
 ```json
 {
@@ -107,7 +75,7 @@ async with ClientSession(read, write, logging_callback=on_log) as session:
 }
 ```
 
-被调方发进度通知：
+被调用方发送进度通知：
 
 ```json
 {
@@ -121,11 +89,11 @@ async with ClientSession(read, write, logging_callback=on_log) as session:
 }
 ```
 
-`progress` 单调递增、`total` 可选（不传就是 indeterminate）。
+`progress` 必须单调递增；`total` 可选，不传表示总量未知。2026-07-28 里进度通知只能从 Server 发往 Client（Client → Server 方向的进度已弃用），而且和所有请求级通知一样，只会出现在该请求自己的响应流里（Streamable HTTP 下就是那个 POST 的 SSE 响应）。
 
 ### 3.2 Python SDK
 
-服务端用 `ctx.report_progress`：
+服务端用 `ctx.report_progress(progress, total=None, message=None)`：
 
 ```python
 @mcp.tool()
@@ -133,83 +101,41 @@ async def scrape(url: str, ctx: Context) -> str:
     pages = await discover(url)
     for i, p in enumerate(pages):
         await fetch(p)
-        await ctx.report_progress(
-            progress=i + 1,
-            total=len(pages),
-            message=f"抓取 {p}",
-        )
+        await ctx.report_progress(i + 1, total=len(pages), message=f"抓取 {p}")
     return f"完成 {len(pages)} 页"
 ```
 
-FastMCP 自动从请求的 `_meta.progressToken` 拿 token，没传就跳过通知。
+- 调用方没要进度（请求里没有 `progressToken`）时，`report_progress` 什么也不做，所以可以无条件上报
+- 不知道真实总数就别传 `total`，客户端回调收到的会是 `total=None`
 
-客户端：
+客户端在每次调用时传入回调，而不是挂在 `Client` 上：
 
 ```python
-async def on_progress(progress, total, message):
+async def on_progress(progress: float, total: float | None, message: str | None) -> None:
     print(f"进度 {progress}/{total}: {message}")
 
-# 调工具时传 token + 回调
-result = await session.call_tool(
-    "scrape",
-    {"url": "..."},
-    progress_callback=on_progress,
-)
+result = await client.call_tool("scrape", {"url": "..."}, progress_callback=on_progress)
 ```
 
-### 3.3 设计建议
+> 在真实的传输上，通知和结果是分别送达的，慢一点的回调可能在 `call_tool` 返回之后还在执行。只有进程内的测试连接能保证所有进度都先于结果到达。
 
-- 进度别太密集（每秒 < 10 条）
-- 没有真实总数时不传 `total`（避免假百分比）
-- 重置超时：spec 允许 Client 在收到进度通知时重置请求超时，但**Server 别滥用**——配合最大超时
-- 失败时也发一条最终进度（progress=total）让 UI 收尾
+### 3.3 几点建议
+
+进度别发得太密，每秒少于 10 条就够了。没有真实总数时不要传 `total`，免得显示一个假的百分比。规范允许 Client 收到进度通知时重置请求超时，但 Server 不应该靠这个无限续命，最好配合一个最大超时。
 
 ---
 
-## 4. Ping
+## 4. Ping：2026-07-28 起移除
 
-### 4.1 协议
+2025 版里，`ping` 是一个双向的空请求，用来探活和给 SSE 长连接保活。2026-07-28 把它整个删了：既然没有长期存在的会话，协议层也就不需要探测对方还在不在。替代做法：
 
-双向都能发：
+| 以前 | 现在 |
+|------|------|
+| 探测 Server 是否可达 | `server/discover`（带缓存提示，开销小），或者一次 `tools/list`；HTTP 上用普通的健康检查端点（见[用 Streamable HTTP 部署远程 MCP](../05-production/01-remote-mcp.md)） |
+| 给 SSE 长连接保活 | 交给传输层或反向代理的 keep-alive；订阅流断了就重新 `subscriptions/listen`（流不能恢复，也不是重放日志） |
+| stdio 探活 | 一般不需要，子进程退出时管道会直接断开 |
 
-```json
-{"jsonrpc":"2.0","id":99,"method":"ping"}
-{"jsonrpc":"2.0","id":99,"result":{}}
-```
-
-返回空对象就行。
-
-### 4.2 Python SDK
-
-SDK 内部自动响应 ping，你**不用**自己写 handler。
-
-主动发 ping：
-
-```python
-# 客户端
-pong = await session.send_ping()
-print(f"Server 还活着，往返耗时...")
-```
-
-服务端在 lifespan 里也可以发 ping 探测客户端：
-
-```python
-import anyio
-
-async def keepalive(server):
-    while True:
-        await anyio.sleep(30)
-        try:
-            await server.session.send_ping()
-        except Exception:
-            break
-```
-
-### 4.3 设计建议
-
-- **HTTP 长 SSE 流**：每 30-60 秒 ping 一次防中间代理超时
-- **stdio**：通常不需要，子进程死了管道会直接断
-- **超时**：ping 应该几百毫秒回，超过 5 秒就当对方死了
+对 2025 版的老连接，SDK 仍然会应答 `ping`（`{"method":"ping"}` → `{"result":{}}`）；对 2026 版连接发 `ping` 会得到 `-32601 Method not found`。
 
 ---
 
@@ -217,144 +143,144 @@ async def keepalive(server):
 
 ### 5.1 协议
 
-发起方想撤销已发过的请求：
+发起方想撤回已经发出的请求时：
 
 ```json
 {
   "method": "notifications/cancelled",
-  "params": {
-    "requestId": 42,
-    "reason": "user_cancelled"
-  }
+  "params": {"requestId": 42, "reason": "user_cancelled"}
 }
 ```
 
-被调方收到后**应当**：
+接收方收到后应当立即停止处理，不再发送响应，并释放资源。这是一条通知，没有响应。
 
-1. 立刻停止处理（如果还在跑）
-2. 不要再发响应（响应会被对方忽略）
-3. 释放资源
+### 5.2 Python SDK：v2 会真正取消你的函数
 
-注意：是**通知**，没有响应。
+Client 的请求超时或者调用被取消时，SDK 现在会真正取消 Server 端的处理函数（v1 不会）。`async def` 函数会在正在 `await` 的地方收到取消异常，函数展开，返回值被丢弃。大多数工具什么都不用做，只有两类需要处理。
 
-### 5.2 Python SDK
-
-服务端：长跑任务里检查取消：
+第一类是有资源要清理的 `async def` 工具。清理逻辑放进 `finally`；如果清理时还要 `await`，必须加 `shield` 并设定时限：
 
 ```python
+import anyio
+
 @mcp.tool()
-async def long_task(n: int, ctx: Context) -> str:
-    for i in range(n):
-        # 显式检查取消（async cancellation）
-        if ctx.request_context.cancelled:
-            await ctx.warning("被取消，提前退出")
-            return "cancelled"
-        await ctx.report_progress(progress=i + 1, total=n)
-        await asyncio.sleep(1)
-    return "done"
+async def order_book(title: str) -> str:
+    """下单并占住库存，等待付款"""
+    holds.add(title)
+    try:
+        await take_payment(title)
+        return f"Ordered {title!r}."
+    finally:
+        # 被取消的协程里，后续每个 await 都会立刻再抛；shield 才能让清理跑完
+        with anyio.move_on_after(5, shield=True):
+            await release_hold(title)
 ```
 
-> SDK 的 `ctx.request_context.cancelled` 是布尔标志。底层 SDK 也会在请求被取消时给协程发 `asyncio.CancelledError`，所以你只需要让代码"async 友好"——大量 await 点 + 没把 CancelledError 吞掉。
-
-客户端：
+第二类是普通的 `def` 工具。它跑在工作线程里，外部没法打断线程，只能由工具自己定期检查：
 
 ```python
-import asyncio
+import anyio.from_thread
 
-call_task = asyncio.create_task(session.call_tool("long_task", {"n": 100}))
-await asyncio.sleep(3)
-call_task.cancel()  # SDK 会自动发 notifications/cancelled
+@mcp.tool()
+def rebuild_index(titles: list[str]) -> str:
+    offline.add("search")
+    try:
+        for title in titles:
+            anyio.from_thread.check_cancelled()   # 没取消时什么都不做，取消后会抛
+            index_book(title)
+        return f"Indexed {len(titles)} books."
+    finally:
+        offline.discard("search")
 ```
 
-### 5.3 设计建议
+一个从不检查的 `def` 工具会一直跑到结束，然后结果被丢弃。
 
-- 写 Tool 时**永远不要 catch `CancelledError` 然后吞掉**
-- 长跑要有 `await asyncio.sleep(0)` 或类似 yield 点
-- 释放资源用 `try/finally`，别用 `except CancelledError`
+> v1 里常见的 `ctx.request_context.cancelled` 标志已经不是推荐写法，改用 `finally` 配合 anyio 的取消语义。
+
+在客户端，取消调用所在的任务，或者设置 `read_timeout_seconds`，就会触发取消，SDK 会自动发出 `notifications/cancelled`：
+
+```python
+try:
+    await client.call_tool("crawl", {...}, read_timeout_seconds=0.5)
+except MCPError as e:
+    print(e.code)    # -32001 REQUEST_TIMEOUT（v1 是 408；超时参数也从 timedelta 改成了 float 秒）
+```
+
+### 5.3 几点建议
+
+清理用 `try/finally`，不要用 `except CancelledError`。取消异常绝对不能吞掉，必须让它继续往上抛。长时间运行的代码里要有 await 点（`await anyio.sleep(0)` 也行），否则没有地方可以被取消。写操作被取消时可能只做了一半，所以要设计成幂等的或可补偿的。
 
 ---
 
-## 6. 综合 demo：网页抓取 Server
+## 6. 综合 demo：进度、取消与标准库日志
 
 ```python
-# demos/server/06_logging_progress.py
-"""演示 logging / progress / cancellation 的综合 Server"""
 import asyncio
-import random
-from mcp.server.fastmcp import Context, FastMCP
+import logging
+import sys
 
-mcp = FastMCP("crawler-demo")
+import anyio
+
+from mcp import Client, MCPError, StdioServerParameters
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
+
+logger = logging.getLogger("crawler")  # 日志给「运维」看，写 stderr，模型看不到
+mcp = MCPServer("crawler-demo")
+CLEANED: list[int] = []
 
 
 @mcp.tool()
-async def crawl(url: str, max_pages: int = 20, ctx: Context = None) -> dict:
-    """模拟爬取一个网站"""
-    await ctx.info(f"开始爬取 {url}，最多 {max_pages} 页")
-
-    pages_found = []
+async def crawl(url: str, ctx: Context, max_pages: int = 5) -> dict:
+    """模拟爬取一个网站：上报进度；被取消时在 finally 里清理"""
+    logger.info("开始爬取 %s，最多 %d 页", url, max_pages)
+    found: list[str] = []
     try:
         for i in range(max_pages):
-            # 模拟抓取
-            await asyncio.sleep(0.2)
-
-            page_url = f"{url}/page-{i+1}"
-            pages_found.append(page_url)
-
-            await ctx.report_progress(
-                progress=i + 1,
-                total=max_pages,
-                message=f"抓取 {page_url}",
-            )
-
-            if random.random() < 0.05:  # 5% 概率模拟 warning
-                await ctx.warning(f"页面 {page_url} 加载慢（5s+）")
-
-    except asyncio.CancelledError:
-        await ctx.warning(f"任务被取消，已抓 {len(pages_found)} 页")
-        raise  # 必须重新 raise，让 SDK 知道任务取消了
+            await anyio.sleep(0.2)  # 模拟抓取；这是一个取消点
+            found.append(f"{url}/page-{i + 1}")
+            await ctx.report_progress(i + 1, total=max_pages, message=f"抓取 {found[-1]}")
+        return {"crawled": len(found), "pages": found[:3]}
     finally:
-        await ctx.info(f"清理资源，已抓 {len(pages_found)} 页")
+        # 无论正常结束、抛错还是被取消，都会走到这里；需要 await 的清理要 shield 并设时限
+        with anyio.move_on_after(2, shield=True):
+            CLEANED.append(len(found))
+            logger.info("清理完成，已抓 %d 页", len(found))
 
-    return {"crawled": len(pages_found), "pages": pages_found[:5]}
+
+async def client_main() -> None:
+    params = StdioServerParameters(command=sys.executable, args=[__file__, "--server"])
+    async with Client(params) as client:
+
+        async def on_progress(progress: float, total: float | None, message: str | None) -> None:
+            print(f"[PROGRESS] {int(progress / total * 100) if total else 0}% — {message}")
+
+        r = await client.call_tool("crawl", {"url": "https://example.com", "max_pages": 3}, progress_callback=on_progress)
+        print("结果:", r.content[0].text.replace("\n", ""))
+
+        # 取消 = 客户端超时。SDK 会发 notifications/cancelled，并真的取消 Server 端的处理函数
+        try:
+            await client.call_tool("crawl", {"url": "https://example.com", "max_pages": 50}, read_timeout_seconds=0.5)
+        except MCPError as e:
+            print("超时:", e.code, e)  # -32001 REQUEST_TIMEOUT
 
 
 if __name__ == "__main__":
-    mcp.run()
+    if "--server" in sys.argv:
+        mcp.run()
+    else:
+        asyncio.run(client_main())
 ```
 
-Client 跑：
+这个文件既是 Server 也是 Client（Client 会自动拉起 stdio 子进程），运行 `python demos/server/06_progress_cancel.py`。实际输出（节选）：
 
-```python
-# demos/client/06_progress_client.py
-import asyncio
-from mcp import ClientSession
-from mcp.client.stdio import stdio_client, StdioServerParameters
-
-
-async def main():
-    params = StdioServerParameters(
-        command="python", args=["demos/server/06_logging_progress.py"]
-    )
-
-    async def on_log(params):
-        print(f"[LOG/{params.level}] {params.data}")
-
-    async def on_progress(progress, total, message):
-        pct = int(progress / total * 100) if total else 0
-        print(f"[PROGRESS] {pct}% — {message}")
-
-    async with stdio_client(params) as (r, w):
-        async with ClientSession(r, w, logging_callback=on_log) as session:
-            await session.initialize()
-            result = await session.call_tool(
-                "crawl",
-                {"url": "https://example.com", "max_pages": 5},
-                progress_callback=on_progress,
-            )
-            print(f"\n最终结果: {result.content[0].text}")
-
-
-asyncio.run(main())
+```
+[PROGRESS] 33% — 抓取 https://example.com/page-1
+[PROGRESS] 66% — 抓取 https://example.com/page-2
+[PROGRESS] 100% — 抓取 https://example.com/page-3
+结果: {  "crawled": 3,  "pages": [...] }
+超时: -32001 Request 'tools/call' timed out
+# Server 的 stderr 里可以看到被取消的那次调用仍然执行了 finally：「清理完成，已抓 2 页」
 ```
 
 ---
@@ -363,24 +289,27 @@ asyncio.run(main())
 
 | 坑 | 排查 |
 |----|------|
-| **`print(...)` 打日志** | 污染 stdio 通道；用 `ctx.info` 或 logging→stderr |
-| **进度通知一秒上百条** | UI 卡顿；按真实节奏发，别每个循环都发 |
-| **没声明 `logging` 能力** | FastMCP 调 `ctx.info` 时会自动声明 |
-| **吞掉 CancelledError** | 取消语义被破坏；要 re-raise |
-| **Server 长时间无响应没 ping** | HTTP SSE 流可能被中间代理超时干掉，要定期 ping |
-| **logging level 没过滤** | Client 调 `logging/setLevel` 后 Server 端要自己过滤 |
+| 用 `print(...)` 打日志 | 会污染 stdio 通道；改用标准库 `logging`（写 stderr） |
+| 还在用 `ctx.info()` / `ctx.warning()` | 已弃用，会触发 `MCPDeprecationWarning`，改用 `logging`。如果要继续服务老客户端又不想看到警告，可以过滤掉这个 warning |
+| 进度通知一秒上百条 | UI 会卡；按实际进度发，别每次循环都发 |
+| 进度值回退或重复 | 规范要求 `progress` 单调递增 |
+| 吞掉了取消异常 | 会破坏取消语义；清理放进 `finally`，让异常继续往上抛 |
+| 取消后清理时的 `await` 立刻又抛异常 | 用 `anyio.move_on_after(秒, shield=True)` 包起来 |
+| 普通 `def` 工具取消不掉 | 线程无法从外部打断，要周期性调用 `anyio.from_thread.check_cancelled()` |
+| 想用 `ping` 保活 | 2026 版已移除；订阅流断了就重新 listen，HTTP 靠健康检查和代理的 keep-alive |
 
 ---
 
 ## 8. 下一步
 
-- 📖 Tasks 扩展（更彻底的异步） → [07-tasks.md](./07-tasks.md)
-- 📖 错误处理 → [08-errors-validation.md](./08-errors-validation.md)
-- 📖 客户端怎么收这些通知 → 03-client/01-client-basics
+- 更彻底的异步长任务：[用 Tasks 扩展异步执行长请求](./07-tasks.md)
+- 错误处理：[错误处理与参数校验](./08-errors-validation.md)
+- 客户端怎么接收这些通知：[自己写 Client（连接、发现与调用工具）](../03-client/01-client-basics.md)
+- OpenTelemetry：[调试与可观测（Inspector、日志与追踪）](../05-production/05-debugging-inspector.md)
 
 ## 参考资料
 
-- Logging：https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/logging
-- Progress：https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress
-- Ping：https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/ping
-- Cancellation：https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation
+- Progress：https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/progress
+- Cancellation：https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation
+- Logging（已弃用）：https://modelcontextprotocol.io/specification/2026-07-28/deprecated
+- SDK Progress / Cancellation / Logging：https://py.sdk.modelcontextprotocol.io/handlers/progress/ 、https://py.sdk.modelcontextprotocol.io/handlers/cancellation/ 、https://py.sdk.modelcontextprotocol.io/handlers/logging/

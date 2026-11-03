@@ -1,5 +1,9 @@
 # Context Engineering 手册 demo 依赖
-openai>=1.40.0
-anthropic>=0.40.0
-tiktoken>=0.7.0
+openai>=3.0
+anthropic>=2.0.0
+tiktoken>=0.14.0
 pydantic>=2.7.0
+# 以下仅 LangChain / LangGraph 相关示例需要（可选）
+langchain>=1.4
+langchain-openai>=1.7
+langgraph>=1.2

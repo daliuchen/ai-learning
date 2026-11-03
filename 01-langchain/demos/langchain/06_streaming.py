@@ -5,6 +5,7 @@ Streaming 全方位演示：stream / astream / astream_events / 部分 JSON 流�
 """
 import asyncio
 
+import os
 from dotenv import load_dotenv
 
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
@@ -13,7 +14,8 @@ from langchain_core.runnables import RunnableLambda
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini", stream_usage=True)
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
+model = ChatOpenAI(model=MODEL, stream_usage=True)
 
 
 def demo_stream():

@@ -3,6 +3,7 @@
 =============
 Prompt Templates 完整演示。
 """
+import os
 from dotenv import load_dotenv
 
 from langchain_core.output_parsers import StrOutputParser
@@ -14,6 +15,7 @@ from langchain_core.prompts import (
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
 
 
 def demo_basic():
@@ -69,7 +71,7 @@ def demo_few_shot():
         few_shot,
         ("human", "{input}"),
     ])
-    chain = prompt | ChatOpenAI(model="gpt-4o-mini", temperature=0) | StrOutputParser()
+    chain = prompt | ChatOpenAI(model=MODEL, temperature=0) | StrOutputParser()
     print("6*7 =", chain.invoke({"input": "6*7"}))
 
 

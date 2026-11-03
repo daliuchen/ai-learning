@@ -1,6 +1,6 @@
-# 去重 / 聚类 / 异常检测
+# 用 Embedding 做去重、聚类与异常检测
 
-> **一句话**：embedding 不止能做"搜索"——同样的相似度计算可以**去重**（相似度 > 阈值合并）、**聚类**（K-means / HDBSCAN）、**异常检测**（跟正常样本距离远的）。
+> embedding 的用处不止搜索。同样一套相似度计算，可以拿来去重（相似度超过阈值就合并）、聚类（K-means / HDBSCAN），也可以做异常检测（离正常样本远的就是异常）。这一篇把这三种用法各写一遍。
 
 ---
 
@@ -8,7 +8,7 @@
 
 ### 1.1 严格去重（md5）
 
-只能找一字不差的：
+md5 只能找出一字不差的重复：
 
 ```python
 import hashlib
@@ -21,7 +21,7 @@ for d in docs:
         unique.append(d)
 ```
 
-不能处理"改了个标点 / typo / 同义改写"。
+改了个标点、有错别字、做了同义改写，它就认不出来了。
 
 ### 1.2 Embedding 去重（semantic）
 
@@ -56,17 +56,13 @@ unique_docs = dedupe_by_embedding(my_docs, threshold=0.95)
 print(f"去重前 {len(my_docs)} → 去重后 {len(unique_docs)}")
 ```
 
-`threshold` 调参：
-
-- 0.95：严苛（typo 也算同）
-- 0.90：宽松
-- 0.85：可能误合并
+`threshold` 的取值大致是：0.95 比较严，只有错别字级别的差异才算重复；0.90 偏宽松；到 0.85 就可能把不同的内容误合并。
 
 ---
 
 ## 2. 大规模去重（百万级）
 
-每对算 cosine 是 O(N²) → 慢。用 LSH / FAISS：
+两两算 cosine 是 O(N²)，数据一多就太慢了，要用 LSH 或 FAISS：
 
 ```python
 import faiss
@@ -106,7 +102,7 @@ from sklearn.cluster import KMeans
 
 
 def cluster_docs(docs, k=10):
-    vecs = np.array([embed(d) for d in docs])
+    vecs = np.array([embed(d["content"]) for d in docs])
     
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
     labels = kmeans.fit_predict(vecs)
@@ -127,24 +123,21 @@ for i, items in clusters.items():
         print(f"  {item['title']}")
 ```
 
-适合：
-
-- 文章主题归类
-- 用户分群
-- FAQ 整理
+适合文章主题归类、用户分群、FAQ 整理这类任务。
 
 ---
 
 ## 4. 聚类：HDBSCAN（自动定 K）
 
-不知道 K 多少？用 HDBSCAN：
+事先不知道该分几类的话，用 HDBSCAN，它会自己决定簇的数量：
 
 ```python
-# pip install hdbscan
+# pip install hdbscan（scikit-learn 1.3 起也自带 sklearn.cluster.HDBSCAN）
 import hdbscan
 
 
 def auto_cluster(docs, min_cluster_size=5):
+    # docs 这里是字符串列表（第 7 节直接传用户 query）；是 dict 的话先取出文本
     vecs = np.array([embed(d) for d in docs])
     
     clusterer = hdbscan.HDBSCAN(
@@ -173,15 +166,16 @@ print(f"自动聚出 {len(clusters)} 类，{len(noise)} 个异常")
 
 ## 5. 给每个 cluster 自动取名
 
-让 LLM 给聚类起标签：
+聚出来的簇可以让 LLM 起个名字：
 
 ```python
 def name_cluster(docs_in_cluster):
     sample = docs_in_cluster[:5]
-    sample_text = "\n".join(d["title"] for d in sample)
+    # 文档是 dict 时取标题，直接是字符串（比如用户 query）时原样用
+    sample_text = "\n".join(d["title"] if isinstance(d, dict) else d for d in sample)
     
     resp = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-6-luna",
         messages=[
             {"role": "system", "content": "为这组文档起一个 5-10 字的标签。只输出标签。"},
             {"role": "user", "content": sample_text},
@@ -199,9 +193,9 @@ for cluster_id, docs in clusters.items():
 
 ## 6. 异常检测
 
-跟"正常"距离远的就是异常：
+思路是离正常样本远的点就算异常，有两种衡量方式。
 
-### 6.1 基于"中心向量"
+### 6.1 基于中心向量
 
 ```python
 def detect_anomaly(items, threshold=0.3):
@@ -227,7 +221,7 @@ def detect_anomaly(items, threshold=0.3):
 weird_tickets = detect_anomaly(today_tickets, threshold=0.4)
 ```
 
-### 6.2 基于"局部密度"
+### 6.2 基于局部密度
 
 ```python
 from sklearn.neighbors import LocalOutlierFactor
@@ -282,13 +276,13 @@ faq_candidates.sort(key=lambda x: -x["count"])
 
 ## 8. 重复检测：实时
 
-新内容入库时检查是否跟已有重复：
+新内容入库前，先检查它和已有内容是否重复：
 
 ```python
 async def add_with_dedup_check(new_doc, threshold=0.92):
     new_vec = embed(new_doc["content"])
     
-    hits = vector_db.search("docs", query_vector=new_vec.tolist(), limit=1)
+    hits = vector_db.query_points("docs", query=new_vec.tolist(), limit=1).points
     
     if hits and hits[0].score > threshold:
         return {"status": "duplicate", "similar_to": hits[0].payload}
@@ -303,7 +297,6 @@ async def add_with_dedup_check(new_doc, threshold=0.92):
 ## 9. 完整 demo
 
 ```python
-# demos/applications/05_dedup_cluster.py
 import numpy as np
 from sklearn.cluster import KMeans
 from openai import OpenAI
@@ -368,7 +361,7 @@ for q, sim in sorted(zip(queries, sims_to_center), key=lambda x: x[1])[:3]:
 | FAQ 整理 | HDBSCAN 聚类 |
 | 用户分群 | K-means user_embedding |
 | 异常 query 检测 | LOF / 中心距离 |
-| 内容审核 | 跟违规样本相似 |
+| 内容审核 | 和已知违规样本做相似度比对 |
 | 知识库整理 | 聚类后人工 review |
 | Trending topic | 时间窗口 + 聚类增量 |
 
@@ -378,28 +371,22 @@ for q, sim in sorted(zip(queries, sims_to_center), key=lambda x: x[1])[:3]:
 
 | 坑 | 解 |
 |----|----|
-| K-means 不归一化 | normalize embeddings → 用 cosine 距离 |
-| threshold 一刀切 | 不同 cluster 自适应阈值 |
-| 异常检测召太多 | 提高阈值 / 加业务规则 |
-| 聚类结果没意义 | 试别的 K / HDBSCAN |
+| K-means 前没有归一化 | 先 normalize embeddings，按 cosine 距离聚 |
+| 所有数据用同一个阈值 | 按 cluster 设自适应阈值 |
+| 异常检测报出来的太多 | 提高阈值，或者叠加业务规则 |
+| 聚类结果看不出意义 | 换个 K，或者改用 HDBSCAN |
 
 ---
 
 ## 12. 章节小结：08-applications
 
-走完这 5 篇你会用 embedding 做：
-
-- ✅ 完整 RAG 知识库问答
-- ✅ 电商语义搜索
-- ✅ 多模态：图搜图 / 文搜图
-- ✅ 推荐系统
-- ✅ 去重 / 聚类 / 异常检测
+应用这一章的五篇，分别用 embedding 搭了一个完整的 RAG 知识库问答、一个电商语义搜索、一套图搜图和文搜图、一个推荐系统，以及这一篇的去重、聚类和异常检测。
 
 ---
 
-## 13. 全本手册完结
+## 13. 全书回顾
 
-44 篇覆盖：
+全书 44 篇，各章篇数如下：
 
 | 章 | 篇数 |
 |---|------|
@@ -411,25 +398,15 @@ for q, sim in sorted(zip(queries, sims_to_center), key=lambda x: x[1])[:3]:
 | 06-evaluation（评测） | 4 |
 | 07-production（生产） | 5 |
 | 08-applications（应用） | 5 |
-| **合计** | **44** |
+| 合计 | 44 |
 
-走完你能：
-
-- 看懂 embedding 怎么工作 / 选什么模型 / 截哪个维度
-- 选合适向量库 + 配 metadata filter
-- 设计 chunking 策略（含 small-to-big）
-- 实现混合检索 + rerank + HyDE
-- 用 evalset 做端到端评测
-- 部署 TEI / 监控 / 增量更新
-- 搭 RAG / 语义搜索 / 多模态 / 推荐 / 去重
+做自己的项目时，按遇到的问题回到对应章节：选模型看 02，切片和检索质量看 04、05，评测看 06，部署和增量更新看 07。
 
 ---
 
 ## 14. 跟其它手册的关联
 
-- **01-langchain RAG 章节**：本手册补底层，那本讲 SDK
-- **04-prompt-engineering**：评测方法论
-- **05-openai-agents-sdk FileSearchTool**：托管 vs 自搭 RAG
-- **03-mcp**：检索能力可包成 MCP Server
-
-去做点真事吧。
+- [LangChain 全家桶系列教程](../../../01-langchain/README.md)的 RAG 章节：那本讲 SDK 怎么用，这本补底层组件
+- [Prompt Engineering 实战手册](../../../04-prompt-engineering/README.md)：评测的方法论是相通的
+- [OpenAI Agents SDK 实战手册](../../../05-openai-agents-sdk/README.md)的 FileSearchTool：可以对照着看托管 RAG 和自己搭的取舍
+- [MCP 学习手册](../../../03-mcp/README.md)：检索能力可以包成 MCP Server，给各种 Agent 共用

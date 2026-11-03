@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 from pydantic import BaseModel
 
 from pydantic_ai import Agent, ModelRetry, RunContext
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import UsageLimits
 
@@ -34,9 +36,22 @@ def has_key(env: str) -> bool:
     return bool(os.getenv(env))
 
 
+def scripted(steps: list[tuple[str, dict]]) -> FunctionModel:
+    """按剧本依次调用工具，最后回一句话：用 FunctionModel 模拟「第一次写错、第二次改对」的模型。"""
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        n = sum(isinstance(m, ModelResponse) for m in messages)  # 已经说过几轮
+        if n < len(steps):
+            name, args = steps[n]
+            return ModelResponse(parts=[ToolCallPart(name, args)])
+        return ModelResponse(parts=[TextPart('完成')])
+
+    return FunctionModel(fn)
+
+
 def pick_model():
     if has_key('OPENAI_API_KEY'):
-        return 'openai:gpt-4o-mini'
+        return 'openai-chat:qwen-flash'
     print('[INFO] OPENAI_API_KEY 未设置，使用 TestModel 演示')
     return None  # 各 demo 自己决定 TestModel 行为
 
@@ -55,10 +70,14 @@ def demo_tool_model_retry():
     deps = DatabaseConn(users={'Alice Wang': 1, 'Bob Liu': 2})
 
     if has_key('OPENAI_API_KEY'):
-        agent = Agent('openai:gpt-4o-mini', deps_type=DatabaseConn, retries=3)
+        agent = Agent('openai-chat:qwen-flash', deps_type=DatabaseConn, retries=3)
     else:
-        # TestModel 会"调一次工具就接受结果"，没法真展示重试，但能跑通流程
-        agent = Agent(TestModel(), deps_type=DatabaseConn, retries=3)
+        # 没 key：脚本化模型第一次传 'Alice'（会被拒），收到 ModelRetry 反馈后改传全名
+        model = scripted([
+            ('get_user_by_name', {'name': 'Alice'}),
+            ('get_user_by_name', {'name': 'Alice Wang'}),
+        ])
+        agent = Agent(model, deps_type=DatabaseConn, retries=3)
 
     @agent.tool(retries=2)
     def get_user_by_name(ctx: RunContext[DatabaseConn], name: str) -> int:
@@ -88,7 +107,7 @@ def demo_output_validator_retry():
     print('\n===== 2) output_validator 触发重试 =====')
 
     if has_key('OPENAI_API_KEY'):
-        agent = Agent('openai:gpt-4o-mini', output_type=Issue, retries=3)
+        agent = Agent('openai-chat:qwen-flash', output_type=Issue, retries=3)
     else:
         # TestModel 会一直给同样的输出，第一次就过验证
         agent = Agent(
@@ -117,9 +136,12 @@ def demo_retry_counter():
     print('\n===== 3) ctx.retry 计数 =====')
 
     if has_key('OPENAI_API_KEY'):
-        agent = Agent('openai:gpt-4o-mini', retries=3)
+        agent = Agent('openai-chat:qwen-flash', retries=3)
     else:
-        agent = Agent(TestModel(), retries=3)
+        agent = Agent(scripted([
+            ('flaky_search', {'query': 'GIL'}),
+            ('flaky_search', {'query': 'GIL 全局解释器锁'}),
+        ]), retries=3)
 
     @agent.tool(retries=3)
     def flaky_search(ctx: RunContext, query: str) -> str:
@@ -136,26 +158,32 @@ def demo_retry_counter():
 # 4) HTTP 层 transport 构造（只展示构造，不真发请求）
 # ============================================================
 def demo_http_transport_config():
-    print('\n===== 4) AsyncTenacityTransport 构造演示 =====')
+    print('\n===== 4) AsyncHTTPX2TenacityTransport 构造演示 =====')
 
     try:
-        from httpx import AsyncClient, HTTPStatusError
+        import httpx2
         from tenacity import (
             retry_if_exception_type, stop_after_attempt,
             wait_exponential, wait_combine, wait_random,
         )
+        from pydantic_ai.models import create_async_httpx2_client
         from pydantic_ai.retries import (
-            AsyncTenacityTransport, RetryConfig, wait_retry_after,
+            AsyncHTTPX2TenacityTransport, RetryConfig, wait_retry_after,
         )
     except ImportError as e:
         print(f'[SKIP] 缺少依赖：{e}')
         print('运行 pip install "pydantic-ai-slim[retries]" 启用')
         return
 
-    transport = AsyncTenacityTransport(
+    def raise_for_retryable(response):
+        # 只有 429 / 5xx 才触发重试；其它状态码原样返回
+        if response.status_code in (429, 502, 503, 504):
+            response.raise_for_status()
+
+    transport = AsyncHTTPX2TenacityTransport(
         config=RetryConfig(
-            retry=retry_if_exception_type((HTTPStatusError, ConnectionError)),
-            wait=wait_retry_after(
+            retry=retry_if_exception_type((httpx2.HTTPStatusError, httpx2.ConnectError)),
+            wait=wait_retry_after(  # 优先尊重服务端的 Retry-After
                 fallback_strategy=wait_combine(
                     wait_exponential(multiplier=1, max=60),
                     wait_random(0, 2),
@@ -165,11 +193,12 @@ def demo_http_transport_config():
             stop=stop_after_attempt(4),
             reraise=True,
         ),
-        validate_response=lambda r: r.raise_for_status(),
+        validate_response=raise_for_retryable,
     )
-    client = AsyncClient(transport=transport, timeout=60.0)
-    print(f'  AsyncClient 已构造: {client}')
-    print('  → 把它传给 OpenAIProvider(http_client=client) 即可启用 HTTP 层重试')
+    client = create_async_httpx2_client(transport=transport)  # 保留 Pydantic AI 默认的超时 / UA
+    print(f'  客户端已构造: {type(client).__name__}')
+    print("  → OpenAIChatModel(name, provider=OpenAIProvider(http_client=client)),")
+    print("    并设 model_settings={'max_retries': 0}，让传输层成为唯一的重试方（否则和 SDK 自带重试相乘）")
 
 
 # ============================================================
@@ -181,16 +210,19 @@ def demo_fallback_model():
     from pydantic_ai.models.fallback import FallbackModel
 
     if has_key('OPENAI_API_KEY') and has_key('ANTHROPIC_API_KEY'):
-        fallback = FallbackModel('openai:gpt-4o-mini', 'anthropic:claude-haiku-4-5')
+        fallback = FallbackModel('openai-chat:qwen-flash', 'anthropic:claude-haiku-4-5')
         agent = Agent(fallback)
         result = agent.run_sync('一句话讲清楚什么是 fallback')
         print('结果:', result.output)
         return
 
     # 用两个 TestModel 模拟：第一个抛错，第二个返回正确
+    from pydantic_ai.exceptions import ModelHTTPError
+
     class BoomModel(TestModel):
-        def _request(self, *args, **kwargs):  # type: ignore[override]
-            raise RuntimeError('模拟主模型挂了')
+        # FallbackModel 默认只对 ModelAPIError（含 HTTP 4xx/5xx）切换备用模型
+        async def request(self, *args, **kwargs):  # type: ignore[override]
+            raise ModelHTTPError(status_code=503, model_name='boom', body='模拟主模型挂了')
 
     primary = BoomModel()
     backup = TestModel(custom_output_text='backup 模型回答')
@@ -200,7 +232,7 @@ def demo_fallback_model():
         result = agent.run_sync('hello')
         print('结果:', result.output)
     except Exception as e:
-        print(f'[NOTE] FallbackModel 演示在 TestModel 上不一定能完美模拟，错误：{e}')
+        print(f'[NOTE] FallbackModel 演示失败：{e}')
 
 
 # ============================================================
@@ -210,7 +242,7 @@ def demo_usage_limits():
     print('\n===== 6) UsageLimits 防失控 =====')
 
     if has_key('OPENAI_API_KEY'):
-        agent = Agent('openai:gpt-4o-mini', retries=5)
+        agent = Agent('openai-chat:qwen-flash', retries=5)
     else:
         agent = Agent(TestModel(), retries=5)
 
@@ -219,7 +251,7 @@ def demo_usage_limits():
         usage_limits=UsageLimits(request_limit=3, total_tokens_limit=5_000),
     )
     print('结果:', result.output)
-    print('用量:', result.usage())
+    print('用量:', result.usage)
 
 
 def main():

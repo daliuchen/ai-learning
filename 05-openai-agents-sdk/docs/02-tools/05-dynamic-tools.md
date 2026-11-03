@@ -1,21 +1,40 @@
 # 动态工具集与上下文感知工具
 
-> **一句话**：`tools=[...]` 可以在每次 `Runner.run` 之前临时拼——不同用户、不同权限、不同场景给不同 tool 列表。
+> `tools=[...]` 不必在定义 Agent 时写死，可以在每次 `Runner.run` 之前按用户、权限、场景临时组装。这篇讲几种写法，以及工具多到模型挑不过来时怎么办。
 
 ---
 
-## 1. 为啥要动态
+## 1. 为什么要动态组装
 
-固定工具集的问题：
-
-- **管理员 / 普通用户**：给不同 tool 列表（user 看不到 `delete_all`）
-- **付费 / 免费**：免费用户只能调便宜 tool
-- **场景化**：客服 agent 只在退款场景里有 `process_refund`
-- **A/B test**：50% 给 tool v1，50% 给 v2
+固定的工具集很快就不够用了：管理员和普通用户该看到的工具不同（普通用户不该看到 `delete_all`）；免费用户只能用便宜的工具；客服 agent 只在退款场景里才需要 `process_refund`；做 A/B 实验时，一半流量用 v1 工具，另一半用 v2。
 
 ---
 
-## 2. 写法 1：每次 new Agent
+## 2. 首选写法：用 `is_enabled` 按运行时条件隐藏工具
+
+`FunctionTool` 的 `is_enabled` 参数正好用来让不同用户看到不同的工具：
+
+```python
+from agents import RunContextWrapper, function_tool
+
+
+def admin_only(ctx: RunContextWrapper[dict], agent) -> bool:
+    return ctx.context.get("is_admin", False)       # 也可以是 async 函数
+
+
+@function_tool(is_enabled=admin_only)
+def delete_record(record_id: int) -> str:
+    """删除记录"""
+    return f"deleted {record_id}"
+```
+
+可以直接检查：`await agent.get_all_tools(RunContextWrapper({"is_admin": False}))` 里没有 `delete_record`，传 `True` 时才有。`Agent.as_tool(..., is_enabled=...)` 和 handoff 的 `is_enabled` 也是同样的机制。被禁用的工具模型完全看不到，适合做请求级的能力开关、区分 dev/prod 环境，或者 A/B 实验。
+
+官方文档特别强调过，`is_enabled` 只控制可见性，不等于授权。和具体参数、资源有关的权限检查（比如只能删自己的记录）仍然要在工具内部做，或者用 tool input guardrail / `needs_approval`。本地函数工具在调用前会再评估一次 `is_enabled`；MCP 服务器要自己做受保护操作的授权。
+
+---
+
+## 3. 写法 1：每次 new Agent
 
 ```python
 def build_agent_for_user(user):
@@ -37,11 +56,11 @@ agent = build_agent_for_user(current_user)
 result = await Runner.run(agent, query)
 ```
 
-简单粗暴。每次 new Agent 性能影响可忽略。
+写法最直接，每次新建 Agent 的开销可以忽略。
 
 ---
 
-## 3. 写法 2：用 clone
+## 4. 写法 2：用 clone
 
 ```python
 base_agent = Agent(
@@ -62,9 +81,9 @@ if current_user.is_admin:
 
 ---
 
-## 4. 写法 3：tool 内部 gate
+## 5. 写法 3：tool 内部 gate
 
-让 tool 自己根据 context 决定要不要执行：
+让工具自己根据 context 决定是否执行：
 
 ```python
 @function_tool
@@ -76,11 +95,11 @@ async def delete_record(ctx: RunContextWrapper[MyContext], record_id: int) -> st
     return f"deleted {record_id}"
 ```
 
-模型还是看得到 tool，但执行会被拒。优点：tool 列表稳定，方便缓存。
+模型仍然能看到这个工具，只是调用时会被拒绝。好处是工具列表保持不变，方便命中缓存。
 
 ---
 
-## 5. 上下文相关的 tool description
+## 6. 上下文相关的 tool description
 
 ```python
 def make_tool_description(user):
@@ -92,13 +111,13 @@ def make_tool_description(user):
 def search(...): ...
 ```
 
-但 `description_override` 是 Agent 创建时定的。要动态描述，最简单的方法是动态 instructions（详见 [03-agent-config.md](../01-basics/03-agent-config.md)）。
+不过 `description_override` 在定义工具时就定下了。想让描述随上下文变化，最简单的办法是用动态 instructions（见 [Agent 配置详解](../01-basics/03-agent-config.md)）。
 
 ---
 
-## 6. 大 tool 集的"虚拟工具夹"
+## 7. 工具太多时怎么分组
 
-当工具特别多（>20）让模型挑会迷糊。常见模式：
+工具超过 20 个左右，模型就容易挑错。常见的处理方式有三种。
 
 ### 模式 A：分组 + Triage
 
@@ -112,9 +131,33 @@ support = Agent(name="Support", tools=support_tools)
 triage = Agent(name="Triage", handoffs=[billing, support])
 ```
 
-详见 [03-handoffs/02-triage-pattern.md](../03-handoffs/02-triage-pattern.md)。
+详见 [Triage Pattern：分流模式](../03-handoffs/02-triage-pattern.md)。
 
-### 模式 B：Meta-tool
+### 模式 B：Tool search 延迟加载（OpenAI Responses 专属，0.11.0 起支持）
+
+官方对这种情况有原生方案：给工具加 `defer_loading=True`，按业务分成若干 `tool_namespace`，再给 agent 加一个（只能一个）`ToolSearchTool()`。模型先搜索，再按需加载需要的那一组：
+
+```python
+from agents import Agent, ToolSearchTool, tool_namespace
+from agents.decorators import tool
+
+@tool(defer_loading=True)
+def get_customer_profile(customer_id: str) -> str:
+    """Fetch a CRM customer profile."""
+    ...
+
+@tool(defer_loading=True)
+def list_open_orders(customer_id: str) -> str:
+    """List open orders for a customer."""
+    ...
+
+crm = tool_namespace(name="crm", description="CRM 查询工具", tools=[get_customer_profile, list_open_orders])
+agent = Agent(name="Ops", model="gpt-6.1-sol", instructions="先加载 crm 命名空间再用。", tools=[*crm, ToolSearchTool()])
+```
+
+官方建议尽量用 namespace，每个命名空间最好少于 10 个函数；hosted MCP 服务也可以延迟加载（`tool_config["defer_loading"]=True`）。这套机制只支持 OpenAI Responses 模型，而且具名 `tool_choice` 不能指向命名空间或纯延迟工具。（运行这段需要 OpenAI Responses 模型。）
+
+### 模式 C：Meta-tool
 
 ```python
 @function_tool
@@ -129,43 +172,38 @@ def call_tool(tool_name: str, args: dict) -> str:
     return TOOL_REGISTRY[tool_name](**args)
 ```
 
-Agent 先 list 再 call。但这绕了一层，性能没原生 tools 好。
+Agent 先列出可用操作，再调用。多绕了一层，效果不如原生工具。
 
 ---
 
-## 7. MCP 动态工具
+## 8. MCP 动态工具
 
-MCP Server 启动时 declare 的 tools list 也可以动态。用 OpenAI Agents 消费 MCP Server：
+MCP Server 声明的工具列表本身也可以变化。用 OpenAI Agents 接 MCP Server 时，别把 `list_tools()` 的结果塞进 `tools=`，那是 MCP 原生的 Tool 对象，SDK 不认。正确做法是把 server 挂到 `mcp_servers=`，SDK 会在每次 run 开始时拉取最新的工具列表：
 
 ```python
 from agents.mcp import MCPServerStdio
 
-server = MCPServerStdio(params={
-    "command": "python",
-    "args": ["my_mcp_server.py"],
-})
-
-await server.connect()
-tools = await server.list_tools()  # 动态拿
-
-agent = Agent(name="A", tools=tools)
+async with MCPServerStdio(
+    params={"command": "python", "args": ["my_mcp_server.py"]},
+    cache_tools_list=False,          # 默认就是 False：每次 run 重新拉，工具集动态变化时能看到
+) as server:
+    agent = Agent(name="A", mcp_servers=[server])
+    # 想看 server 当前有哪些工具：await server.list_tools()
 ```
 
-详见 [06-integration/01-mcp.md](../06-integration/01-mcp.md)。
+MCP 工具还可以按条件过滤，用静态白名单、黑名单（`create_static_tool_filter(...)`）或者动态函数，见 [MCP 集成：让 Agent 消费 MCP Server](../06-integration/01-mcp.md) 的工具过滤一节，MCP 的其他用法也在[同一篇](../06-integration/01-mcp.md)里。
 
 ---
 
-## 8. Tools 是否依赖运行时数据
+## 9. Tools 是否依赖运行时数据
 
-如果 tool 实现需要运行时数据（DB 连接、API client），用 context：
+如果工具的实现需要运行时资源（数据库连接、API client），通过 context 传进去：
 
 ```python
-class Ctx(BaseModel):
+@dataclass
+class Ctx:                       # context 可以是任意 Python 对象，dataclass 最省事（用 BaseModel 要加 arbitrary_types_allowed）
     db: object
     api_client: object
-
-    class Config:
-        arbitrary_types_allowed = True
 
 
 @function_tool
@@ -177,11 +215,11 @@ ctx = Ctx(db=my_db, api_client=my_client)
 await Runner.run(agent, query, context=ctx)
 ```
 
-不是修改 tools 列表，是注入"工具用的资源"。
+这种情况工具列表不用变，变的只是工具拿到的资源。
 
 ---
 
-## 9. 在 FastAPI handler 里组装
+## 10. 在 FastAPI handler 里组装
 
 ```python
 from fastapi import FastAPI, Depends
@@ -207,10 +245,9 @@ async def chat(body: dict, user: User = Depends(get_user)):
 
 ---
 
-## 10. 完整 demo
+## 11. 完整示例
 
 ```python
-# demos/tools/05_dynamic_tools.py
 import asyncio
 from dataclasses import dataclass
 from agents import Agent, Runner, function_tool, RunContextWrapper
@@ -271,8 +308,8 @@ asyncio.run(main())
 
 ---
 
-## 11. 下一步
+## 12. 下一步
 
-- 📖 用户 ctx 配 tools → [01-basics/06-sessions.md](../01-basics/06-sessions.md)
-- 📖 Handoffs：把大 tool 集拆成多 Agent → [03-handoffs/01-handoffs-concept.md](../03-handoffs/01-handoffs-concept.md)
-- 📖 MCP 接外部 tool 集 → [06-integration/01-mcp.md](../06-integration/01-mcp.md)
+- context 和 session 的分工：[Sessions：会话状态自动管理](../01-basics/06-sessions.md)
+- 把大工具集拆给多个 Agent：[Handoffs 概念：与 Tool、Sub-Agent 的区别](../03-handoffs/01-handoffs-concept.md)
+- 接外部工具集：[MCP 集成：让 Agent 消费 MCP Server](../06-integration/01-mcp.md)

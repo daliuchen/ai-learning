@@ -1,10 +1,10 @@
-# MCP Integration 05：MCP vs Function Calling / OpenAPI / LangChain Tools
+# MCP Integration 05：MCP 与 Function Calling、OpenAPI、LangChain Tools 的对比
 
-> **一句话**：MCP 不是"另一种工具调用"——它是**工具的来源协议**，和模型层的 Function Calling、传统 REST 描述的 OpenAPI、框架内 Tool 抽象的 LangChain Tools 各自在不同层。把它们的关系搞清，选型就有逻辑了。
+> MCP 管的是工具从哪里来。它和模型层的 Function Calling、描述传统 REST 接口的 OpenAPI、框架内部的 LangChain Tools 各在不同的层次。先把这几者的关系理清楚，再做选型就有依据了。
 
 ---
 
-## 1. 一张图先看层级
+## 1. 先看层级
 
 ```
 ┌────────────────────────────────────────────────┐
@@ -33,130 +33,121 @@
 └────────────────────────────────────────────────┘
 ```
 
-四层：**模型 API → Agent 框架 → MCP → 实际后端服务**。
+从上到下一共四层：模型 API、Agent 框架、MCP、实际的后端服务。
 
 ---
 
-## 2. MCP vs Function Calling
+## 2. MCP 与 Function Calling
 
-最常被搞混的两个。
+这两个最容易被混为一谈。
 
 ### 2.1 Function Calling 是什么
-- OpenAI 叫 `tools`、Anthropic 叫 `tool_use`、Google 叫 `function_call`
-- 是**模型 API**的能力：模型在 response 里发"我要调 `xxx`，参数是 yyy"
-- 每家格式不一样、互不兼容
+Function Calling 是模型 API 提供的能力：模型在 response 里表示「我要调用 `xxx`，参数是 yyy」。OpenAI 叫 `tools`，Anthropic 叫 `tool_use`，Google 叫 `function_call`，各家格式不同，互不兼容。
 
 ### 2.2 MCP 是什么
-- **协议层**：定义 AI 应用怎么把工具来源接入
-- 模型层无关——MCP 工具最终还是要转成 OpenAI tools / Anthropic tool_use 格式喂给模型
+MCP 是协议层，规定 AI 应用怎样接入工具来源。它和具体的模型无关，MCP 工具最后还是要转成 OpenAI tools 或 Anthropic tool_use 的格式交给模型。
 
-### 2.3 关系（关键！）
+### 2.3 两者的关系
 ```
-                          ┌─[OpenAI tools 格式]─→ GPT-4o
+                          ┌─[OpenAI tools 格式]─→ GPT / 千问（OpenAI 兼容）
 [MCP Server 暴露 tools]──┤
                           └─[Anthropic 格式]─────→ Claude
 ```
 
-同一份 MCP 工具，被 Host 转换成不同模型 API 的 Function Calling 格式。**MCP 不替代 Function Calling，它是 Function Calling 的"上游"**。
+同一份 MCP 工具，由 Host 转换成不同模型 API 的 Function Calling 格式。所以 MCP 不会取代 Function Calling，它处在 Function Calling 的上游。
+
+> 模型 API 也开始直接对接 MCP 了。比如 OpenAI 的 Responses API 支持 `tools=[{"type": "mcp", "server_url": ...}]`，Pydantic AI 的 `MCP(url, native=True)` 也能让模型厂商替你连接远程 MCP Server。这时「Host 把 MCP 工具转成 Function Calling 格式」这一步由厂商代劳了，但层级关系没有变，而且 Server 必须能从公网访问，凭据也要交给厂商。想把凭据、hook 和追踪留在自己手里，就让 Host 在本地连接（`MCP(url)` 的默认行为）。
 
 | 维度 | Function Calling | MCP |
 |------|------------------|-----|
-| 协议层 | 模型 API（每家不一样） | 通用协议（统一） |
-| 谁实现 | OpenAI / Anthropic / ... | 任何人 |
-| 谁消费 | AI 应用调模型时 | AI 应用启动 / 加载工具时 |
-| 替代关系 | ❌ 是 MCP 的下游 | — |
+| 协议层 | 模型 API（各家不同） | 通用协议（统一） |
+| 谁来实现 | OpenAI / Anthropic 等模型厂商 | 任何人 |
+| 何时使用 | AI 应用调用模型时 | AI 应用启动或加载工具时 |
+| 替代关系 | 不存在替代，它在 MCP 的下游 | 不适用 |
 
 ---
 
-## 3. MCP vs OpenAPI / gRPC
+## 3. MCP 与 OpenAPI / gRPC
 
-REST 服务和 AI 怎么接？两条路：
+REST 服务想接入 AI，有两条路。
 
 ### 3.1 直接用 OpenAPI
-- Agent 框架装个 `OpenAPI → Tool` 转换器
-- 工具描述来自 OpenAPI spec
-- 适合：服务已经有 OpenAPI、AI 客户端只是众多消费者之一
+在 Agent 框架里装一个把 OpenAPI 转成 Tool 的转换器，工具描述直接来自 OpenAPI spec。适合服务已经有 OpenAPI、AI 客户端只是众多调用方之一的情况。
 
-### 3.2 包成 MCP Server
-- 写个 Server 把 REST 调用包装成 MCP tool
-- 工具描述为 AI 优化（更详细、用例提示）
-- 适合：服务想给 AI 时代的客户端用、需要权限/参数过滤
+### 3.2 包装成 MCP Server
+写一个 Server，把 REST 调用包装成 MCP tool，工具描述可以专门为 AI 优化（写得更详细，附上用法提示）。适合希望服务被各类 AI 客户端使用、需要做权限控制或参数过滤的情况。
 
-| 维度 | OpenAPI 直接接 | 包成 MCP |
+| 维度 | 直接接 OpenAPI | 包装成 MCP |
 |------|---------------|---------|
-| 写作工作量 | 低（已有） | 中（写包装层） |
-| 工具描述质量 | OpenAPI 通用、对 AI 不太友好 | 可针对 AI 优化 |
-| 跨平台 | 框架内（如 LangChain 的 `OpenAPIChain`） | 任何 MCP Client |
-| 鉴权 | 各 Client 自己处理 | MCP 层统一 OAuth 2.1 |
-| Resource / Prompt | ❌ | ✅ |
-| 双向通信 | ❌ | ✅ |
+| 工作量 | 低（已经有了） | 中（要写包装层） |
+| 工具描述质量 | OpenAPI 描述比较通用，对 AI 不太友好 | 可以针对 AI 优化 |
+| 跨平台 | 限于框架内（如 LangChain 社区包里的 OpenAPI 工具包） | 任何 MCP Client |
+| 鉴权 | 各 Client 自己处理 | MCP 层统一用 OAuth 2.1 |
+| Resource / Prompt | 不支持 | 支持 |
+| 服务端中途向用户提问 | 不支持 | 支持（Elicitation；2026 版通过多轮请求实现） |
 
-**结论**：内部服务 + 短期想用 → OpenAPI 直接；战略性接 AI、跨产品分发 → 包成 MCP。
+内部服务、只是短期想用一下，直接接 OpenAPI 就行；如果要长期面向 AI、跨产品分发，就包装成 MCP。
 
 ### 3.3 自动转换工具
-社区已有几个：
-- `openapi-mcp-server`：把 OpenAPI spec 自动生成 MCP Server
-- 反向：`mcp-to-openapi`：把 MCP 暴露成 REST
+已经有一些现成的工具：独立包 `fastmcp` 的 `FastMCP.from_openapi()` 能根据 OpenAPI spec 生成 MCP Server；反方向有 Open WebUI 的 `mcpo`，能把 MCP Server 暴露成带 OpenAPI 描述的 REST 接口。
 
-如果完全不想写代码，可以试自动方案。但生产环境建议手写——你能控制工具描述的质量。
+完全不想写代码的话可以试试这些自动方案，但生产环境我还是建议手写，这样工具描述的质量在你自己手里。
 
 ---
 
-## 4. MCP vs LangChain Tools / Pydantic AI Toolsets
+## 4. MCP 与 LangChain Tools / Pydantic AI Toolsets
 
-框架内 Tool 抽象是"框架内的小生态"，MCP 是"框架外的协议"。
+框架内的 Tool 抽象只在那个框架的生态里有效，MCP 则是框架之外的协议。
 
 | 维度 | LangChain `@tool` / Pydantic AI `@agent.tool` | MCP |
 |------|----------------------------------------------|-----|
-| 范围 | 单一框架内 | 跨框架 / 跨产品 |
-| 部署 | 同进程 | 子进程 / 远程 |
-| 类型链路 | 全程类型推导 | 经 schema 序列化 |
-| 测试 | 直接 unit test | 要起 Server |
-| 适合 | 框架紧耦合工具 | 公共能力 |
+| 范围 | 单一框架内 | 跨框架、跨产品 |
+| 部署 | 同一进程 | 子进程或远程 |
+| 类型 | 全程类型推导 | 经过 schema 序列化 |
+| 测试 | 直接写单元测试 | 需要启动 Server |
+| 适合 | 和框架紧密耦合的工具 | 公共能力 |
 
-**建议**：
-- 100% 在一个 Agent 框架内、不打算分发 → 用框架原生
-- 工具可能被多个产品（IDE、CLI、Web）消费 → MCP
+完全在一个 Agent 框架内使用、不打算分发的工具，用框架原生的写法；可能被 IDE、CLI、Web 等多个产品使用的工具，用 MCP。
 
 ---
 
-## 5. 几个典型场景的选型
+## 5. 几个常见场景怎么选
 
-### 5.1 我要让 Claude Code 调我的内部 API
-→ **MCP Server**（HTTP 包装内部 API）。OpenAPI 直接接不行（Claude Code 不解析 OpenAPI）。
+### 5.1 想让 Claude Code 调用内部 API
+用 MCP Server，用 HTTP 包装内部 API。直接接 OpenAPI 行不通，Claude Code 不解析 OpenAPI。
 
-### 5.2 我在 LangChain 写个 Agent，调 GitHub API
-→ 两条路都行。**MCP**：用社区的 `mcp-server-github` + adapter；**LangChain Tool**：用 LangChain 的 `GitHubToolkit`。如果你计划这个 Agent 也跑在 Claude Code 里，用 MCP；否则 LangChain Tool 更简单。
+### 5.2 用 LangChain 写一个 Agent，要调用 GitHub API
+两条路都可以。走 MCP 的话，用 GitHub 官方的 MCP Server 加 `langchain.mcp.MCPAdapter`；走 LangChain Tool 的话，用 LangChain 自带的 GitHub 工具包。如果这个 Agent 以后也要在 Claude Code 里用，选 MCP；否则 LangChain Tool 更简单。
 
-### 5.3 我有个 OpenAPI 服务想给 AI 用
-→ 写个**最小 MCP 包装层**（10 行代码 + 几个手工写的工具描述）比直接 OpenAPI 体验好得多。
+### 5.3 有一个 OpenAPI 服务想给 AI 用
+写一个最小的 MCP 包装层（代码量不大，重点是几段手写的工具描述），体验会比直接用 OpenAPI 好很多。
 
-### 5.4 我做一个"AI 能力中台"
-→ 用 **MCP Registry + 远程 Streamable HTTP**。统一鉴权 / 监控 / 计费。
+### 5.4 要做一个 AI 能力中台
+用 MCP Registry 加远程 Streamable HTTP，统一做鉴权、监控和计费。
 
-### 5.5 我想给一段确定的 prompt 模板加用户参数
-→ 用 **MCP Prompts**（如果用户在 Claude Code 等支持 Prompts 的客户端用）。否则用框架内的 PromptTemplate。
+### 5.5 想给一段固定的 prompt 模板加上用户参数
+如果用户用的是 Claude Code 这类支持 Prompts 的客户端，就用 MCP Prompts；否则用框架里的 PromptTemplate。
 
 ---
 
-## 6. 一个能力的多种实现路径
+## 6. 同一个能力的几种实现方式
 
-同一个能力——"按用户问题查数据库返回答案"——可以这样实现：
+以「根据用户问题查数据库并返回答案」为例，可以这样实现：
 
-### 路径 A：纯 Function Calling
+### 方式 A：纯 Function Calling
 ```python
 # 直接给模型一个 sql_query 工具
-client.messages.create(
-    model="claude-sonnet-4-6",
-    tools=[{"name": "sql_query", "input_schema": {...}}],
+client.chat.completions.create(          # 以 OpenAI 兼容接口为例
+    model="qwen-flash",
+    tools=[{"type": "function", "function": {"name": "sql_query", "parameters": {...}}}],
     ...
 )
 # 模型决定 SQL，调用，你执行
 ```
-- ✅ 简单
-- ❌ 跨产品复用？复制粘贴
+- 优点：简单
+- 缺点：想在其他产品里复用，只能复制粘贴
 
-### 路径 B：LangChain Tool
+### 方式 B：LangChain Tool
 ```python
 from langchain.tools import tool
 
@@ -164,23 +155,27 @@ from langchain.tools import tool
 def sql_query(sql: str) -> str:
     return execute_sql(sql)
 
-agent = create_react_agent(model, [sql_query])
+agent = create_agent(model, [sql_query])   # from langchain.agents import create_agent
 ```
-- ✅ 框架生态
-- ❌ 离开 LangChain 不能用
+- 优点：能用上框架的生态
+- 缺点：离开 LangChain 就用不了
 
-### 路径 C：MCP Server
+### 方式 C：MCP Server
 ```python
 # db_mcp_server.py
+from mcp.server import MCPServer
+mcp = MCPServer("db")
+
 @mcp.tool()
 def sql_query(sql: str) -> str:
     return execute_sql(sql)
+
 mcp.run()
 ```
-- ✅ Claude Code、Cursor、LangChain、Pydantic AI、ChatGPT 都能用
-- ❌ 多了一层 IPC（毫秒级）
+- 优点：Claude Code、Cursor、VS Code、LangChain、Pydantic AI 等都能用
+- 缺点：多了一层进程间通信（毫秒级开销）
 
-### 路径 D：OpenAPI
+### 方式 D：OpenAPI
 ```yaml
 # openapi.yaml
 paths:
@@ -188,19 +183,16 @@ paths:
     post:
       ...
 ```
-- ✅ 不只 AI 能用
-- ❌ AI Client 默认不读 OpenAPI
+- 优点：不只 AI 能用
+- 缺点：AI Client 默认不读 OpenAPI
 
-**选哪个？** 三角权衡：
-- 工具会被多少个 AI 应用消费？多 → MCP
-- 这个工具的非 AI 用户多吗？多 → OpenAPI 兼容
-- 性能要求毫秒级？是 → 框架内 Tool（同进程）
+选哪个，可以从三个问题考虑：这个工具会被多少个 AI 应用使用？多的话选 MCP。它有没有很多非 AI 的使用方？多的话要兼容 OpenAPI。对延迟是不是敏感到连毫秒级的进程间开销都不能接受？是的话用框架内的 Tool，在同一进程里调用。
 
 ---
 
-## 7. 混合使用的最佳实践
+## 7. 混合使用
 
-很多生产环境是**混合**：
+很多生产环境里是几种方式混着用的：
 
 ```
 框架内工具：Agent 内部状态读写、轻量计算
@@ -210,7 +202,7 @@ MCP Tools：跨产品能力（GitHub、Sentry、内部 SaaS）
 OpenAPI ：暴露给非 AI 客户端的服务（依然存在）
 ```
 
-把它们组合好，每层做擅长的事，不要"全栈用一种"。
+每一层做它擅长的事，没必要从头到尾只用一种。
 
 ---
 
@@ -236,22 +228,22 @@ OpenAPI ：暴露给非 AI 客户端的服务（依然存在）
 
 ---
 
-## 9. 一句话总结
+## 9. 三组对比的结论
 
-| 比较对象 | 一句话 |
+| 比较对象 | 结论 |
 |----------|--------|
-| **MCP vs Function Calling** | 不同层。MCP 是工具的协议来源，Function Calling 是模型 API 的特性。 |
-| **MCP vs OpenAPI** | OpenAPI 给所有客户端用，MCP 专为 AI 客户端优化（工具描述、Resource/Prompt、双向通信）。 |
-| **MCP vs LangChain Tool** | LangChain Tool 是框架内的，MCP 是框架外的。要复用就用 MCP。 |
+| MCP 与 Function Calling | 处在不同的层。MCP 是工具来源的协议，Function Calling 是模型 API 的特性。 |
+| MCP 与 OpenAPI | OpenAPI 面向所有客户端，MCP 针对 AI 客户端做了优化（工具描述、Resource/Prompt、中途追问用户）。 |
+| MCP 与 LangChain Tool | LangChain Tool 只在框架内有效，MCP 在框架之外。需要复用就用 MCP。 |
 
 ---
 
 ## 10. 下一步
 
-04-integration 全部 5 篇结束。下一章 05-production：远程部署、OAuth、安全、可观测。
+集成部分的 5 篇到这里结束。下一章从[用 Streamable HTTP 部署远程 MCP](../05-production/01-remote-mcp.md)开始，讲远程部署、OAuth、安全和可观测性。
 
 ## 参考资料
 
-- 官方对比文档：MCP 不与 Function Calling 比较，它在不同层
 - OpenAI Function Calling 文档：https://platform.openai.com/docs/guides/function-calling
-- Anthropic Tool Use：https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+- Anthropic Tool Use：https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview
+- MCP 官方 SDK 列表：https://modelcontextprotocol.io/docs/2026-07-28/sdk

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from langchain.retrievers import EnsembleRetriever
+from langchain_classic.retrievers import EnsembleRetriever
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_community.retrievers import BM25Retriever
@@ -23,9 +23,11 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
+EMBED_MODEL = os.environ.get("QWEN_EMBED_MODEL", "text-embedding-v4")
 
 DB_DIR = "./rag_db"
-COLLECTION = "kb"
+COLLECTION = "rag_kb"
 DOCS_GLOB = "docs/**/*.md"
 
 
@@ -45,7 +47,7 @@ def build_index_if_needed():
     ).split_documents(docs)
     Chroma.from_documents(
         chunks,
-        OpenAIEmbeddings(model="text-embedding-3-small"),
+        OpenAIEmbeddings(model=EMBED_MODEL, check_embedding_ctx_length=False, chunk_size=10),
         persist_directory=DB_DIR,
         collection_name=COLLECTION,
     )
@@ -53,7 +55,7 @@ def build_index_if_needed():
 
 
 def build_chain():
-    emb = OpenAIEmbeddings(model="text-embedding-3-small")
+    emb = OpenAIEmbeddings(model=EMBED_MODEL, check_embedding_ctx_length=False, chunk_size=10)
     vs = Chroma(
         persist_directory=DB_DIR,
         collection_name=COLLECTION,
@@ -71,7 +73,7 @@ def build_chain():
 
     retriever = EnsembleRetriever(retrievers=[bm25, vector], weights=[0.4, 0.6])
 
-    model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    model = ChatOpenAI(model=MODEL, temperature=0)
 
     rewrite_prompt = ChatPromptTemplate.from_messages([
         ("system", "把用户最新提问改写成可独立检索的完整问题，无需新增信息。"),

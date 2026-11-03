@@ -1,6 +1,6 @@
 # 重排 Pipeline：召回 → 精排
 
-> **一句话**：用 embedding 召回 top-50 ~ top-100，再用 cross-encoder reranker 精排取 top-5 ~ top-10——**这是工业 RAG 的事实标准 pipeline，性价比最高的优化之一**。
+> 先用 embedding 召回 top-50 到 top-100，再用 cross-encoder reranker 精排出 top-5 到 top-10。这是工业界 RAG 的标准两段式结构，也是投入产出比最高的优化之一。这篇讲参数怎么定、延迟怎么分配，以及每加一层能带来多少提升。
 
 ---
 
@@ -23,10 +23,7 @@ Stage 2: Rerank（精排，要准）
 [LLM 生成答案]
 ```
 
-为啥分两步：
-
-- Stage 1 算法快但粗糙 → 召回率高就行
-- Stage 2 算法准但慢 → 只跑 100 条，可承受
+分两步的原因在于两类算法的特点不同。第一阶段算法快但粗糙，只要求召回率够高；第二阶段算法准但慢，好在只需要处理 100 条左右，延迟可以接受。
 
 ---
 
@@ -82,10 +79,10 @@ top_final:
   研究型 LLM context 大: 10-20
 
 reranker 模型:
-  中文: BAAI/bge-reranker-large 或 bge-reranker-v2-m3
-  英文: BAAI/bge-reranker-large-en
-  多语: BAAI/bge-reranker-v2-m3
-  最强: Cohere rerank-multilingual-v3.0（商业 API）
+  中文: Qwen3-Reranker 或 BAAI/bge-reranker-v2-m3
+  英文: mxbai-rerank-large-v2 或 bge-reranker-v2-m3
+  多语: Qwen3-Reranker / BAAI/bge-reranker-v2-m3
+  商业 API: Cohere rerank-v5.0-pro / -fast（详见 02-models/05-rerank）
 ```
 
 ---
@@ -122,18 +119,20 @@ def hybrid_with_rerank(query, top_recall=100, top_final=5):
 
 ## 5. Cohere Rerank API
 
+运行这段需要 Cohere API key。
+
 ```python
 import cohere
 
 
-co = cohere.Client()
+co = cohere.ClientV2()   # 读取环境变量 CO_API_KEY
 
 
 def cohere_rerank(query, docs, top_n=5):
     resp = co.rerank(
         query=query,
         documents=docs,
-        model="rerank-multilingual-v3.0",
+        model="rerank-v5.0-fast",
         top_n=top_n,
     )
     return [(r.index, r.relevance_score) for r in resp.results]
@@ -158,37 +157,25 @@ def llm_judge_rerank(query, candidates, top_n=5):
     scored = []
     for cand in candidates:
         resp = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-6-luna",
             messages=[
                 {"role": "system", "content": """你给文档评分（0-10）：这文档能多大程度回答用户问题。
 只输出数字。"""},
                 {"role": "user", "content": f"问题: {query}\n文档: {cand}"},
             ],
-            max_tokens=5,
         )
         try:
             score = float(resp.choices[0].message.content.strip())
-        except:
+        except ValueError:      # 模型没按要求只输出数字
             score = 0
         scored.append((cand, score))
     
     return sorted(scored, key=lambda x: -x[1])[:top_n]
 ```
 
-**LLM-as-judge 优势**：
+用 LLM 当判官做重排，准确度高，有时比 cross-encoder 还准，还能顺带给出理由。缺点是慢（每个候选都要调一次 LLM）而且贵。
 
-- 准（甚至比 cross-encoder 还准）
-- 能给 reason
-
-**劣势**：
-
-- 慢（每个 candidate 一次 LLM call）
-- 贵
-
-实战：
-
-- 主流量用 cross-encoder
-- 评测 / 高价值 query 用 LLM-as-judge
+所以我的做法是主流量用 cross-encoder，评测和高价值 query 再用 LLM-as-judge。
 
 ---
 
@@ -206,13 +193,13 @@ def rerank_batch(query, candidates, batch_size=32):
     return scores
 ```
 
-`predict` 一次给 100 个 pairs 比单条快 5-10x（GPU）。
+在 GPU 上，`predict` 一次传一批 pair 比逐条调用快得多（`predict` 本身也有 `batch_size` 参数，默认 32）。
 
 ---
 
-## 8. 延迟 budget 拆分
+## 8. 延迟预算拆分
 
-总目标 500ms：
+检索部分总预算 500ms（不含 LLM 生成，数字是量级示意）：
 
 | 阶段 | 时间 |
 |------|------|
@@ -221,21 +208,20 @@ def rerank_batch(query, candidates, batch_size=32):
 | BM25（可选） | 5ms |
 | RRF | < 1ms |
 | Rerank（CrossEncoder GPU, batch=100）| 200ms |
-| 余量 | 245ms 给 LLM |
+| 余量 | ~245ms（网络抖动、拼 prompt 等） |
 
-如果不能满足：
+预算不够时，可以按这个顺序考虑：
 
-- 减 top_recall（100 → 50）
-- 用更小的 reranker（bge-reranker-base 而非 large）
+- 减少 top_recall（100 → 50）
+- 换更小的 reranker（bge-reranker-base 而不是 large）
 - 用 ONNX / TensorRT 加速
-- 降级到 Cohere API（外部 latency 但稳定）
+- 改用 Cohere API（多一次外部调用的延迟，但比较稳定）
 
 ---
 
 ## 9. 完整 demo
 
 ```python
-# demos/retrieval/05_rerank_pipeline.py
 import numpy as np
 from sentence_transformers import SentenceTransformer, CrossEncoder
 from openai import OpenAI
@@ -297,7 +283,7 @@ def search_two_stage(query, top_recall=10, top_final=3):
 search_two_stage("怎么取消订阅", top_recall=10, top_final=3)
 ```
 
-注意观察：rerank 后排第 1 的可能不是 recall 第 1——这就是 rerank 的价值。
+跑的时候留意一下：rerank 之后排第 1 的，经常不是召回阶段的第 1。rerank 的价值就体现在这里。
 
 ---
 
@@ -313,11 +299,11 @@ class RetrievalService:
     def search(self, query, top_k=5, with_rerank=True):
         # Stage 1
         q_emb = self.embedder.encode(query, normalize_embeddings=True)
-        hits = self.vector_db.search(
+        hits = self.vector_db.query_points(
             collection_name="docs",
-            query_vector=q_emb.tolist(),
+            query=q_emb.tolist(),
             limit=top_k * 20 if with_rerank else top_k,
-        )
+        ).points
         
         if not with_rerank:
             return hits[:top_k]
@@ -332,9 +318,9 @@ class RetrievalService:
 
 ---
 
-## 11. 实测提升
+## 11. 各层能带来多少提升（示意）
 
-200 条 evalset：
+下表是示意数据，没有对应某个公开数据集或固定模型，只用来说明各层提升的大致量级和相对关系（假设一份 200 条的 evalset）。自己的数据要用第 06 章的评测方法重新量。
 
 | Pipeline | Recall@5 |
 |----------|----------|
@@ -344,7 +330,7 @@ class RetrievalService:
 | Embedding + BM25 + Rerank | 97% |
 | Embedding + BM25 + HyDE + Rerank | 98% |
 
-每加一层提 2-5%，**Rerank 是性价比最高的一层**。
+单独加一层时，rerank 的提升最大（85% → 95%，+10 个点），BM25 次之（85% → 92%，+7）。两者叠加后到 97%，比只加 BM25 再多 5 个点；在这之上再加 HyDE 只多 1 个点，而它每次查询都要多一次 LLM 调用。
 
 ---
 
@@ -352,15 +338,15 @@ class RetrievalService:
 
 | 坑 | 解 |
 |----|----|
-| 召回 top_k 太小 (5) | 至少 20-50，给 rerank 足空间 |
-| 直接 rerank 所有文档 | 必须先召回少量再 rerank |
-| Reranker 跑 CPU 太慢 | 用 GPU / ONNX / Cohere API |
-| 不同 reranker 分数混比 | 各自单独使用 |
+| 召回 top_k 太小（5） | 至少 20-50，给 rerank 留出挑选的余地 |
+| 对所有文档直接 rerank | 一定要先召回一小批再 rerank |
+| Reranker 在 CPU 上太慢 | 用 GPU / ONNX / Cohere API |
+| 把不同 reranker 的分数放在一起比 | 分数不可比，各自单独使用 |
 
 ---
 
 ## 13. 下一步
 
-- 📖 Self-query / metadata filter → [06-self-query.md](./06-self-query.md)
-- 📖 检索评测 → [06-evaluation/01-metrics.md](../06-evaluation/01-metrics.md)
-- 📖 完整 RAG → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
+- [Self-Query / Metadata Filter](./06-self-query.md)
+- 检索效果怎么量化：[检索评测指标：Recall@k / MRR / nDCG](../06-evaluation/01-metrics.md)
+- [完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)

@@ -1,12 +1,12 @@
-# PE Advanced 05：Meta-Prompting —— 用 LLM 写 / 优化 Prompt
+# PE Advanced 05：Meta-Prompting，用 LLM 写和优化 Prompt
 
-> **一句话**：让 LLM 自己帮你写 prompt、改 prompt、生成 evalset——能极大提速但**不是替代你的判断**。Meta-prompting 是 2025 关键趋势，本篇讲三种用法和反模式。
+> 让 LLM 帮你写 prompt、改 prompt、生成评测集，能省下大量时间，但判断还得你自己来做。Meta-prompting 从 2025 年起用得越来越多，这篇讲三种用法和几个容易踩的坑。
 
 ---
 
-## 1. 三种 meta-prompting
+## 1. 三种用法
 
-### 1.1 用 LLM 起草初版 prompt
+### 1.1 让 LLM 起草初版 prompt
 
 ```
 你是 prompt engineering 专家。
@@ -30,9 +30,9 @@
 返回 prompt 内容（不要 markdown 包装）。
 ```
 
-LLM 写出来的 prompt 通常**有 70 分**——比你从零写省时间，但**不能直接上线**。
+LLM 写出来的 prompt 一般能打 70 分左右。比你从零开始写省时间，但不能直接上线。
 
-### 1.2 用 LLM 改进 prompt（基于 eval 结果）
+### 1.2 根据评测结果改进 prompt
 
 ```
 我有一个 prompt v3 和它在 evalset 上的失败案例。请提出改进 prompt v4。
@@ -57,9 +57,9 @@ LLM 写出来的 prompt 通常**有 70 分**——比你从零写省时间，但
 3. 说明 v3 → v4 的关键改动
 ```
 
-LLM 看到具体失败 → 提改进建议——比你盯着 prompt 调更系统。
+把具体的失败案例摆在 LLM 面前让它提改进建议，比你自己盯着 prompt 反复调要有条理。
 
-### 1.3 用 LLM 生成 evalset
+### 1.3 让 LLM 生成评测集
 
 ```
 你是测试用例生成专家。任务：为下面的 prompt 生成 evalset。
@@ -78,13 +78,13 @@ LLM 看到具体失败 → 提改进建议——比你盯着 prompt 调更系统
 输出 JSONL。
 ```
 
-LLM 生成的 evalset **必须人工 review**——但确实快。
+速度确实快，但 LLM 生成的评测集必须人工逐条过一遍。
 
 ---
 
-## 2. Meta-prompting 的工程化
+## 2. 把 meta-prompting 工程化
 
-### 2.1 用模板而非自由文本
+### 2.1 用模板，不用自由文本
 ```python
 META_PROMPT_TEMPLATE = """
 你是 prompt engineering 专家。
@@ -93,20 +93,20 @@ META_PROMPT_TEMPLATE = """
 {spec}
 
 请按以下 schema 输出（JSON）：
-{
+{{
   "prompt": "...",
   "key_design_decisions": ["...", "..."],
   "potential_failure_modes": ["...", "..."],
   "suggested_examples": ["...", "..."]
-}
-"""
+}}
+"""  # 模板要走 .format()，JSON 里的花括号写成 {{ }}
 
 def draft_prompt(spec: str) -> dict:
     resp = llm.generate(META_PROMPT_TEMPLATE.format(spec=spec))
     return json.loads(resp)
 ```
 
-### 2.2 迭代 loop
+### 2.2 自动迭代循环
 ```python
 def auto_iterate(initial_prompt: str, evalset: list, max_iter: int = 5):
     prompt = initial_prompt
@@ -122,13 +122,13 @@ def auto_iterate(initial_prompt: str, evalset: list, max_iter: int = 5):
     return prompt, history
 ```
 
-把"看失败 → 提假设 → 改 prompt"循环交给 LLM。**但人必须最后 review**。
+「看失败、提假设、改 prompt」这个循环可以交给 LLM 去跑，但最后一定要人来审。
 
 ---
 
-## 3. Claude Code 作为 prompt 优化器
+## 3. 用 Claude Code 当 prompt 优化器
 
-Claude Code（或类似 Agent）可以当 PE 协作者：
+Claude Code 这类 Agent 工具可以当 prompt 工程的协作者，比如这样交代任务：
 
 ```
 我有一个客服分类 prompt 在 evalset 上 78% 通过率。
@@ -136,42 +136,36 @@ Claude Code（或类似 Agent）可以当 PE 协作者：
 看一下，写出 v4 prompt + 一份 diff 说明改了什么。
 ```
 
-Claude Code 会：
-1. 读你的 prompt 文件
-2. 读 evalset + 失败案例
-3. 分析失败模式
-4. 提出 v4
-5. 跑 evalset 验证
-6. 给 diff 解释
+它会依次读你的 prompt 文件，读评测集和失败案例，分析失败模式，提出 v4，跑评测集验证，最后给出 diff 和说明。
 
-详见 [08-practice/03-claude-code-as-optimizer.md](../08-practice/03-claude-code-as-optimizer.md)。
+完整流程见 [用 Claude Code 当 Prompt 优化器](../08-practice/03-claude-code-as-optimizer.md)。
 
 ---
 
 ## 4. Meta-prompting 的局限
 
-### 4.1 LLM 写的 prompt 倾向"安全 / 模糊"
-LLM 写出来的 prompt 经常**过度防御**：
+### 4.1 LLM 写的 prompt 偏保守、啰嗦
+LLM 写的 prompt 经常防御过度：
 
 ```
 LLM 写的 prompt：
 "请仔细分析、确保准确、不要出错、考虑各种情况..."  ← 啰嗦
 ```
 
-要你自己删掉冗余。
+这些冗余得你自己删。
 
-### 4.2 LLM 不知道你的真实业务
-"在 evalset 上 90% 通过"和"在真实业务上有用"是两件事。LLM 优化的是 evalset 表现——可能 evalset 本身有偏。
+### 4.2 LLM 不了解你的业务
+评测集上 90% 通过，和在真实业务里好用，是两回事。LLM 优化的只是评测集上的分数，而评测集本身可能就有偏差。
 
-### 4.3 LLM 优化容易陷入局部
-LLM 在已知失败模式上修——但可能没看见"新的失败方向"。
+### 4.3 容易陷在局部
+LLM 只会针对已知的失败模式修修补补，看不到新的失败方向。
 
-### 4.4 隐藏 bug
-LLM 改 prompt 时可能改了重要约束你没注意到。每次 LLM 改完要 diff 检查。
+### 4.4 悄悄改掉重要约束
+LLM 改 prompt 时，可能顺手改掉了某条重要约束，而你没注意到。每次改完都要看 diff。
 
 ---
 
-## 5. 推荐工作流
+## 5. 我推荐的工作流
 
 ```
 [你] 写 Spec
@@ -191,28 +185,27 @@ LLM 改 prompt 时可能改了重要约束你没注意到。每次 LLM 改完要
 [你 + 用户] 监控、反哺
 ```
 
-LLM 帮你做"草稿、初版、grind work"，你做"判断、决策、终审"。
+草稿、初版和重复性的体力活交给 LLM，判断、决策和最终审核留给自己。
 
 ---
 
-## 6. Meta-prompting 工具
+## 6. 相关工具
 
 | 工具 | 用途 |
 |------|------|
-| **DSPy** | 程序化 prompt 优化（自动改 + 评测） |
-| **Promptfoo prompt-pipeline** | 自动 A/B prompts |
-| **Anthropic Prompt Generator** | console.anthropic.com 自带 |
-| **OpenAI Playground "Generate"** | console 自带 |
-| **LangSmith Prompt Hub + Playground** | 配合评测一体 |
+| DSPy | 程序化优化 prompt（自动修改 + 评测） |
+| Promptfoo | 用同一份测试集横向对比多个 prompt / 模型 |
+| Anthropic Prompt Generator | Claude Console 自带 |
+| OpenAI Playground "Generate" | console 自带 |
+| LangSmith Prompt Hub + Playground | 和评测集成在一起 |
 
-详细对比在 [07-production/01-versioning.md](../07-production/01-versioning.md)。
+其中 LangSmith Prompt Hub 怎么配合版本管理，见 [Prompt 版本管理](../07-production/01-versioning.md)。
 
 ---
 
-## 7. demo：用 LLM 起草 prompt
+## 7. demo：让 LLM 起草 prompt
 
 ```python
-# demos/advanced/05_meta_prompt_drafter.py
 import anthropic
 client = anthropic.Anthropic()
 
@@ -247,11 +240,11 @@ META = f"""你是 prompt engineering 专家。
 """
 
 resp = client.messages.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     max_tokens=2000,
     messages=[{"role": "user", "content": META}],
 )
-print(resp.content[0].text)
+print(resp.content[-1].text)
 ```
 
 ---
@@ -260,19 +253,19 @@ print(resp.content[0].text)
 
 | 坑 | 排查 |
 |----|------|
-| **直接用 LLM 写的 prompt 上线** | 必须 review |
-| **让 LLM 同时改 prompt + evalset** | 优化无意义（变量乱） |
-| **LLM 优化陷入局部** | 加新 evalset / 新失败模式 |
-| **LLM 写的 prompt 啰嗦** | 必须精简 |
-| **没让 LLM 解释 diff** | 不知道改了什么 |
+| LLM 写的 prompt 直接上线 | 必须人工审 |
+| 让 LLM 同时改 prompt 和评测集 | 两个变量一起变，优化失去意义 |
+| 优化陷在局部 | 补充新的评测样本和新的失败模式 |
+| LLM 写的 prompt 太啰嗦 | 手动精简 |
+| 没让 LLM 解释改动 | 不知道它到底改了什么 |
 
 ---
 
 ## 9. 下一步
 
-- 📖 Injection 防御 → [06-injection-defense.md](./06-injection-defense.md)
-- 📖 按任务组装 → [05-by-task/](../05-by-task/)
-- 📖 实战：Claude Code 当 optimizer → [08-practice/03-claude-code-as-optimizer.md](../08-practice/03-claude-code-as-optimizer.md)
+- [Prompt Injection 防御](./06-injection-defense.md)
+- [按任务类型组装 prompt](../05-by-task/)
+- [用 Claude Code 当 Prompt 优化器](../08-practice/03-claude-code-as-optimizer.md)
 
 ## 参考资料
 

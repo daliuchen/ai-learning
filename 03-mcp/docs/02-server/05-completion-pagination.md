@@ -1,6 +1,6 @@
-# MCP Server 05：Completion 与 Pagination —— 让参数能联想、让列表能翻页
+# MCP Server 05：参数补全（Completion）与分页（Pagination）
 
-> **一句话**：Completion 让 Prompt 参数和 Resource Template 参数在 UI 上自动联想（像 IDE 补全），Pagination 让 `tools/list` / `resources/list` / `prompts/list` 在数千条目时不会一次性炸开。两个都是「Server 实用工具（utilities）」类能力，配合得当能极大提升 Host 端体验。
+> Completion 让 Prompt 参数和 Resource Template 参数在 UI 上能自动联想，效果类似 IDE 补全；Pagination 让 `tools/list`、`resources/list`、`prompts/list` 在条目多到几千条时可以分页返回。两者都属于 Server 的实用工具（utilities）类能力，用得好能明显改善 Host 端的体验。
 
 ---
 
@@ -8,9 +8,7 @@
 
 ### 1.1 场景
 
-用户输入 `weather://forecast/Par` 时，希望弹出 "Paris / Park City" 候选；输入 prompt 参数 `repo=anth` 时，希望提示 "anthropic/anthropic-sdk-python"。
-
-这就是 completion。
+用户输入 `weather://forecast/Par` 时，希望弹出 Paris、Park City 这样的候选；在 prompt 参数里输入 `repo=anth` 时，希望提示 anthropic/anthropic-sdk-python。这就是 completion 要做的事。
 
 ### 1.2 协议
 
@@ -32,7 +30,7 @@ Client 发请求：
 }
 ```
 
-Server 回：
+Server 回复：
 
 ```json
 {
@@ -44,57 +42,65 @@ Server 回：
 }
 ```
 
-`ref` 支持两种：
+`ref` 有两种：
 
-- `ref/resource` — Resource Template 参数补全
-- `ref/prompt` — Prompt 参数补全
+- `ref/resource`：Resource Template 参数补全
+- `ref/prompt`：Prompt 参数补全
 
-### 1.3 Python SDK 落地
+### 1.3 Python SDK 写法
 
-FastMCP 暴露 `@mcp.completion()` 装饰器：
+MCPServer 提供 `@mcp.completion()` 装饰器。每个 Server 只有一个补全处理函数（必须是 `async def`），所有补全请求都进到这里，由你按 `ref` 和 `argument.name` 自己分发：
 
 ```python
-from mcp.server.fastmcp import FastMCP
-from mcp.types import Completion, CompletionArgument, ResourceTemplateReference
+from mcp.server import MCPServer
+from mcp.types import (
+    Completion, CompletionArgument, CompletionContext,
+    PromptReference, ResourceTemplateReference,
+)
 
-mcp = FastMCP("weather-server")
+mcp = MCPServer("weather-server")
 
 @mcp.resource("weather://forecast/{city}")
 def forecast(city: str) -> str:
     return f"{city}: 晴 22°C"
 
-# 城市数据源
 CITIES = ["Paris", "Park City", "Beijing", "Barcelona", "Bangkok"]
 
 @mcp.completion()
 async def complete(
-    ref: ResourceTemplateReference | PromptReference,
+    ref: PromptReference | ResourceTemplateReference,
     argument: CompletionArgument,
+    context: CompletionContext | None,   # 用户已经填好的其它参数（用于「依赖补全」）
 ) -> Completion | None:
     # 只补 weather://forecast/{city} 的 city 参数
     if (isinstance(ref, ResourceTemplateReference)
         and ref.uri == "weather://forecast/{city}"
         and argument.name == "city"):
-        prefix = argument.value.lower()
+        prefix = argument.value.lower()               # SDK 不会替你过滤，startswith 要自己写
         matches = [c for c in CITIES if c.lower().startswith(prefix)]
-        return Completion(values=matches, total=len(matches), hasMore=False)
-    return None
+        return Completion(values=matches, total=len(matches), has_more=False)
+    return None                                       # None = 没有建议（不是错误）
 ```
 
-> SDK 当前的 `@mcp.completion()` 是单点回调（一个函数处理所有 ref + argument），需要自己 if-else 分发。
+几点说明：
+
+- 注册处理函数就等于声明能力。SDK 看到 `@mcp.completion()` 才会在 capabilities 里加上 `completions`；没注册的话，客户端调 `completion/complete` 会得到 `Method not found`
+- `Completion` 的字段在 Python 里是 snake_case：`has_more`（线上仍是 `hasMore`）
+- 依赖补全：`context.arguments` 是已经确定的参数（比如先选了 `owner`，再按 `owner` 补全 `repo`），客户端通过 `client.complete(ref, argument, context_arguments={...})` 传入
+- 客户端调用：`await client.complete(PromptReference(name="search-docs"), {"name": "tag", "value": "py"})`
 
 ### 1.4 限制
 
 - `values` 最多 100 条（规范约束）
-- 字符串数组（不能附带 description）
-- 没有官方"分页 completion"机制——用 `hasMore` 指示有更多但不直接拉
+- 只能是字符串数组，不能附带说明
+- 没有官方的分页 completion 机制，`hasMore` 只能表示还有更多，不能直接拉取
 
 ---
 
 ## 2. Pagination：列表翻页
 
-### 2.1 哪些方法支持
-官方 spec 里这些 `list` 方法支持分页：
+### 2.1 支持分页的方法
+官方 spec 里，下面这些 `list` 方法支持分页：
 
 - `tools/list`
 - `resources/list`
@@ -123,120 +129,166 @@ async def complete(
 // 最后一页：不返回 nextCursor
 ```
 
-- cursor 是不透明字符串（Server 自定义编码）
-- Client 不解析 cursor，只透传
-- 不返回 `nextCursor` ⇒ 没有下一页
+- cursor 是不透明的字符串，编码方式由 Server 决定
+- Client 不解析 cursor，只原样传回
+- 不返回 `nextCursor` 就表示没有下一页
 
 ### 2.3 Python SDK 现状
 
-FastMCP 当前**默认把所有工具/资源一次性返回**，没暴露 pagination hook 给应用层——因为常见 MCP Server 工具数量都是几十个，不需要分页。
+`MCPServer` 默认把所有工具和资源一次性返回（单页，`next_cursor=None`），`@mcp.resource()` 等装饰器也没有分页钩子。常见的 MCP Server 只有几十个工具，用不着分页。
 
-如果你写一个 1000+ 工具的 Server（例如把整个数据库的几百张表都做成工具，或动态生成工具），需要用低层 `Server` 类自己处理分页：
+如果列表背后其实是一个数据库（几千条资源），就得用低层 `Server` 自己写列表处理函数。v2 的低层 API 用构造参数 `on_list_resources=` 等，参数类型是 `PaginatedRequestParams | None`：
 
 ```python
-from mcp.server import Server
-from mcp.types import Tool, ListToolsResult
+from typing import Any
+from mcp.server import Server, ServerRequestContext
+from mcp.types import ListResourcesResult, PaginatedRequestParams, Resource
 
-PAGE_SIZE = 50
-ALL_TOOLS = [Tool(name=f"tool_{i}", inputSchema={"type": "object"}) for i in range(1000)]
+BOOKS = [f"book-{n}" for n in range(1, 101)]
+PAGE_SIZE = 10
 
-app = Server("paged-server")
+async def list_books(ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None) -> ListResourcesResult:
+    start = 0 if params is None or params.cursor is None else int(params.cursor)
+    end = start + PAGE_SIZE
+    page = [Resource(uri=f"books://catalog/{n}", name=n) for n in BOOKS[start:end]]
+    return ListResourcesResult(resources=page, next_cursor=str(end) if end < len(BOOKS) else None)
 
-@app.list_tools()
-async def handle_list_tools(cursor: str | None = None) -> ListToolsResult:
-    start = int(cursor) if cursor else 0
-    page = ALL_TOOLS[start:start + PAGE_SIZE]
-    next_cursor = str(start + PAGE_SIZE) if start + PAGE_SIZE < len(ALL_TOOLS) else None
-    return ListToolsResult(tools=page, nextCursor=next_cursor)
+server = Server("Bookshop", on_list_resources=list_books)
+app = server.streamable_http_app()      # uvicorn 模块名:app --port 8000
 ```
 
-> 实际工程里 cursor 推荐用 opaque 编码（如 base64 of `{offset:50, version:7}`），避免 Client 解析它。
+- cursor 的含义由你决定。这里用的是字符串化的 offset，换成时间戳、主键或 base64 都行
+- `next_cursor=None` 表示最后一页，没有 total，也没有 `has_more`
+- 页大小由 Server 决定，协议里没有 `limit`
+- `on_list_tools` / `on_list_prompts` / `on_list_resource_templates` 都可以这样做
+
+> 实际项目里，cursor 最好用不透明编码（比如把 `{offset:50, version:7}` 做 base64），免得 Client 去解析它。2026-07-28 还要求 `tools/list` 等方法「SHOULD 按确定性顺序返回」，这样客户端缓存和 LLM 的 prompt cache 更容易命中。
 
 ### 2.4 Client 端翻页
 
 ```python
-async with ClientSession(read, write) as session:
-    await session.initialize()
+from mcp import Client
 
-    all_tools = []
+async with Client("http://localhost:8000/mcp") as client:
+    all_resources = []
     cursor = None
     while True:
-        resp = await session.list_tools(cursor=cursor)
-        all_tools.extend(resp.tools)
-        cursor = resp.nextCursor
-        if not cursor:
+        page = await client.list_resources(cursor=cursor)   # list_tools / list_prompts 等同理
+        all_resources.extend(page.resources)
+        cursor = page.next_cursor
+        if cursor is None:
             break
-    print(f"总工具数：{len(all_tools)}")
+    print(f"总数：{len(all_resources)}")
 ```
+
+> 在 v2 里，`cursor=` 是 `Client.list_*` 的关键字参数（底层 `ClientSession` 的 list 方法不再接收 `cursor`）。对不分页的 Server，第一页的 `next_cursor` 就是 `None`，循环只跑一次，所以这个循环放在哪里都不会出问题。
 
 ---
 
-## 3. Completion + Pagination 综合 demo
+## 3. Completion 与 Pagination 综合 demo
 
 ```python
-# demos/server/05_completion_paged.py
-"""演示 completion + 大量工具（不分页时只是慢）"""
-from mcp.server.fastmcp import FastMCP
-from mcp.types import Completion, CompletionArgument, ResourceTemplateReference, PromptReference
+# demos/server/05_completion_paged.py（完整版含自测 main()，一条命令跑两部分）
+from typing import Any
 
-mcp = FastMCP("kb-search")
+from mcp import Client
+from mcp.server import MCPServer, Server, ServerRequestContext
+from mcp.types import (
+    Completion,
+    CompletionArgument,
+    CompletionContext,
+    ListResourcesResult,
+    PaginatedRequestParams,
+    PromptReference,
+    Resource,
+    ResourceTemplateReference,
+)
 
-# 模拟一个有 100 个文档的知识库
+# ============ 1. Completion：MCPServer 上唯一的一个 @mcp.completion() 处理函数 ============
+mcp = MCPServer("kb-search")
 DOCS = [f"doc_{i:03d}" for i in range(100)]
 TAGS = ["python", "javascript", "rust", "go", "java", "swift", "kotlin"]
+REPOS_BY_OWNER = {"modelcontextprotocol": ["python-sdk", "typescript-sdk", "inspector"], "pydantic": ["pydantic", "pydantic-ai"]}
+
 
 @mcp.resource("kb://doc/{doc_id}")
 def doc(doc_id: str) -> str:
     return f"内容: {doc_id}"
 
+
+@mcp.resource("github://repos/{owner}/{repo}")
+def repo(owner: str, repo: str) -> str:
+    return f"{owner}/{repo}"
+
+
 @mcp.prompt(name="search-docs")
 def search_docs(query: str, tag: str = "all") -> str:
     return f"搜索: {query}（标签: {tag}）"
 
-@mcp.completion()
-async def complete(ref, argument: CompletionArgument):
-    prefix = argument.value.lower()
 
-    # 1. Resource Template 的 doc_id 补全
-    if isinstance(ref, ResourceTemplateReference) and ref.uri == "kb://doc/{doc_id}":
-        if argument.name == "doc_id":
-            matches = [d for d in DOCS if d.startswith(prefix)][:100]
-            return Completion(
-                values=matches,
-                total=len([d for d in DOCS if d.startswith(prefix)]),
-                hasMore=len(matches) >= 100,
-            )
+@mcp.completion()  # 注册这个处理函数 = 声明 completions 能力；必须是 async def
+async def complete(
+    ref: PromptReference | ResourceTemplateReference,
+    argument: CompletionArgument,
+    context: CompletionContext | None,  # 已经填好的其它参数（依赖补全）
+) -> Completion | None:
+    prefix = argument.value.lower()  # SDK 不会替你过滤，startswith 要自己写
+    if isinstance(ref, ResourceTemplateReference) and ref.uri == "kb://doc/{doc_id}" and argument.name == "doc_id":
+        matches = [d for d in DOCS if d.startswith(prefix)]
+        return Completion(values=matches[:100], total=len(matches), has_more=len(matches) > 100)
+    if isinstance(ref, PromptReference) and ref.name == "search-docs" and argument.name == "tag":
+        return Completion(values=[t for t in TAGS if t.startswith(prefix)])
+    if isinstance(ref, ResourceTemplateReference) and argument.name == "repo":
+        owner = (context.arguments or {}).get("owner", "") if context else ""
+        return Completion(values=[r for r in REPOS_BY_OWNER.get(owner, []) if r.startswith(prefix)])
+    return None  # None = 没有建议，不是错误
 
-    # 2. Prompt 的 tag 参数补全
-    if isinstance(ref, PromptReference) and ref.name == "search-docs":
-        if argument.name == "tag":
-            matches = [t for t in TAGS if t.startswith(prefix)]
-            return Completion(values=matches, total=len(matches), hasMore=False)
 
-    return None
+# ============ 2. Pagination：MCPServer 不暴露分页 hook，用低层 Server 自己写 ============
+BOOKS = [f"book-{n}" for n in range(1, 101)]
+PAGE_SIZE = 10
 
-if __name__ == "__main__":
-    mcp.run()
+
+async def list_books(ctx: ServerRequestContext[Any], params: PaginatedRequestParams | None) -> ListResourcesResult:
+    start = 0 if params is None or params.cursor is None else int(params.cursor)
+    end = start + PAGE_SIZE
+    page = [Resource(uri=f"books://catalog/{n}", name=n) for n in BOOKS[start:end]]
+    return ListResourcesResult(resources=page, next_cursor=str(end) if end < len(BOOKS) else None)
+
+
+paged = Server("Bookshop", on_list_resources=list_books)
+# 要部署的话：app = paged.streamable_http_app()，再 `uvicorn 模块:app`
 ```
 
-在 Inspector 里：
-- 输入 `kb://doc/doc_01`，看候选弹出
-- 选 prompt `search-docs`，在 `tag=` 后输入 `py` 看候选
+运行（进程内自测）：
+
+```
+$ python demos/server/05_completion_paged.py
+completions 能力: 
+tag=ja -> ['javascript', 'java']
+doc_01* -> ['doc_010', 'doc_011', 'doc_012'] total = 10
+owner=pydantic repo -> ['pydantic', 'pydantic-ai']
+翻页取回 100 条
+```
+
+在 Inspector 里可以：
+- 输入 `kb://doc/doc_01`，看候选弹出来
+- 选 prompt `search-docs`，在 `tag=` 后面输入 `py`，看候选
 
 ---
 
 ## 4. 设计建议
 
 ### 4.1 Completion
-- **要快**：补全请求一秒触发一次，要求毫秒级响应。重 IO 不要用，用预加载 / 内存缓存
-- **要稳**：函数失败别抛异常，返回 `None`（无补全）
-- **prefix 匹配**：默认大小写不敏感、`startswith` 优先；可以加 fuzzy 但要小心性能
-- **总数 vs 返回数**：`total` 是 prefix 匹配的总数；`values` 是这次返回的数量；`hasMore` 标识是否截断
+- 要快。用户每敲一下键就可能触发一次补全，需要毫秒级响应。别做重 IO，用预加载或内存缓存
+- 要稳。函数出错时不要抛异常，返回 `None`（表示没有补全）
+- 匹配方式：默认大小写不敏感，`startswith` 优先；可以加模糊匹配，但要注意性能
+- `total` 是前缀匹配到的总数，`values` 是这次返回的条目，`hasMore` 表示有没有被截断
 
 ### 4.2 Pagination
-- **何时需要**：list 返回 > 100 条目；体验上能感知卡顿就要分页
-- **cursor 设计**：opaque 字符串、base64 + 版本号，避免 Client 解析
-- **客户端代码量**：建议 SDK 封装一个 `iter_tools()` 自动翻页，业务代码别让用户自己写 while
+- 什么时候需要：list 返回超过 100 条，或者用户已经能感觉到卡顿
+- cursor 设计：不透明字符串，base64 加版本号，避免 Client 解析
+- 客户端：最好在 SDK 层封装一个自动翻页的 `iter_tools()`，别让业务代码自己写 while 循环
 
 ---
 
@@ -244,21 +296,24 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **没声明 `completions` 能力** | Server 端必须在 capabilities 里加，FastMCP 在第一个 `@mcp.completion()` 时会自动声明 |
-| **补全返回太多** | 限制 100；前端 UI 通常只展示前 10 |
-| **cursor 是数字让 Client 直接 +1** | Client 不能解析 cursor，必须只透传 Server 给的字符串 |
-| **list 返回了重复条目** | 通常是分页时数据源在变，要么快照、要么用稳定排序 |
-| **补全函数抛异常** | 整个补全请求失败，UI 体验崩；务必 try/except 返回 None |
+| 没声明 `completions` 能力 | 注册了 `@mcp.completion()` 处理函数就等于声明了；没注册的话客户端会得到 `Method not found` |
+| 补全函数写成了同步 `def` | 必须是 `async def` |
+| 补全返回的条目太多 | 上限 100 条，前端 UI 一般只显示前 10 条 |
+| cursor 是数字，Client 直接加 1 | Client 不能解析 cursor，只能原样传回 Server 给的字符串 |
+| list 返回了重复条目 | 多半是分页期间数据源在变，要么做快照，要么用稳定排序 |
+| 补全函数抛异常 | 整个补全请求失败，UI 上就没反应了；一定要 try/except 后返回 None |
 
 ---
 
 ## 6. 下一步
 
-- 📖 Logging / Progress / Ping → [06-logging-progress-ping.md](./06-logging-progress-ping.md)
-- 📖 Tasks 扩展 → [07-tasks.md](./07-tasks.md)
-- 📖 错误处理 → [08-errors-validation.md](./08-errors-validation.md)
+- Logging、Progress 与取消：[日志、进度、取消与 Ping](./06-logging-progress-ping.md)
+- Tasks 扩展：[用 Tasks 扩展异步执行长请求](./07-tasks.md)
+- 错误处理：[错误处理与参数校验](./08-errors-validation.md)
 
 ## 参考资料
 
-- Completion spec：https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/completion
-- Pagination spec：https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination
+- Completion spec：https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+- Pagination spec：https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination
+- SDK Completions：https://py.sdk.modelcontextprotocol.io/servers/completions/
+- SDK Pagination：https://py.sdk.modelcontextprotocol.io/advanced/pagination/

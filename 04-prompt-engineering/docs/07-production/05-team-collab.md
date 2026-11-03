@@ -1,21 +1,21 @@
-# PE Production 05：团队协作 —— 谁能改 Prompt，谁来 Review
+# PE Production 05：Prompt 的团队协作与 Review 流程
 
-> **一句话**：Prompt 不只是工程师的事——PM 想改文案、运营想试 A/B、内容团队要风格统一。本篇给一套**多角色协作机制**：分工、review 流程、权限、审计。
+> 产品上线以后，想动 prompt 的人往往不止工程师：PM 想改文案，运营想试个 A/B，内容团队要统一语气。人一多，没有规矩就容易出事故。这篇给一套多角色协作的做法，包括分工、review 流程、权限和审计。
 
 ---
 
-## 1. 团队中的 PE 角色
+## 1. 团队里的角色
 
 | 角色 | 职责 |
 |------|------|
-| **Prompt Engineer** | 主负责人，设计 prompt + evalset + 迭代 |
-| **PM / 产品** | 提需求、定 acceptance 标准、做最终业务决策 |
-| **内容 / 文案** | 把控 voice / style |
-| **数据 / ML** | 评测 / 漂移 / 模型选型 |
-| **SRE / 运维** | 监控告警、上线流程 |
-| **法务 / 合规** | safety、refusal 边界 |
+| Prompt Engineer | 主负责人，设计 prompt、评测集，负责迭代 |
+| PM / 产品 | 提需求、定验收标准、做最终的业务决策 |
+| 内容 / 文案 | 把控语气和风格 |
+| 数据 / ML | 评测、漂移监控、模型选型 |
+| SRE / 运维 | 监控告警、上线流程 |
+| 法务 / 合规 | 安全和拒答边界 |
 
-不一定每个公司都齐——但**至少 Prompt Engineer + PM 要明确**。
+不是每家公司都配得齐这些角色，但至少要明确谁是 Prompt Engineer、谁是 PM。
 
 ---
 
@@ -80,35 +80,27 @@
 
 | 权限 | 谁有 |
 |------|------|
-| **读 prompt** | 所有 dev |
-| **写 dev prompt** | PE 团队 |
-| **写 staging prompt** | PE + senior eng review |
-| **写 production prompt** | PE + PM + 2 人 review |
-| **rollback** | SRE + PE |
-| **改 evalset** | PE + 数据团队 |
-| **加 attack samples** | PE + security 团队 |
+| 读 prompt | 所有开发 |
+| 改 dev 环境的 prompt | PE 团队 |
+| 改 staging 环境的 prompt | PE，加资深工程师 review |
+| 改 production 环境的 prompt | PE + PM，再加 2 人 review |
+| 回滚 | SRE + PE |
+| 改评测集 | PE + 数据团队 |
+| 加攻击样本 | PE + 安全团队 |
 
-实现：
-- Git 用 CODEOWNERS 控制
-- LangSmith Hub 有 role
-- 自建 DB 用 RBAC
+实现方式取决于你用什么管理 prompt：Git 用 CODEOWNERS，LangSmith Hub 有角色设置，自建数据库就做 RBAC。
 
 ---
 
-## 5. 协作工具栈
+## 5. 各角色的工具
 
-### 5.1 PM 友好的"Prompt 试验台"
+### 5.1 给 PM 一个试验台
 
-PM 不写 Python——给他个 UI（Promptfoo / LangSmith Playground / 自建）：
-
-- 改 prompt 即时看输出
-- 看 evalset 跑分
-- 不直接上线，只是"提案"
-- 提案变 PR 进 review 流程
+PM 一般不写 Python，给他一个界面就好（Promptfoo、LangSmith Playground 或自建）。在里面改 prompt 能马上看到输出，也能看评测集跑分，但改动不会直接上线，只算一个提案，提案转成 PR 后再走 review 流程。
 
 ### 5.2 内容团队的 voice guide
 
-内容把 voice 写成文档：
+内容团队把品牌语气写成文档：
 
 ```markdown
 # 品牌 voice guide
@@ -118,7 +110,7 @@ PM 不写 Python——给他个 UI（Promptfoo / LangSmith Playground / 自建�
 - ...
 ```
 
-PE 把 voice guide 嵌进 system prompt 维持一致。
+PE 把它嵌进 system prompt，保证输出风格一致。
 
 ### 5.3 SRE 的告警 runbook
 
@@ -137,34 +129,26 @@ PE 把 voice guide 嵌进 system prompt 维持一致。
 
 ---
 
-## 6. 评测的"权威性"
-
-谁的评测算数？
+## 6. 谁的评测说了算
 
 ```
 人工标注 ≥ LLM judge ≥ 规则评测
 ```
 
-- 规则评测：CI 跑、快、便宜，但只看 hard constraints
-- LLM judge：质量评测，但有 bias
-- 人工标注：金标准，但慢 / 贵
+规则评测在 CI 里跑，快且便宜，但只能检查硬性约束。LLM judge 能评质量，但有偏差。人工标注是金标准，代价是慢和贵。
 
-**权威性约定**：
-
-- 主观质量看人工抽样
-- 客观字段看规则
-- LLM judge 当**信号**不当**判决**
+我们团队的约定是：主观质量看人工抽样，客观字段看规则，LLM judge 的结果只当参考信号，不当最终判决。
 
 ---
 
-## 7. Schedule：例会节奏
+## 7. 例会节奏
 
 | 例会 | 频率 | 议程 |
 |------|------|------|
-| **PE 内部站会** | 每日 | 当前迭代进展 |
-| **PE + PM 同步** | 每周 | 业务方面反馈、新需求 |
-| **质量复盘** | 每两周 | trace 分析、failure mode、evalset 更新 |
-| **模型评审** | 每季度 | 模型选型 / 价格 / 性能 reassess |
+| PE 内部站会 | 每日 | 当前迭代进展 |
+| PE + PM 同步 | 每周 | 业务反馈、新需求 |
+| 质量复盘 | 每两周 | trace 分析、失败模式、评测集更新 |
+| 模型评审 | 每季度 | 重新评估模型选型、价格、性能 |
 
 ---
 
@@ -185,25 +169,22 @@ docs/
 
 ---
 
-## 9. 一个反例：协作失败
+## 9. 反例：一次协作事故
 
 ```
 [Day 1] PM 半夜想到点子 → 自己改了 production prompt → 上线
 [Day 2] 全公司团队都不知道
 [Day 3] 客服收到大量投诉
-[Day 4] 调查发现是 PM 改的，但没人记得改了啥
+[Day 4] 调查发现是 PM 改的，但没人记得改了什么
 [Day 5] 找不到老版本 prompt，连 git 都没记录
 [周一] 修复 + 流程整顿
 ```
 
-防止：
-- production prompt 必须 PR + review
-- prompt 修改触发自动通知（Slack 提醒）
-- 版本化 + 历史不删
+要避免这种事，需要三条规矩：production 的 prompt 改动必须走 PR 和 review；prompt 一有修改就自动通知（比如发 Slack）；所有版本都留档，历史不删。
 
 ---
 
-## 10. demo：PR 流程脚手架
+## 10. demo：PR 检查脚本
 
 ```python
 # scripts/check_prompt_pr.py
@@ -247,7 +228,7 @@ if __name__ == "__main__":
     check()
 ```
 
-接入 CI workflow。
+把它接进 CI workflow 即可。
 
 ---
 
@@ -255,16 +236,16 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **PM 直接改 prompt** | 流程化，要 PR |
-| **无 voice guide** | 风格漂 |
-| **review 只有 PE 自己** | 加 PM / 内容 review |
-| **rollback 无 runbook** | 出事手忙脚乱 |
-| **改 prompt 没通知团队** | Slack 自动 notify |
-| **PE 单点维护** | 至少 2 人 own prompts/ |
+| PM 直接改线上 prompt | 定好流程，必须走 PR |
+| 没有 voice guide | 风格会漂 |
+| review 只有 PE 自己 | 拉上 PM 和内容团队一起 review |
+| 回滚没有 runbook | 出了事手忙脚乱 |
+| 改 prompt 不通知团队 | 用 Slack 自动通知 |
+| 只有一个 PE 在维护 | `prompts/` 目录至少要有 2 个 owner |
 
 ---
 
-## 12. 07-production 章总结
+## 12. 本章回顾
 
 | 篇 | 主题 |
 |---|------|
@@ -278,10 +259,9 @@ if __name__ == "__main__":
 
 ## 13. 下一步
 
-- 📖 实战项目 → [08-practice/](../08-practice/)
-- 📖 评测先于 prompt → [01-foundations/05-eval-first.md](../01-foundations/05-eval-first.md)
+- 实战项目：[08-practice/](../08-practice/)
+- [先建评测，再写 Prompt](../01-foundations/05-eval-first.md)
 
 ## 参考资料
 
-- LangSmith team collaboration: https://docs.smith.langchain.com
-- "Building LLM Teams": various blog posts
+- LangSmith: https://docs.smith.langchain.com

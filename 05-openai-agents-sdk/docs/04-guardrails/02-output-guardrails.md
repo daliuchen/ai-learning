@@ -1,19 +1,19 @@
 # Output Guardrails：输出守卫
 
-> **一句话**：在 Agent 给最终输出**之后**校验——发现含敏感数据 / 错误格式 / 政策违规 → tripwire 拦下，不让用户看到。
+> Output guardrail 在 Agent 给出最终输出之后做检查，发现敏感数据、格式错误或违反政策的内容，就触发 tripwire 拦下来，不让用户看到。这篇讲它和 input guardrail 的区别、拦下后 session 里会留下什么，以及几个常用的守卫写法。
 
 ---
 
-## 1. 跟 Input Guardrails 区别
+## 1. 跟 Input Guardrails 的区别
 
 | | Input | Output |
 |---|---|---|
-| 跑在何时 | LLM 调用前 | LLM 生成最终输出后 |
-| 看到啥 | 用户输入 | Agent 最终输出 |
-| tripwire 效果 | 阻止 LLM 调用 | 阻止输出送给用户 |
-| 触发后 | Agent 没跑 | Agent 跑完了（费 token）|
+| 何时运行 | 默认与 Agent 并行（`run_in_parallel=False` 则先于 Agent） | Agent 产出最终输出之后（没有 `run_in_parallel` 参数） |
+| 看到什么 | 用户输入（只在链上第一个 agent 运行） | Agent 最终输出（只在产出最终回答的那个 agent 运行） |
+| tripwire 效果 | 终止 run | 阻止输出送给用户 |
+| 触发后 | 阻塞模式下 Agent 没跑；并行模式下可能已花了 token | Agent 已经跑完（token 花了，工具也执行过了）|
 
-通常**同时用**：input 拦明显违规 → output 拦泄露 / 幻觉。
+两者通常一起用：input 拦明显的违规，output 拦泄露和幻觉。
 
 ---
 
@@ -45,8 +45,7 @@ agent = Agent(
 
 ## 3. agent_output 的类型
 
-- Agent 没设 `output_type` → `agent_output` 是字符串
-- 设了 `output_type=SomeModel` → `agent_output` 是 SomeModel 实例
+Agent 没设 `output_type` 时，`agent_output` 是字符串；设了 `output_type=SomeModel`，它就是 SomeModel 的实例。
 
 ```python
 class Reply(BaseModel):
@@ -69,11 +68,11 @@ agent = Agent(
 )
 ```
 
-confidence 低 → 拦下不给用户看不靠谱回答。
+confidence 低的回答直接拦下，不给用户看。
 
 ---
 
-## 4. LLM-as-judge output guardrail
+## 4. 用 LLM 做评判的 output guardrail
 
 ```python
 from pydantic import BaseModel
@@ -94,7 +93,7 @@ judge = Agent(
 输出 is_safe = False 触发拦截。
 """,
     output_type=JudgeOutput,
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -118,7 +117,7 @@ main_agent = Agent(
 
 ---
 
-## 5. 接住 OutputGuardrailTripwireTriggered
+## 5. 捕获 OutputGuardrailTripwireTriggered
 
 ```python
 from agents.exceptions import OutputGuardrailTripwireTriggered
@@ -137,7 +136,13 @@ except OutputGuardrailTripwireTriggered as e:
     }
 ```
 
-**重要**：output guardrail 拦下时 Agent 已经跑完，token 烧了。能在 input 阶段拦的尽量在 input 拦。
+output guardrail 拦下时，Agent 已经跑完，token 已经花掉，**工具的副作用也已经发生**。能在 input 阶段拦的，尽量在 input 阶段拦。
+
+拦下之后 session 里留下什么，在 0.24 里按下面的数据隔离规则处理，这会实际影响持久化的历史：
+
+- tripwire 只拒绝候选的最终输出。已经完成的 tool call、tool output（以及重放需要的 reasoning）仍会写进 session，被拒的那条最终回答不写。流式和非流式行为一致。
+- 如果被拒的输出直接来自终端函数工具（`tool_use_behavior` 让工具结果直接作为最终输出），0.22 起 SDK 会把那条 `function_call_output` 替换成固定文本 `Output withheld by an output guardrail.`，避免敏感内容留在 session、`RunState` 或流式结果里。想换文案，用 `RunConfig(output_guardrail_blocked_message="该内容已被策略拦截")`；也可以传一个同步函数，它拿到的参数里不包含被拒的输出内容。
+- 守卫函数自己抛异常的话，不算 tripwire，异常会原样抛出（见 [Input Guardrails：输入守卫](./01-input-guardrails.md) 第 9 节）。
 
 ---
 
@@ -155,7 +160,7 @@ agent = Agent(
 )
 ```
 
-并发跑，**任意一个** tripwire 就拦。
+它们并发执行，任意一个触发 tripwire 就拦下。
 
 ---
 
@@ -177,7 +182,7 @@ async def no_false_promise(ctx, agent, agent_output):
     )
 ```
 
-防止 Agent 给用户做出公司无法兑现的承诺。
+防止 Agent 向用户许下公司兑现不了的承诺。
 
 ---
 
@@ -212,7 +217,7 @@ agent = Agent(
 
 ---
 
-## 9. 实战：长度 / 格式守卫
+## 9. 实战：长度和格式检查
 
 ```python
 @output_guardrail
@@ -231,7 +236,6 @@ async def length_check(ctx, agent, output):
 ## 10. 完整 demo
 
 ```python
-# demos/guardrails/02_output_guardrails.py
 import asyncio
 import re
 from pydantic import BaseModel
@@ -269,7 +273,7 @@ agent = Agent(
 不要在 text 里包含真实手机号。""",
     output_type=Reply,
     output_guardrails=[no_pii, sources_required],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -287,14 +291,14 @@ asyncio.run(main())
 
 ---
 
-## 11. 性能 / 成本提醒
+## 11. 性能和成本
 
-每次 Agent 跑完都跑 output guardrails——LLM-based 的 guardrails 烧 token。优化方式：
+每次 Agent 跑完都要执行 output guardrails，基于 LLM 的守卫会持续消耗 token。可以这样优化：
 
-1. **关键字 / 正则优先**：能 regex 拦的不用 LLM
-2. **LLM judge 用 mini**：不用 gpt-4o
-3. **采样**：1% 流量过 LLM judge，其它走 regex
-4. **缓存**：相同输出已判过的结果缓存（适合稳定输出）
+1. 能用关键字或正则拦的，就不用 LLM
+2. 评判用的 LLM 选小模型，不必用 gpt-6.1-sol
+3. 抽样：1% 流量过 LLM 评判，其余走正则
+4. 缓存：相同输出判过一次就把结果缓存起来（适合输出稳定的场景）
 
 ---
 
@@ -302,16 +306,16 @@ asyncio.run(main())
 
 | OpenAI Agents | Pydantic AI |
 |---|---|
-| `@input_guardrail` | `@agent.input_validator` 不存在，用 hooks |
+| `@input_guardrail` | 没有同名概念，用 capability / hooks 自己拦（见 Pydantic AI 手册） |
 | `@output_guardrail` | `@agent.output_validator` |
-| Tripwire | 抛 `ModelRetry` |
+| Tripwire | 抛 `ModelRetry`（让模型重试，而不是终止 run） |
 
-OpenAI 的 guardrails 更**结构化**——独立概念，可单独评测。
+相比之下，OpenAI 把 guardrail 做成了独立概念，结构更清楚，也方便单独评测。
 
 ---
 
 ## 13. 下一步
 
-- 📖 Tripwire 的更多用法 → [03-tripwire.md](./03-tripwire.md)
-- 📖 Agent + guardrails 实战部署 → [07-production/04-security.md](../07-production/04-security.md)
-- 📖 评测：guardrails 准确率 → [07-production/05-evals.md](../07-production/05-evals.md)
+- Tripwire 的更多用法 → [Tripwire 与异常处理](./03-tripwire.md)
+- 生产环境里的安全防护 → [安全：Prompt Injection / 越狱防御 / 滥用监控](../07-production/04-security.md)
+- 评测 guardrails 的准确率 → [评测：把 Prompt Engineering 手册的评测集用到 Agent 上](../07-production/05-evals.md)

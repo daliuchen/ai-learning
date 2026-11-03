@@ -1,13 +1,13 @@
 # PE Technique 08：Self-Critique（自我反思）
 
-> **一句话**：让模型先给出答案、再"审查自己的答案"、必要时修正——能在主观质量任务（写作、code review、决策）上稳定涨 5-15%。但**不能修正模型不会的能力**，且 cost / latency 翻倍。
+> 让模型先给出答案，再回头审查自己的答案，必要时修改。在写作、code review、决策这类主观质量任务上，这样做通常有看得见的提升（Self-Refine 论文在多种生成任务上都报告了明显改善），具体多少要用自己的评测集量。它的局限也很明显：模型本来不会的东西，审一遍也补不上，而且成本和延迟都会翻倍。
 
 ---
 
-## 1. Self-critique 三种模式
+## 1. Self-critique 的三种模式
 
-### 1.1 同 prompt 内 critique
-让模型在一个 prompt 内"答完再看一遍"：
+### 1.1 在同一个 prompt 里自审
+让模型在一次调用里写完再看一遍：
 
 ```
 任务：写一段中文产品介绍。
@@ -32,10 +32,10 @@
 <final>...</final>
 ```
 
-下游只解析 `<final>`，其他用来 debug。
+下游只解析 `<final>`，其余部分留着调试用。
 
-### 1.2 二阶段：Generate → Critique
-两个独立 prompt：
+### 1.2 两阶段：先生成，再审查
+拆成几个独立的 prompt：
 
 ```
 [Prompt A] 生成初稿
@@ -44,24 +44,24 @@
 
 ```
 
-代价：3x cost / latency。
+代价是成本和延迟变成 2 到 3 倍。
 
-### 1.3 二阶段 + judge 角色
-让 critique 由**不同 role / 不同模型**做——避免"自己评自己"偏：
+### 1.3 两阶段，审查换人
+让另一个角色、甚至另一家模型来审，避免自己评自己的偏差：
 
 ```
-[Generator: GPT-4o-mini] 写初稿
+[Generator: GPT-6 Luna] 写初稿
 [Critic: Claude Sonnet] "你是严格 editor，找出问题"
-[Revise: GPT-4o-mini] 根据 critic 反馈改
+[Revise: GPT-6 Luna] 根据 critic 反馈改
 ```
 
-跨模型 + 跨角色 → 反馈更"刺"。
+换模型又换角色之后，反馈往往更不客气，也更有用。
 
 ---
 
-## 2. Critique 提示的设计
+## 2. 审查提示怎么写
 
-critique 提示要**明确维度**，不能笼统说"找问题":
+审查提示要写明从哪些维度看，不能只说「找找问题」：
 
 ```
 请按以下维度审查：
@@ -73,34 +73,32 @@ critique 提示要**明确维度**，不能笼统说"找问题":
 按维度列具体问题，每条不超过 30 字。
 ```
 
-维度多了不行（5+ 维度，模型 prioritize 不当）；少了反馈太空（"提高质量"无用）。**3-4 个维度**最稳。
+维度太多（5 个以上）模型分不清轻重；太少则反馈空洞，「提高质量」这种话没有用。我的经验是 3 到 4 个维度最稳。
 
 ---
 
-## 3. 何时用 / 不用
+## 3. 什么时候用
 
-### 用
-- 输出长 / 主观（写作、规划、code review、设计）
-- 错误 cost 高（关键报告、法律文档）
-- 可以接受 cost / latency 翻倍
+适合用的场景：输出长且主观（写作、规划、code review、设计）；出错代价高（关键报告、法律文档）；能接受成本和延迟翻倍。
 
-### 不用
-- 输出短（单 label / 数字）
-- 已用 CoT（CoT 本质上是"边想边答"，再 critique 是冗余）
-- 实时交互（用户等不了）
-- 简单事实问答
+不适合的场景：
+
+- 输出很短，只是一个标签或数字
+- 已经用了 CoT。CoT 是边想边答，再加一轮审查多半是重复劳动
+- 实时交互，用户等不起
+- 简单的事实问答
 
 ---
 
 ## 4. Self-Refine：多轮修正
 
-研究里有个模式叫 **Self-Refine**：
+研究里有个模式叫 Self-Refine，起草、审查、修改反复进行：
 
 ```
 [Draft] → [Critique] → [Refine] → [Critique] → [Refine] → ...
 ```
 
-通常 2-3 轮后趋于稳定，再修反而变差（"过度修正"）。
+一般 2 到 3 轮之后就稳定了，再改下去反而会变差，也就是修正过度。
 
 ```python
 def self_refine(initial_input: str, max_iter: int = 3) -> str:
@@ -118,34 +116,29 @@ def self_refine(initial_input: str, max_iter: int = 3) -> str:
 
 ---
 
-## 5. Critique 的常见失败模式
+## 5. 审查常见的失败方式
 
-### 5.1 "礼貌型 critique"
-模型不愿真指出问题：
+### 5.1 客套式审查
+模型不愿意认真挑毛病：
 
 ```
 critique:
 "很好的初稿！可以考虑稍微调整开头。整体结构清晰。"
 ```
 
-对策：prompt 里强制"必须指出 3 个具体问题"："至少 3 个，每个含具体 line 引用"。
+可以在 prompt 里要求「至少指出 3 个具体问题，每个都引用原文」。
 
-### 5.2 "同义反复"
-critique 说"应该更清晰" → refine 没改实质，只换了同义词。
+### 5.2 换汤不换药
+审查说「应该更清晰」，修改时只是换了几个同义词，实质没变。对策是要求审查必须给出具体的改写方案，而不只是方向。
 
-对策：critique 必须**给具体改写方案**，不只是"应该这样"。
-
-### 5.3 "找不存在的问题"
-模型为完成"必须找 3 个问题"任务，硬编一些问题。
-
-对策：允许 critique 输出 "no significant issues"；强制找 N 个反而更糟。
+### 5.3 无中生有
+为了凑够「必须找 3 个问题」，模型会硬编一些并不存在的问题。所以要允许审查输出 "no significant issues"。强制凑数比不审还糟。
 
 ---
 
-## 6. demo：邮件起草 + critique + refine
+## 6. demo：邮件起草、审查、修改
 
 ```python
-# demos/techniques/08_self_critique.py
 """三阶段：起草 → 批评 → 修正"""
 import anthropic
 client = anthropic.Anthropic()
@@ -156,18 +149,18 @@ REQUEST = """写一封邮件给老板，告诉他这个季度 KPI 完成 80%，�
 
 def draft() -> str:
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
+        model="claude-haiku-5-5",
+        max_tokens=1024,
         system="你是写邮件的助手。简洁，无废话。",
         messages=[{"role": "user", "content": REQUEST}],
     )
-    return resp.content[0].text
+    return resp.content[-1].text
 
 
 def critique(text: str) -> str:
     resp = client.messages.create(
-        model="claude-sonnet-4-6",  # 用更强模型做 critic
-        max_tokens=500,
+        model="claude-sonnet-5-5",  # 用更强模型做 critic
+        max_tokens=1024,
         system="""你是严格的写作 editor。从下面 3 个维度审查邮件：
 1. 诚实但不卑微：是否过度道歉或推卸责任？
 2. 补救计划：是否具体可执行？
@@ -176,20 +169,20 @@ def critique(text: str) -> str:
 每个维度给 1-2 条具体建议，引用原文片段。""",
         messages=[{"role": "user", "content": text}],
     )
-    return resp.content[0].text
+    return resp.content[-1].text
 
 
 def refine(text: str, critique_text: str) -> str:
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
+        model="claude-haiku-5-5",
+        max_tokens=1024,
         system="你是邮件助手。根据 editor 反馈修改邮件，保持原意。",
         messages=[{
             "role": "user",
             "content": f"原邮件:\n{text}\n\nEditor 反馈:\n{critique_text}\n\n请给修改后的邮件，不要解释。",
         }],
     )
-    return resp.content[0].text
+    return resp.content[-1].text
 
 
 if __name__ == "__main__":
@@ -206,9 +199,9 @@ if __name__ == "__main__":
 
 ---
 
-## 7. Self-critique vs Self-consistency
+## 7. Self-critique 和 Self-consistency 的区别
 
-两个容易混：
+这两个名字容易混：
 
 | 维度 | Self-critique | Self-consistency |
 |------|---------------|------------------|
@@ -218,7 +211,7 @@ if __name__ == "__main__":
 | 模型 | 一个或多个 | 同一个 |
 | Cost | 2-3x | N x |
 
-实战：复杂任务上**两个都用**——self-consistency 投票主答案，self-critique 优化最终表述。
+复杂任务上可以两个一起用：用 self-consistency 投票定下主答案，再用 self-critique 打磨最终表述。
 
 ---
 
@@ -226,19 +219,19 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **critique 用同模型同温度** | 容易"礼貌评"自己；换强 critic / 跨家 |
-| **critique 不强制 specific** | 反馈空泛，refine 改不动 |
-| **无限循环 refine** | 设 max_iter；early exit "no changes needed" |
-| **简单任务也加 critique** | 浪费 |
-| **critique 暴露给用户** | UI 只展示 final |
+| 审查用同一个模型、同样的温度 | 容易对自己手下留情，换更强的模型或别家模型来审 |
+| 不要求审查具体到原文 | 反馈空泛，修改时无从下手 |
+| 修改无限循环 | 设 max_iter，遇到 "no changes needed" 提前退出 |
+| 简单任务也加审查 | 白白浪费 |
+| 审查内容暴露给用户 | UI 只展示 final |
 
 ---
 
 ## 9. 下一步
 
-- 📖 self-consistency → [09-self-consistency.md](./09-self-consistency.md)
-- 📖 delimiter 选择 → [10-delimiters.md](./10-delimiters.md)
-- 📖 LLM-as-judge（critic 的工程化）→ [05-by-task/05-judge.md](../05-by-task/05-judge.md)
+- [Self-Consistency 采样投票](./09-self-consistency.md)
+- [分隔符策略（XML / JSON / Markdown / 三引号）](./10-delimiters.md)
+- [LLM-as-Judge](../05-by-task/05-judge.md)：把审查角色工程化
 
 ## 参考资料
 

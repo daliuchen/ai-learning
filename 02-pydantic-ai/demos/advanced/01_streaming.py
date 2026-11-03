@@ -28,9 +28,9 @@ load_dotenv()
 
 def pick_model() -> str | TestModel:
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-5-haiku-latest"
+        return "anthropic:claude-haiku-4-5"
     print("[warn] 未检测到 API key，使用 TestModel（不会真流式）。\n")
     return TestModel()
 
@@ -40,11 +40,11 @@ def pick_model() -> str | TestModel:
 # ----------------------------------------------------------------------------
 async def demo_text_stream(model) -> None:
     print("===== 1) stream_text(delta=True) — 文本增量流 =====")
-    agent = Agent(model, system_prompt="你是一位简洁的助手。")
+    agent = Agent(model, instructions="你是一位简洁的助手。")
     async with agent.run_stream("用 30 字介绍 Python 的 GIL") as result:
         async for chunk in result.stream_text(delta=True):
             print(chunk, end="", flush=True)
-    print(f"\n[usage] {result.usage()}\n")
+    print(f"\n[usage] {result.usage}\n")
 
 
 # ----------------------------------------------------------------------------
@@ -62,7 +62,7 @@ async def demo_structured_stream(model) -> None:
     agent = Agent(
         model,
         output_type=Profile,
-        system_prompt="根据用户描述生成个人资料卡，字段尽量完整。",
+        instructions="根据用户描述生成个人资料卡，字段尽量完整。",
     )
     async with agent.run_stream(
         "28 岁的后端工程师小李，擅长 Python、FastAPI、PostgreSQL，喜欢极简主义"
@@ -79,8 +79,8 @@ async def demo_structured_stream(model) -> None:
                 }
                 print(f"  partial -> {changed}")
                 last_snapshot = snapshot
-        print(f"\n  final  -> {result.output}")
-        print(f"[usage] {result.usage()}\n")
+        print(f"\n  final  -> {await result.get_output()}")
+        print(f"[usage] {result.usage}\n")
 
 
 # ----------------------------------------------------------------------------
@@ -88,7 +88,7 @@ async def demo_structured_stream(model) -> None:
 # ----------------------------------------------------------------------------
 async def demo_iter_nodes(model) -> None:
     print("===== 3) agent.iter() — 节点级事件 =====")
-    agent = Agent(model, system_prompt="你是天气助手。")
+    agent = Agent(model, instructions="你是天气助手。")
 
     @agent.tool_plain
     def get_weather(city: str) -> str:
@@ -101,26 +101,31 @@ async def demo_iter_nodes(model) -> None:
             print(f"  node -> {type(node).__name__}")
     print(f"  final  -> {run.result.output if run.result else None}")
     if run.result:
-        print(f"[usage] {run.result.usage()}\n")
+        print(f"[usage] {run.result.usage}\n")
     else:
         print()
 
 
 # ----------------------------------------------------------------------------
-# 4) 取消流（演示）
+# 4) 取消运行（演示）
 # ----------------------------------------------------------------------------
 async def demo_cancel(model) -> None:
-    print("===== 4) await result.cancel() — 中途取消 =====")
+    print("===== 4) CancellationToken — 中途取消一次运行 =====")
+    from pydantic_ai import CancellationToken, RunCancelled
+
     agent = Agent(model)
-    async with agent.run_stream("写一篇 1000 字的散文") as result:
-        i = 0
-        async for chunk in result.stream_text(delta=True):
-            print(chunk, end="", flush=True)
-            i += 1
-            if i >= 5:
-                print("\n  [人为取消]")
-                await result.cancel()
-                break
+    token = CancellationToken()
+    task = asyncio.create_task(
+        agent.run("写一篇 1000 字的散文", cancellation_token=token)
+    )
+    await asyncio.sleep(0.5)  # 模拟用户点了「停止」
+    token.cancel()            # 幂等、线程安全；一个 token 可以管多个运行
+    try:
+        await task
+        print("  （模型 0.5 秒内就答完了，没来得及取消）")
+    except RunCancelled as exc:
+        # 取消前已完成的消息都在，可以持久化后用 message_history 续跑
+        print(f"  [已取消] 取消前已完成 {len(exc.all_messages())} 条消息")
     print()
 
 

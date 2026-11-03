@@ -14,10 +14,12 @@ from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
+EMBED_MODEL = os.environ.get("QWEN_EMBED_MODEL", "text-embedding-v4")
 
 DOCS_DIR = Path("docs/01-langchain")
 PERSIST_DIR = "./chroma_kb"
-COLLECTION = "lc"
+COLLECTION = "lc_demo"
 
 
 def loader(p):
@@ -25,7 +27,7 @@ def loader(p):
 
 
 def build_or_load():
-    emb = OpenAIEmbeddings(model="text-embedding-3-small")
+    emb = OpenAIEmbeddings(model=EMBED_MODEL, check_embedding_ctx_length=False, chunk_size=10)
     if not os.path.exists(PERSIST_DIR):
         print(">> 首次构建索引")
         docs = DirectoryLoader(str(DOCS_DIR), glob="*.md", loader_cls=loader).load()

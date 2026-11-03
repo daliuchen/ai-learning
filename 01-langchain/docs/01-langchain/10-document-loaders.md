@@ -1,6 +1,8 @@
 # LangChain 10：Document Loaders 与 Text Splitters
 
-> **一句话**：Loader 把"任何源（文件/URL/数据库）" → `List[Document]`，Splitter 把"大 Document" → "可被向量化的小 chunk"。这两步是 RAG 流水线最容易决定上限的环节，质量决定一切。
+> Loader 负责把文件、URL、数据库里的内容读成 `List[Document]`，Splitter 再把大文档切成适合向量化的小块。RAG 效果的上限往往在这两步就定了：文本读错、切得不好，后面检索和生成怎么调都补不回来。
+
+版本：以 `langchain 1.4`、`langchain-community 0.4`、`langchain-text-splitters 1.x` 为准。Loader 和切分器都不在 `langchain` 主包里，要单独安装这两个包。
 
 ---
 
@@ -15,7 +17,7 @@ doc = Document(
 )
 ```
 
-`metadata` 是关键，它会一路跟随到向量库，可以用来过滤、引用、回链原始文档。
+`metadata` 会一路跟到向量库里，之后过滤、标注出处、回链原文都靠它，加载时就值得把字段填全。
 
 ---
 
@@ -150,7 +152,7 @@ chunks = splitter.split_documents(docs)
 
 ---
 
-## 4. 五大 Splitter 适用场景
+## 4. 各种 Splitter 的适用场景
 
 ### 4.1 RecursiveCharacterTextSplitter（默认首选）
 
@@ -160,11 +162,11 @@ chunks = splitter.split_documents(docs)
 RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
 ```
 
-99% 通用文本用这个就够了。
+绝大多数通用文本用它就够了。
 
 ### 4.2 CharacterTextSplitter
 
-只按单一字符切，简单：
+只按一个分隔符切，逻辑最简单：
 
 ```python
 from langchain_text_splitters import CharacterTextSplitter
@@ -173,7 +175,7 @@ CharacterTextSplitter(separator="\n\n", chunk_size=500, chunk_overlap=50)
 
 ### 4.3 Token-based Splitter
 
-按 OpenAI/HF tokenizer 计长度，更贴合模型 context window：
+用 OpenAI 或 HF 的 tokenizer 计长度，和模型的 context window 对得更准：
 
 ```python
 RecursiveCharacterTextSplitter.from_tiktoken_encoder(
@@ -200,7 +202,7 @@ md_splitter = RecursiveCharacterTextSplitter.from_language(
 )
 ```
 
-支持 Python/JS/Java/Go/Rust/Markdown/HTML/Latex 等十几种，内置语言专用分隔符列表。
+支持 Python、JS、Java、Go、Rust、Markdown、HTML、Latex 等十几种语言，每种都内置了对应的分隔符列表。
 
 ### 4.5 结构化文档 Splitter
 
@@ -229,7 +231,7 @@ splitter = SemanticChunker(
 chunks = splitter.create_documents([text])
 ```
 
-比按字符切质量高，但慢且贵，适合关键文档。
+切出来的块比按字符切更完整，但要为每句话算 embedding，又慢又花钱，更适合留给重要文档。
 
 ---
 
@@ -244,11 +246,7 @@ chunks = splitter.create_documents([text])
 | Markdown 文档 | 按 H2/H3 | 100 | MarkdownHeader + Recursive 二次 |
 | FAQ / Q&A | 一条一个 doc | 0 | 自定义不切 |
 
-常见错误：
-- chunk 太大 → 检索精度下降、prompt 超长
-- chunk 太小 → 上下文不足、模型答不出来
-- overlap 0 → 重要句子被切断
-- overlap 太大 → 重复信息
+chunk 太大，检索精度会下降，拼进 prompt 也太长；太小则上下文不够，模型答不出来。overlap 设成 0 容易把关键句子切断，设得太大又会塞进大量重复内容。
 
 ---
 
@@ -267,12 +265,14 @@ from langchain_community.document_transformers import (
 
 - `EmbeddingsRedundantFilter`：去重相似文档
 - `EmbeddingsClusteringFilter`：聚类筛选代表性文档
-- `LongContextReorder`：把最相关文档放头尾（缓解 "lost in the middle"）
+- `LongContextReorder`：把最相关的文档放到头尾，缓解 lost in the middle 问题
 - `BeautifulSoupTransformer`：HTML → 干净文本
 
 ---
 
-## 7. demo
+## 7. 本章 demo
+
+完整代码：[`demos/langchain/10_loader_splitter.py`](../../demos/langchain/10_loader_splitter.py)
 
 ```python
 # demos/langchain/10_loader_splitter.py
@@ -309,15 +309,14 @@ for c in final[:2]:
 | 现象 | 原因 | 解决 |
 |------|------|------|
 | 中文按字符切句子被砍断 | 标点不在 separators | 加 `"。", "！", "？", "\n"` |
-| PDF 解析出乱码 | PDF 是扫描件 | 用 `UnstructuredPDFLoader(mode="elements")` 或 OCR |
+| PDF 解析出空文本或乱码 | 扫描件没有文字层；乱码多半是字体编码问题 | 扫描件要走 OCR（如 `UnstructuredPDFLoader(..., strategy="ocr_only")`）；乱码换 `PyMuPDFLoader` 等其他解析器试试 |
 | metadata 丢失 | 用 `.split_text` 而非 `.split_documents` | 用后者 |
 | chunk 数量爆炸 | size 太小或 overlap 太大 | 调大 size、降 overlap |
 | 加载几个 GB 内存爆 | `load()` 一次性 | 用 `lazy_load()` 流式处理 |
+| `ImportError: ... pip install pypdf / unstructured ...` | Loader 在 `langchain-community`，具体解析库是各自的可选依赖 | 按报错提示装 `pypdf`、`beautifulsoup4`、`unstructured` 等 |
+| `from langchain.document_loaders import ...` 找不到 | 1.x 的 `langchain` 主包不再转发 | 改 `from langchain_community.document_loaders import ...`；切分器用 `langchain_text_splitters` |
+| `SemanticChunker` 导入失败 | 它在实验包里 | `pip install langchain-experimental`，`from langchain_experimental.text_splitter import SemanticChunker` |
 
 ---
 
-## 9. 本章 demo
-
-[`demos/langchain/10_loader_splitter.py`](../../demos/langchain/10_loader_splitter.py)
-
-下一篇：[11-vectorstores.md](11-vectorstores.md)
+下一篇：[LangChain 11：Embeddings 与 Vector Stores](11-vectorstores.md)

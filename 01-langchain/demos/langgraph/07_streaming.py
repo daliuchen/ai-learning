@@ -5,6 +5,8 @@
 """
 from typing_extensions import Annotated, TypedDict
 
+import os
+
 from dotenv import load_dotenv
 
 from langchain_core.messages import BaseMessage
@@ -28,7 +30,7 @@ class S(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-model = ChatOpenAI(model="gpt-4o-mini").bind_tools([add])
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash")).bind_tools([add])
 
 
 def agent(state: S):

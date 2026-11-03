@@ -28,11 +28,11 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.test import TestModel
 
 USE_TEST_MODEL = not os.getenv("OPENAI_API_KEY")
-MODEL_NAME = "openai:gpt-4o-mini"
+MODEL_NAME = "openai-chat:qwen-flash" if os.getenv("OPENAI_API_KEY") else "test"  # 没 key 时用内置 test 模型
 
 agent = Agent(
     MODEL_NAME,
-    system_prompt=(
+    instructions=(
         "你是中文助手。当用户的问题涉及最新信息时，调用 fake_search 工具，"
         "把结果用一两句话总结后回复。"
     ),
@@ -177,7 +177,7 @@ async def chat(q: str) -> StreamingResponse:
                                     if isinstance(ev, FunctionToolResultEvent):
                                         yield _sse({
                                             "type": "tool_result",
-                                            "content": str(ev.result.content),
+                                            "content": str(ev.part.content),  # ev.part 是 ToolReturnPart（失败重试时是带反馈的部件）
                                         })
         except Exception as exc:
             yield _sse({"type": "error", "message": repr(exc)})

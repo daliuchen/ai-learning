@@ -1,6 +1,6 @@
-# EKB 27：单路向量检索——MVP 的检索
+# EKB 27：MVP 的单路向量检索
 
-> **一句话**：MVP 阶段用最朴素的检索——把问题 embed 成向量，在 pgvector 里找最近的 top-k 个 chunk。先不管 BM25、不管 rerank、不管权限。这一步的目标是**打通「问题 → 相关片段」这条链**，建立 baseline，后面再逐步增强。
+> MVP 阶段的检索用最朴素的做法：把问题 embed 成向量，到 pgvector 里找距离最近的 top-k 个 chunk。BM25、rerank、权限这些先都不管。这一步只求打通从问题到相关片段这条链，测出 baseline，后面再一项项往上加。
 
 ---
 
@@ -8,14 +8,13 @@
 
 ```python
 # retrieve/vector.py
+from pgvector import Vector
 from generate.embedder import embed_query
-from db import get_conn
-from pgvector.psycopg import register_vector
+from db import get_conn                     # 已 register_vector，行是 dict（dict_row）
 
 def vector_search(question: str, k: int = 5) -> list[dict]:
-    q_vec = embed_query(question)           # 问题 → 向量（查询侧处理）
+    q_vec = Vector(embed_query(question))   # 问题 → 向量；查询参数要包成 Vector
     conn = get_conn()
-    register_vector(conn)
     rows = conn.execute(
         "SELECT c.id, c.doc_id, c.content, c.section_path, "
         "       d.title, d.source_url, "
@@ -26,32 +25,30 @@ def vector_search(question: str, k: int = 5) -> list[dict]:
         "LIMIT %s",
         (q_vec, q_vec, k),
     ).fetchall()
-    return [dict(zip(
-        ["id", "doc_id", "content", "section_path", "title", "source_url", "distance"],
-        r)) for r in rows]
+    return rows                             # dict_row：每行已是 dict
 ```
 
-就一句 SQL：`ORDER BY embedding <=> q_vec LIMIT k`。`<=>` 是余弦距离，越小越近。join `documents` 是为了顺便带回标题/链接（引用要用）和过滤已下线文档。
+核心只有 `ORDER BY embedding <=> q_vec LIMIT k` 这一句。`<=>` 是余弦距离，值越小越近。join `documents` 有两个用处：顺带取回标题和链接（引用要用），以及过滤掉已经下线的文档。
 
 ---
 
-## 2. 为什么 MVP 先不加别的
+## 2. MVP 为什么先不加别的
 
-新手会想「既然知道要混合检索 + rerank，干脆一次做全」。但 MVP 纵切的价值在于：
+刚上手的人常会想：反正迟早要做混合检索和 rerank，不如一次做齐。MVP 先只做一路的好处在这里（下面的数字是示意数据）：
 
 ```
-先跑通单路向量 → 测出 baseline（比如 recall@5 = 0.62）
-→ 加 BM25 → 重测（0.71，+0.09）→ 知道 BM25 值多少
-→ 加 rerank → 重测（0.81，+0.10）→ 知道 rerank 值多少
+先跑通单路向量 → 测出 baseline（比如 recall@5 = 0.66）
+→ 加 BM25 → 重测（0.79，+0.13）→ 知道 BM25 值多少
+→ 加 rerank → 重测（recall@5 0.81，recall@3 0.68 → 0.78）→ 知道 rerank 值多少
 ```
 
-**每个增强的价值都被单独量化**。如果一上来全堆上，跑出 0.81，你根本不知道这 0.81 里 BM25 占多少、rerank 占多少，也不知道哪个其实没用。详见 [01-intro/04-mvp-first](../01-intro/04-mvp-first.md)。
+每一项增强的价值都能单独量出来。要是一开始就全堆上去，跑出个 0.81，你分不清其中 BM25 贡献了多少、rerank 贡献了多少，也看不出哪一项其实没起作用。更多讨论见 [MVP 优先](../01-intro/04-mvp-first.md)。
 
 ---
 
-## 3. 距离阈值：初步的「答不出」信号
+## 3. 距离阈值：最初的「答不出」信号
 
-向量检索总会返回 k 个结果——哪怕问题和知识库毫无关系，它也会返回「最不相关的 k 个」。所以要看**距离**：如果最近的 chunk 距离都很大（相似度很低），说明知识库里大概没有相关内容。
+向量检索永远会返回 k 个结果，哪怕问题和知识库毫不相干，它也会把最接近的 k 个交出来，只不过这些结果其实都不相关。所以要看距离：如果连最近的 chunk 距离都很大（相似度很低），多半说明知识库里没有相关内容。
 
 ```python
 RELEVANCE_THRESHOLD = 0.35   # 余弦距离阈值，需用评估集校准
@@ -63,26 +60,26 @@ def vector_search_with_gate(question, k=5):
     return relevant
 ```
 
-这是兜底的第一道防线（生成层还有第二道，见 [04-say-i-dont-know](./04-say-i-dont-know.md)）。阈值不能拍脑袋，要用评估集里的「答不出」用例校准——既不能把有答案的也滤掉，又要拦住无关问题。
+这是兜底的第一道防线，生成层还有第二道，见 [答不出就承认](./04-say-i-dont-know.md)。阈值不能拍脑袋定，要拿评估集里的「答不出」用例来校准：既不能把有答案的问题也滤掉，又得拦住无关问题。
 
 ---
 
 ## 4. top-k 取多少
 
-MVP 阶段建议 k=5 起步，但要意识到这是个权衡：
+MVP 阶段我从 k=5 起步，不过这个值本身就是一种取舍：
 
 | k 小（3） | k 大（10） |
 |-----------|-----------|
 | 噪声少，prompt 短，便宜 | 召回全，少漏 |
 | 但可能漏掉相关片段 | 但噪声多，模型易被带偏 |
 
-MVP 先用 5，后面加了 rerank 后，策略会变成「检索阶段召回多（k=20），rerank 精排到少（top 3-5）」——召回要广、入 prompt 要精。详见 [07-retrieval/04-rerank](../07-retrieval/04-rerank.md)。
+先用 5。等加了 rerank，策略会变成检索阶段多召回一些（k=20），再由 rerank 精排到 3 到 5 条：召回要宽，进 prompt 的要精。详见 [Rerank 精排](../07-retrieval/04-rerank.md)。
 
 ---
 
-## 5. 验证检索本身（脱离生成）
+## 5. 先单独验证检索
 
-检索写完，先**单独测它**，别急着接生成。用评估集只跑检索层，看 recall：
+检索写完，先单独测它，别急着接生成。用评估集只跑检索这一层，看 recall：
 
 ```python
 # 只测检索，不生成
@@ -92,7 +89,7 @@ for case in load_testset():
     print(f"#{case['id']} recall@5={recall}")
 ```
 
-这就是第 04 章「分层评估」的好处——检索能单独打分，你能确认「相关片段确实被召回了」，再去接生成。如果检索这层就漏了，生成再好也白搭。
+第 04 章讲的分层评估在这里就用上了：检索能单独打分，确认相关片段确实召回了，再去接生成。检索这层就漏了的话，生成写得再好也没用。
 
 ---
 
@@ -100,16 +97,14 @@ for case in load_testset():
 
 | 坑 | 后果 | 正确做法 |
 |----|------|----------|
-| MVP 就堆全套检索 | 增强价值无法归因 | 先单路向量建 baseline |
-| 不看距离，无脑返回 k 个 | 无关问题也硬给片段 | 加距离阈值过滤 |
+| MVP 就堆全套检索 | 增强价值无法归因 | 先用单路向量建 baseline |
+| 不看距离，固定返回 k 个 | 无关问题也硬塞片段 | 加距离阈值过滤 |
 | 阈值拍脑袋定 | 误滤或漏拦 | 用评估集校准 |
-| 检索没单独测就接生成 | 答错了分不清哪层 | 先单独测检索 recall |
-| 查询不走 embed_query | 和文档侧处理不一致 | 用统一查询侧编码 |
+| 检索没单独测就接生成 | 答错了分不清是哪层 | 先单独测检索 recall |
+| 查询不走 embed_query | 和文档侧处理不一致 | 统一用查询侧编码 |
 
 ---
 
 ## 下一步
 
-检索到片段了，交给生成层——用 Pydantic AI 输出结构化答案：
-
-→ [02-structured-output](./02-structured-output.md)
+片段检索到了，交给生成层，用 Pydantic AI 输出结构化答案：[结构化生成](./02-structured-output.md)

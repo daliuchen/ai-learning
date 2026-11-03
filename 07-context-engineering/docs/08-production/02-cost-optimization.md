@@ -1,59 +1,61 @@
 # CE 08-02：上下文成本优化实战
 
-> **一句话**：上下文成本 = 每次调用的 token 量 × 单价 × 调用次数。优化的正确顺序是「先量后砍」——拿上一篇的 token 占比表找出最大头，对症下药，而不是一上来就压历史。在 Agent 场景里，工具定义和历史往往才是吞金兽，而它们恰好是最容易被 prompt caching 干掉的部分。
+> 上下文成本等于每次调用的 token 量乘以单价，再乘以调用次数。优化要先量再砍：用上一篇的 token 占比表找出最大的那块，对症处理，不要一上来就压缩历史。在 Agent 场景里，花钱最多的常常是工具定义和历史，而工具定义恰好最适合交给 prompt caching。
 
 ---
 
 ## 1. 先搞清楚账单怎么算：input / output / cache 三笔钱
 
-2025-2026 的主流计费拆成三档，单价差一个数量级，优化策略完全不同：
+2026 年主流的计费分成几档，单价差一个数量级，对应的优化策略也完全不同。下表的倍数以 Anthropic 官方定价页为准，其他家略有差异，见 [Prompt Caching 与上下文复用](../07-long-context/03-prompt-caching.md)：
 
 | 计费项 | 相对单价（以 input 为 1×） | 含义 | 优化抓手 |
 |--------|---------------------------|------|----------|
 | input（fresh） | 1× | 首次进入、未命中缓存的输入 token | 压缩、裁剪、减少检索 |
-| cache write | ~1.25× | 写入 prefix 缓存（比普通 input 略贵） | 一次写、多次读才划算 |
-| cache read（hit） | ~0.1× | 命中缓存的输入 token | **最大杠杆**：让稳定前缀全部命中 |
-| output | 通常 3~5× input | 模型生成的 token | 限制 `max_tokens`、要结构化简短输出 |
+| cache write | 1.25×（5 分钟）/ 2×（1 小时） | 写入 prefix 缓存（比普通 input 贵） | 一次写、多次读才划算 |
+| cache read（hit） | 0.1×；Opus 5.5 / Sonnet 5.5 为 0.05×；Fable 5.1 为 0.025× | 命中缓存的输入 token | 收益最大：让稳定前缀全部命中 |
+| output | 当前主力模型多为 5× input | 模型生成的 token | 限制 `max_tokens`、要求结构化的简短输出 |
 
-关键洞察：**cache read 只要 input 的 1/10**。一个 6K token 的稳定系统前缀，命中后等于只花 600 token 的钱。这就是为什么「先把前缀缓存做对」往往比任何压缩都见效快。
+cache read 只要 input 单价的 1/10，新一代 Claude 甚至只要 5%。一个 6K token 的稳定系统前缀，命中后只相当于 600 token（甚至 300 token）的钱。所以先把前缀缓存做对，通常比任何压缩手段见效都快。
 
 ---
 
 ## 2. 降本手段清单（按性价比排序）
 
-| 手段 | 砍的是什么 | 典型收益 | 代价 / 风险 |
+| 手段 | 砍的是什么 | 常见收益（量级示意） | 代价 / 风险 |
 |------|-----------|----------|-------------|
-| prompt caching | 稳定前缀（system + 工具定义 + 长指令）重复计费 | input 成本降 50~90% | 前缀必须逐字节稳定 |
-| 压缩 / 摘要历史 | 远期对话历史的原文 token | 长会话省 30~70% | 摘要可能丢关键约束 |
+| prompt caching | 稳定前缀（system + 工具定义 + 长指令）的重复计费 | 命中部分按 0.1× 或更低计费 | 前缀必须逐字节稳定 |
+| 压缩、摘要历史 | 远期对话历史的原文 token | 长会话省 30~70% | 摘要可能丢掉关键约束 |
 | 裁剪工具定义 | 冗长的 JSON schema、用不上的工具 | 每次省几 K token | 裁错了 Agent 调不到工具 |
-| 减少检索 k | 召回过多的低相关片段 | 检索段 token 减半 | k 太小会漏召回 → 幻觉 |
-| 小模型做预处理 | 用 Haiku/mini 做改写、路由、抽取 | 整体成本降，主模型只干硬活 | 多一跳，链路变复杂 |
-| batch API | 异步非实时任务 | 价格直接打 5 折 | 不能实时返回（分钟级延迟） |
+| 减少检索 k | 召回过多的低相关片段 | 检索段 token 减半 | k 太小会漏召回，引发幻觉 |
+| 小模型做预处理 | 用 Haiku/mini 做改写、路由、抽取 | 整体成本降低，主模型只做难的部分 | 多一跳，链路变复杂 |
+| batch API | 异步、非实时的任务 | 价格直接打 5 折 | 不能实时返回（分钟级延迟） |
 
 ---
 
-## 3. 黄金法则：按占比找最大头先优化
+## 3. 先看占比，从最大的那块下手
 
-别凭感觉。先跑上一篇 [01-observability.md](./01-observability.md) 的占比表，谁占大头先砍谁。
+别凭感觉。先跑上一篇[上下文可观测性](./01-observability.md)里的占比表，谁占得多先砍谁。
 
 ```
 部分            tokens     占比
-tools            5980    33.0%   ← 最大头，但稳定 → 用 caching 干掉
-history          8120    44.8%   ← 次大头，且在变 → 压缩
+history          8120    44.8%   ← 最大头，且在变 → 压缩
+tools            5980    33.0%   ← 次大头，但稳定 → 用 caching
+system           2010    11.1%   ← 稳定 → 和 tools 一起缓存
 retrieved        1450     8.0%   ← 占比小，别动它，动了反而漏召回
+user              570     3.1%
 ```
 
-诊断逻辑：
+判断方法按占比和是否变动来分：
 
-- **占比大 + 稳定**（tools、长 system）→ 上 prompt caching，几乎零代价
-- **占比大 + 变动**（history）→ 压缩 / 摘要 / 滑窗
-- **占比小**（retrieved、user）→ 别折腾，省不出几个钱还容易把效果搞坏
+- 占比大且稳定（tools、长 system）：上 prompt caching，几乎没有代价。
+- 占比大且在变（history）：压缩、摘要或滑动窗口。
+- 占比小（retrieved、user）：别折腾，省不了几个钱，还容易把效果搞坏。
 
 ```python
 # ❌ 一上来就压检索片段 —— 它只占 8%，还压出了漏召回幻觉
 retrieved = retrieved[:1]
 
-# ✅ 先把占 33% 的稳定工具定义和 system 缓存掉
+# ✅ 先把稳定的工具定义（33%）和 system（11%）缓存掉
 system = [{
     "type": "text",
     "text": SYSTEM_PROMPT + TOOLS_DESCRIPTION,   # 长且稳定的前缀
@@ -65,14 +67,14 @@ system = [{
 
 ## 4. prompt caching 实操（Anthropic 为例）
 
-把**稳定前缀**和**变动尾部**切开，断点打在两者边界。前缀越长、复用越频繁，越赚。
+把稳定前缀和变动尾部分开，断点打在两者的边界上。前缀越长、复用越频繁，省得越多。
 
 ```python
 import anthropic
 client = anthropic.Anthropic()
 
 resp = client.messages.create(
-    model="claude-sonnet-4-5",
+    model="claude-sonnet-5-5",
     max_tokens=1024,
     system=[{
         "type": "text",
@@ -87,51 +89,52 @@ print(f"fresh={u.input_tokens} cache_read={u.cache_read_input_tokens} "
       f"cache_write={u.cache_creation_input_tokens} output={u.output_tokens}")
 ```
 
-命中条件提醒：前缀**逐字节相同**才命中。所以别把时间戳、随机 session id、用户名拼在 system 开头——把它们挪到 messages 里，让前缀保持纯净。
+再提醒一次命中条件：**前缀要逐字节相同**。别把时间戳、随机 session id、用户名拼在 system 开头，把它们挪到 messages 里，让前缀保持不变。
 
 ---
 
 ## 5. 小模型做预处理：链路降本
 
-不是所有步骤都需要旗舰模型。常见拆法：
+不是每一步都需要旗舰模型。常见的拆法是这样：
 
 ```python
 # 用便宜的小模型做「把用户原话改写成检索 query」这种简单活
 cheap = client.messages.create(
-    model="claude-haiku-4-5",   # 便宜、快
-    max_tokens=128,
+    model="claude-haiku-5-5",   # 便宜、快
+    max_tokens=2048,
     messages=[{"role": "user", "content": f"把下面问题改写成 3 个检索关键词：{user_q}"}],
 )
 queries = parse(cheap)
 
 # 主模型只在「带着精准检索结果做最终推理」时上场
-answer = client.messages.create(model="claude-sonnet-4-5", messages=build_ctx(queries), max_tokens=1024)
+answer = client.messages.create(model="claude-sonnet-5-5", messages=build_ctx(queries), max_tokens=1024)
 ```
 
-路由、意图分类、查询改写、结果抽取——这些都让 Haiku/mini 干，旗舰模型只干「需要强推理」的最后一步。
+路由、意图分类、查询改写、结果抽取，这些都可以交给 Haiku 或 mini 级别的模型，旗舰模型只做最后那一步需要强推理的工作。
 
 ---
 
 ## 6. 优化前后对比案例
 
-一个客服 Agent，日均 10 万次调用，平均每次 18K input token、800 output token。Sonnet 假设 input \$3 / output \$15 每百万 token。
+一个客服 Agent，日均 10 万次调用，平均每次 18K input token、800 output token。按 Claude Sonnet 5.5 的官方标价算：input \$2、output \$10（每百万 token），cache read 是 0.05×，即每百万 token \$0.10（以官方定价页为准，价格会变）。
 
-**优化前**：每次全是 fresh input。
-- input：18000 × \$3/M = \$0.054
-- output：800 × \$15/M = \$0.012
-- 单次 ≈ \$0.066 → 日成本 ≈ **\$6,600**
+优化前，每次都是 fresh input：
+- input：18000 × \$2/M = \$0.036
+- output：800 × \$10/M = \$0.008
+- 单次约 \$0.044，日成本约 \$4,400
 
-**优化后**三板斧：
-1. system + 工具定义（约 8K，占 44%）全部 prompt caching，命中后按 0.1× 计 → 8000 × \$0.3/M ≈ \$0.0024
-2. 历史从 8K 压缩摘要到 2.5K → fresh 部分剩 ≈ 2500（含 user/检索）
-3. output 限制到结构化短回答约 400 token
+优化时做了三件事：
+1. system 和工具定义（约 8K，占 44%）全部走 prompt caching，命中后按 0.05× 计费：8000 × \$0.1/M ≈ \$0.0008
+2. 历史从 8K 压缩摘要到 2.5K，加上没动的检索（约 1.45K）和 user（约 0.57K），fresh 部分约 4.5K
+3. output 限制为结构化的短回答，约 400 token
 
-- cached input：8000 × \$0.3/M = \$0.0024
-- fresh input：2500 × \$3/M = \$0.0075
-- output：400 × \$15/M = \$0.006
-- 单次 ≈ \$0.0159 → 日成本 ≈ **\$1,590**
+优化后：
+- cached input：8000 × \$0.1/M = \$0.0008
+- fresh input：4500 × \$2/M = \$0.009
+- output：400 × \$10/M = \$0.004
+- 单次约 \$0.0138，日成本约 \$1,380（没算缓存写入和未命中的部分，实际会略高）
 
-**降幅约 76%**，而且没动检索内容、没掉效果。最大头来自 caching（干掉了 44% 占比的稳定前缀）和历史压缩。这就是「先量后砍」的威力。
+成本降了约 69%，检索内容没动。省下的钱主要来自 caching（处理掉了占 44% 的稳定前缀）和历史压缩。
 
 ---
 
@@ -139,24 +142,24 @@ answer = client.messages.create(model="claude-sonnet-4-5", messages=build_ctx(qu
 
 | 坑 | 后果 | 修法 |
 |----|------|------|
-| 把动态内容放进缓存前缀 | 缓存永不命中，反而多付 1.25× 写入费 | 动态内容挪到 messages 尾部 |
-| 为省钱把检索 k 砍到 1 | 漏召回 → 幻觉，省的钱赔在错误上 | k 用召回评测定，不是拍脑袋 |
-| 历史无脑全摘要 | 关键约束被摘掉，前后矛盾 | 保留近 N 轮原文 + 远期摘要 |
-| 用旗舰模型干路由/抽取 | 简单活付旗舰价 | 拆给小模型 |
-| 实时接口忘了 batch 选项 | 离线任务付实时全价 | 非实时任务走 batch（5 折） |
+| 把动态内容放进缓存前缀 | 缓存永远不命中，还多付 1.25× 的写入费 | 动态内容挪到 messages 尾部 |
+| 为省钱把检索 k 砍到 1 | 漏召回引发幻觉，省下的钱都赔在错误上 | k 用召回评测来定，别拍脑袋 |
+| 历史一律全部摘要 | 关键约束被摘掉，前后矛盾 | 保留最近 N 轮原文，远期的做摘要 |
+| 用旗舰模型做路由、抽取 | 简单的活付了旗舰的价 | 拆给小模型 |
+| 离线任务忘了 batch 选项 | 离线任务付了实时的全价 | 非实时任务走 batch（5 折） |
 
 ---
 
 ## 下一步
 
-- 📖 没有占比表就没法优化，先做可观测 → [01-observability.md](./01-observability.md)
-- 📖 压历史压过头导致前后矛盾，怎么查 → [03-debugging.md](./03-debugging.md)
-- 📖 减 k 之前先用召回评测定安全下限 → [04-evaluation.md](./04-evaluation.md)
-- 📖 成本与延迟的基础模型 → [../01-foundations/04-cost-latency.md](../01-foundations/04-cost-latency.md)
-- 📖 历史压缩/摘要的具体策略 → [../05-compaction/02-summarization.md](../05-compaction/02-summarization.md)
+- 没有占比表就没法优化，先做可观测：[上下文可观测性](./01-observability.md)
+- 历史压过头导致前后矛盾，怎么查：[上下文相关故障排查](./03-debugging.md)
+- 减小 k 之前，先用召回评测定出安全下限：[如何评测上下文质量](./04-evaluation.md)
+- 成本与延迟的基础模型：[上下文的成本与延迟模型](../01-foundations/04-cost-latency.md)
+- 历史压缩和摘要的具体策略：[摘要式压缩](../05-compaction/02-summarization.md)
 
 ## 参考资料
 
-- Anthropic Prompt Caching：https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
-- Anthropic Message Batches：https://docs.anthropic.com/en/docs/build-with-claude/batch-processing
-- OpenAI Prompt Caching：https://platform.openai.com/docs/guides/prompt-caching
+- Anthropic Prompt Caching：https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+- Anthropic Message Batches：https://platform.claude.com/docs/en/build-with-claude/batch-processing
+- OpenAI Prompt Caching：https://developers.openai.com/api/docs/guides/prompt-caching

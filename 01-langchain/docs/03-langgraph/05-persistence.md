@@ -1,17 +1,19 @@
 # LangGraph 05：持久化 Checkpointer 与跨会话记忆
 
-> **一句话**：Checkpointer 是 LangGraph 的"自动存档"机制——每个 node 执行后都把整个 State 写一份快照，挂在 `thread_id` 下。从此你的图天然支持暂停、续跑、回放、多会话隔离。
+> Checkpointer 相当于 LangGraph 的自动存档：每个 node 执行完，都把整个 State 存一份快照，挂在 `thread_id` 下面。有了它，图才能暂停、续跑、回放，多个会话之间也互不干扰。后面讲的人在回路和 Time-travel 都建立在这一篇的基础上。
+
+版本：以 `langgraph 1.2.19`、`langgraph-checkpoint 4.3.1`、`langgraph-checkpoint-sqlite 3.1.3` 为准；`MemorySaver` 是 `InMemorySaver` 的别名。
 
 ---
 
 ## 1. 为什么需要 Checkpointer
 
-LangChain 的 `RunnableWithMessageHistory` 只保存"消息列表"。LangGraph 的 Checkpointer 保存的是**整个 State**（包括中间变量、当前节点、待办边）。这带来：
+LangChain 的 `RunnableWithMessageHistory` 只保存消息列表，LangGraph 的 Checkpointer 保存的是整个 State，包括中间变量、当前节点和待执行的边。这样就能做到：
 
-- **Human-in-the-loop**：在某节点暂停，等用户输入，再续跑
-- **Time-travel**：回到任意历史 checkpoint 重跑（修改 prompt / 模型）
-- **跨进程恢复**：进程挂了，下次启动从最后 checkpoint 继续
-- **多会话隔离**：每个 `thread_id` 是一条独立的"对话线"
+- Human-in-the-loop：在某个节点暂停，等用户输入后续跑
+- Time-travel：回到任意一个历史 checkpoint 重跑（比如换了 prompt 或模型）
+- 跨进程恢复：进程挂了，下次启动从最后一个 checkpoint 继续
+- 多会话隔离：每个 `thread_id` 是一条独立的对话线
 
 ---
 
@@ -19,23 +21,25 @@ LangChain 的 `RunnableWithMessageHistory` 只保存"消息列表"。LangGraph �
 
 | 实现 | 包 | 用途 |
 |------|----|------|
-| `MemorySaver` | `langgraph.checkpoint.memory` | 内存，单进程，开发/测试 |
+| `InMemorySaver`（旧名 `MemorySaver`） | `langgraph.checkpoint.memory` | 内存，单进程，开发/测试 |
 | `SqliteSaver` | `langgraph-checkpoint-sqlite` | 本地文件 / 单机持久化 |
 | `PostgresSaver` | `langgraph-checkpoint-postgres` | 多副本生产环境 |
 
-接口完全一致：
+三者接口一致：
 
 ```python
-from langgraph.checkpoint.memory import MemorySaver
-checkpointer = MemorySaver()
+from langgraph.checkpoint.memory import InMemorySaver
+checkpointer = InMemorySaver()
 
-# 或 SQLite
+# 或 SQLite（from_conn_string 是上下文管理器）
 from langgraph.checkpoint.sqlite import SqliteSaver
-checkpointer = SqliteSaver.from_conn_string(":memory:")  # 或 "chat.db"
+with SqliteSaver.from_conn_string("chat.db") as checkpointer:   # 或 ":memory:"
+    ...
 
-# 或 Postgres
+# 或 Postgres（pip install langgraph-checkpoint-postgres "psycopg[binary]"）
 from langgraph.checkpoint.postgres import PostgresSaver
-checkpointer = PostgresSaver.from_conn_string("postgresql://...")
+with PostgresSaver.from_conn_string("postgresql://...") as checkpointer:
+    checkpointer.setup()      # 首次使用建表
 ```
 
 ---
@@ -46,14 +50,14 @@ checkpointer = PostgresSaver.from_conn_string("postgresql://...")
 app = graph.compile(checkpointer=checkpointer)
 ```
 
-之后所有 `invoke / stream` 都必须传 `thread_id`：
+挂上之后，每次 `invoke / stream` 都要传 `thread_id`：
 
 ```python
 config = {"configurable": {"thread_id": "user-1-conv-A"}}
 app.invoke(input, config=config)
 ```
 
-如果不传 `thread_id`，会报错（编译有 checkpointer 时必传）。
+编译时有 checkpointer 而调用时没传 `thread_id`，会直接报错。
 
 ---
 
@@ -64,13 +68,13 @@ from typing_extensions import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langchain_openai import ChatOpenAI
 
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="qwen-flash")   # 千问：设 OPENAI_BASE_URL 指向 DashScope 兼容端点
 def chat(state):
     return {"messages": [model.invoke(state["messages"])]}
 
@@ -79,7 +83,7 @@ g.add_node("chat", chat)
 g.add_edge(START, "chat")
 g.add_edge("chat", END)
 
-memory = MemorySaver()
+memory = InMemorySaver()
 app = g.compile(checkpointer=memory)
 
 cfg = {"configurable": {"thread_id": "t1"}}
@@ -88,7 +92,7 @@ print(app.invoke({"messages": [("human", "我叫什么？")]}, config=cfg)["mess
 # 输出 "你叫小明"
 ```
 
-第二次 `invoke` 时 LangGraph 自动从 checkpointer 加载 state，把新消息合并进 messages（reducer 是 `add_messages`），LLM 看到完整历史。
+第二次 `invoke` 时，LangGraph 先从 checkpointer 加载 state，再用 `add_messages` 把新消息合并进去，所以 LLM 能看到完整历史。
 
 ---
 
@@ -106,7 +110,7 @@ for s in app.get_state_history(cfg):
     print(s.config["configurable"]["checkpoint_id"], "next=", s.next)
 ```
 
-回到某历史 checkpoint 重跑：
+回到某个历史 checkpoint 重跑：
 
 ```python
 history = list(app.get_state_history(cfg))
@@ -116,7 +120,9 @@ target = history[2]   # 想回去的那个
 app.invoke(None, config=target.config)
 ```
 
-这就是 **Time-travel**。06 篇会展开。
+这就是 Time-travel：`invoke(None, 某个历史 config)` 会从那个 checkpoint 之后重新执行，模型也会重新调用。如果想先改值再跑，先 `update_state(old.config, {...})` 拿到一个新的 checkpoint 配置（相当于分叉），再对它 `invoke(None, 新配置)`。06 篇会展开讲。
+
+> `get_state_history` 返回的 `metadata` 只有 `source`、`step`、`parents` 三个键，较早版本里的 `writes` 已经去掉了。想知道某一步写了什么，得对比相邻两个快照的 `values`。
 
 ---
 
@@ -129,10 +135,7 @@ app.update_state(
 )
 ```
 
-效果等于"伪装某 node 输出了这个 partial"，会被 reducer 合并。常用于：
-
-- 人工修正模型输出
-- 测试时注入特定状态再续跑
+效果相当于假装某个 node 输出了这份局部更新，同样会经过 reducer 合并。常见用途有两个：人工修正模型输出；测试时注入特定状态再续跑。
 
 ---
 
@@ -146,41 +149,38 @@ with SqliteSaver.from_conn_string("chat.db") as memory:
     app.invoke(..., config={"configurable": {"thread_id": "user1"}})
 ```
 
-进程重启后再次 `SqliteSaver.from_conn_string("chat.db")` 打开，所有 thread 的 state 都还在。
+进程重启后用 `SqliteSaver.from_conn_string("chat.db")` 重新打开，所有 thread 的 state 都还在。
 
-异步版：`AsyncSqliteSaver`。
+异步版是 `AsyncSqliteSaver`。
 
 ---
 
 ## 8. Postgres 生产部署
 
 ```python
-from psycopg_pool import ConnectionPool
 from langgraph.checkpoint.postgres import PostgresSaver
 
-pool = ConnectionPool("postgresql+psycopg://user:pw@host/db", max_size=20)
-memory = PostgresSaver(pool)
-memory.setup()  # 首次创建表
+DB_URI = "postgresql://user:pw@host:5432/db?sslmode=disable"
 
-app = g.compile(checkpointer=memory)
+with PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+    checkpointer.setup()          # 首次创建表（幂等）
+    app = g.compile(checkpointer=checkpointer)
+    app.invoke(..., config=cfg)
 ```
 
-表 schema：
-- `checkpoints`：每个 step 的 state 快照
-- `checkpoint_writes`：增量写
+异步用 `AsyncPostgresSaver`（`async with ... from_conn_string(...)`，`await checkpointer.setup()`）。`setup()` 建的主要是三张表：每个 step 的 state 快照（`checkpoints`）、增量写（`checkpoint_writes`）和大对象（`checkpoint_blobs`），另有一张记录迁移版本的 `checkpoint_migrations`。同一个 thread 的并发运行要在应用层串行化，别让两个请求同时跑同一个 `thread_id`。
 
-Postgres Checkpointer 支持多副本 worker 安全并发（基于 thread_id 锁）。
+> 如果把图部署到 LangSmith Deployment（Agent Server，见 [LangGraph 12：部署与 Studio](./12-deployment.md)），平台自带 PostgreSQL 检查点，这时不要自己传 checkpointer。
 
 ---
 
 ## 9. 跨会话长期记忆（Store）
 
-**Checkpointer = 一个 thread 内的状态**（同一对话）。
-**Store = 跨 thread 的长期数据**（用户偏好、历史事实）。
+Checkpointer 管的是一个 thread 内部的状态，也就是同一段对话；Store 管的是跨 thread 的长期数据，比如用户偏好和历史事实。
 
 ```python
 from langgraph.store.memory import InMemoryStore
-from langgraph.store.postgres import PostgresStore
+# 生产用 langgraph.store.postgres.PostgresStore（同样 from_conn_string + setup()）
 
 store = InMemoryStore()
 app = g.compile(checkpointer=checkpointer, store=store)
@@ -189,31 +189,34 @@ app = g.compile(checkpointer=checkpointer, store=store)
 在 node 里访问：
 
 ```python
-def remember_pref(state, *, store):
+from langgraph.runtime import Runtime
+
+def remember_pref(state, runtime: Runtime):
     # 写
-    store.put(
-        namespace=("users", "u_123"),
-        key="favorite_color",
-        value={"value": "blue"},
-    )
+    runtime.store.put(("users", "u_123"), "favorite_color", {"value": "blue"})
     # 读
-    item = store.get(("users", "u_123"), "favorite_color")
+    item = runtime.store.get(("users", "u_123"), "favorite_color")
     return {...}
 ```
 
-或者基于语义检索（带 embeddings）：
+老写法 `def node(state, *, store)` 也还能用；新代码推荐 `Runtime`，上下文、store、stream_writer 都从它上面取。
+
+Store 也支持基于 embeddings 的语义检索：
 
 ```python
+# 千问 embedding：OpenAIEmbeddings(model="text-embedding-v4", check_embedding_ctx_length=False)，dims 改成 1024
 store = InMemoryStore(index={"embed": OpenAIEmbeddings(), "dims": 1536})
 store.put(("users","u"), "fact-1", {"text": "用户喜欢蓝色"})
 items = store.search(("users", "u"), query="favorite color", limit=3)
 ```
 
-非常适合"长期个性化"应用。
+需要长期个性化的应用，用这个比自己维护一张偏好表省事。
 
 ---
 
-## 10. demo
+## 10. 本章 demo
+
+完整代码：[`demos/langgraph/05_persistence.py`](../../demos/langgraph/05_persistence.py)
 
 ```python
 # demos/langgraph/05_persistence.py
@@ -228,7 +231,7 @@ from langgraph.store.memory import InMemoryStore
 class State(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
-model = ChatOpenAI(model="gpt-4o-mini")
+model = ChatOpenAI(model="qwen-flash")   # 千问：设 OPENAI_BASE_URL 指向 DashScope 兼容端点
 
 def chat(state, *, store, config):
     user = config["configurable"]["user_id"]
@@ -257,16 +260,12 @@ with SqliteSaver.from_conn_string(":memory:") as memory:
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| compile 加了 checkpointer 但 invoke 不带 thread_id | 必传 | `config={"configurable":{"thread_id":...}}` |
-| 多用户串话 | 用同一个 thread_id | 加用户隔离前缀 |
-| SqliteSaver 文件越来越大 | 历史 checkpoint 累积 | 定期清理 / 用 Postgres |
-| store 在 node 里拿不到 | 参数名错 | 必须命名参数 `store=`，签名 `def n(state, *, store)` |
+| compile 加了 checkpointer，invoke 却没带 thread_id | 这时 thread_id 必传 | `config={"configurable":{"thread_id":...}}` |
+| 多用户串话 | 用了同一个 thread_id | 加用户隔离前缀 |
+| SqliteSaver 文件越来越大 | 历史 checkpoint 一直累积 | 定期清理，或换 Postgres |
+| node 里拿不到 store | 编译时没传 `store=`，或参数名写错 | `compile(store=...)`；节点签名用 `runtime: Runtime` 或 `(state, *, store)` |
 | update_state 不生效 | thread 不对 | 用同一个 thread_id |
 
 ---
 
-## 12. 本章 demo
-
-[`demos/langgraph/05_persistence.py`](../../demos/langgraph/05_persistence.py)
-
-下一篇：[06-human-in-the-loop.md](06-human-in-the-loop.md)
+下一篇：[LangGraph 06：Human-in-the-loop 与 Time-travel](06-human-in-the-loop.md)

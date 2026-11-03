@@ -46,7 +46,7 @@ def demo_anthropic_web_search() -> None:
         from pydantic_ai.capabilities import NativeTool
 
         agent = Agent(
-            'anthropic:claude-sonnet-4-6',
+            'anthropic:claude-sonnet-4-5',
             capabilities=[NativeTool(WebSearchTool(max_uses=2))],
             instructions='Answer concisely with web search.',
         )
@@ -68,7 +68,7 @@ def demo_code_execution() -> None:
         from pydantic_ai.capabilities import NativeTool
 
         agent = Agent(
-            'anthropic:claude-sonnet-4-6',
+            'anthropic:claude-sonnet-4-5',
             capabilities=[NativeTool(CodeExecutionTool())],
             instructions='Use code execution to answer numerical questions.',
         )
@@ -94,7 +94,7 @@ def demo_dynamic_native_tool() -> None:
             return WebSearchTool(max_uses=2)
 
         agent = Agent(
-            'anthropic:claude-sonnet-4-6',
+            'anthropic:claude-sonnet-4-5',
             capabilities=[NativeTool(prepared)],
             deps_type=dict,
             instructions='Use web search when allowed.',
@@ -109,40 +109,42 @@ def demo_dynamic_native_tool() -> None:
 
 
 # ========== 4. 跨 provider：WebSearch capability ==========
+def fake_search(query: str) -> str:
+    """本地兜底搜索（演示用，返回固定文本）。
+
+    Args:
+        query: search keywords
+    """
+    return f'[fake] Pydantic AI 是 Pydantic 团队的 Python Agent 框架（query={query}）'
+
+
 def demo_capability_fallback() -> None:
     """
-    WebSearch capability 自动选 native or common tool。
-    没 key 时把 model 换 TestModel，用一个 fake function tool 兜底，
-    展示同一套业务代码"换模型零改动"。
+    WebSearch capability 是「provider 自适应」的：
+      * 模型有原生联网搜索（Anthropic / OpenAI Responses / Google ...）→ 用原生
+      * 没有（比如千问的 OpenAI 兼容端点）→ 退到你给的 local 函数
+    同一套业务代码，换模型零改动。
     """
     print('\n========== 4. 跨 provider：capability 自动 fallback ==========')
     try:
         from pydantic_ai.capabilities import WebSearch
 
         if has_anthropic():
-            model = 'anthropic:claude-sonnet-4-6'
+            model = 'anthropic:claude-sonnet-4-5'
         elif has_openai_responses():
-            model = 'openai-responses:gpt-5.2'
+            model = 'openai-chat:qwen-flash'  # 千问没有原生 WebSearchTool → 走 local
         else:
-            # 没 key → TestModel + 模拟工具
-            model = TestModel()
+            model = None
 
-        agent = Agent(
-            model,
-            capabilities=[WebSearch()] if model != TestModel() else [],
-            instructions='Try to search the web when needed.',
-        )
-
-        if isinstance(model, TestModel):
-            # 没 native 能力，加一个本地 function tool 来兜底演示
-            @agent.tool_plain
-            def fake_search(query: str) -> str:
-                """Fallback search tool when no provider is available.
-
-                Args:
-                    query: search keywords
-                """
-                return f'[fake] result for {query}'
+        if model is None:
+            # 没 key：TestModel + 直接挂一个 function tool，演示本地兜底长什么样
+            agent = Agent(TestModel(), tools=[fake_search])
+        else:
+            agent = Agent(
+                model,
+                capabilities=[WebSearch(local=fake_search)],
+                instructions='需要最新信息时调用搜索工具。',
+            )
 
         r = agent.run_sync('What is Pydantic AI?')
         print('Output:', r.output)

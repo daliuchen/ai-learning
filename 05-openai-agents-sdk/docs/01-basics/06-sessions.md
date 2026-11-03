@@ -1,10 +1,10 @@
 # Sessions：会话状态自动管理
 
-> **一句话**：传 `session=` 参数，多轮对话自动续接——SDK 自动把历史 messages 拼到下一轮，省得你手动维护 messages list。
+> 给 `Runner.run` 传一个 `session=`，SDK 会在每轮开始前取出历史消息拼进输入，跑完再把新内容写回去，多轮对话就不用自己维护 messages list 了。这篇讲内置的几种 session 后端、历史太长时怎么裁剪，以及 session 不该存什么。
 
 ---
 
-## 1. 为啥要 Sessions
+## 1. 为什么需要 Sessions
 
 不用 Sessions 的写法：
 
@@ -14,17 +14,11 @@ messages.append({"role": "user", "content": "我叫小明"})
 r1 = await Runner.run(agent, messages)
 messages = r1.to_input_list()
 
-messages.append({"role": "user", "content": "我叫啥"})
+messages.append({"role": "user", "content": "我叫什么"})
 r2 = await Runner.run(agent, messages)
 ```
 
-每轮要：
-
-1. 维护 messages list
-2. 调 `to_input_list()` 把上轮结果拼回去
-3. 把新 user message 加进去
-
-容易忘 / 错。
+每轮都得自己维护 messages list：先用 `to_input_list()` 把上一轮的结果拼回去，再追加新的用户消息。步骤不复杂，但哪次漏了一步，模型就丢了上下文。
 
 ---
 
@@ -38,14 +32,11 @@ agent = Agent(name="A", instructions="...")
 session = SQLiteSession("user_42")  # session_id
 
 await Runner.run(agent, "我叫小明", session=session)
-await Runner.run(agent, "我叫啥", session=session)
+await Runner.run(agent, "我叫什么", session=session)
 # 模型："你叫小明"
 ```
 
-SDK 内部：
-
-1. 跑前从 session 拿历史 messages
-2. 跑完把新产生的 items 写回 session
+SDK 在每次 run 开始前从 session 取出历史消息，跑完再把新产生的 items 写回 session。
 
 ---
 
@@ -56,7 +47,7 @@ SQLiteSession(session_id="...", db_path=":memory:")  # 内存
 SQLiteSession(session_id="...", db_path="sessions.db")  # 文件
 ```
 
-默认 `db_path=":memory:"`——进程退出就没了。生产用文件或自定义。
+默认 `db_path=":memory:"`，进程退出数据就没了。线上要传文件路径，或者换别的后端。
 
 ---
 
@@ -84,18 +75,66 @@ last = await session.pop_item()
 
 ---
 
-## 5. 自定义 Session（接 Redis / PostgreSQL）
+## 5. 内置后端与自定义 Session
 
-实现 `Session` 协议：
+0.0.x 的时候只有 SQLite，要用 Redis / Postgres 得自己写。现在 SDK 内置了不少后端（`agents.memory` / `agents.extensions.memory`）：
+
+| 类 | 适合 | 备注 |
+|----|------|------|
+| `SQLiteSession` | 本地开发、简单应用 | 内置；`db_path` 不填=内存，填文件=持久化 |
+| `AsyncSQLiteSession` | 异步 SQLite | 要 `aiosqlite` |
+| `RedisSession` | 多进程/多实例共享 | `pip install "openai-agents[redis]"` |
+| `SQLAlchemySession` | 已有数据库的生产应用 | `[sqlalchemy]`；`SQLAlchemySession.from_url("u42", url="postgresql+asyncpg://...", create_tables=True)` |
+| `MongoDBSession` / `DaprSession` | 已有 MongoDB / Dapr 的团队 | 各有 extras |
+| `OpenAIConversationsSession` | 历史存在 OpenAI 服务端 | Conversations API，仅 OpenAI |
+| `OpenAIResponsesCompactionSession` | 超长对话自动压缩 | 包装别的 session，调用 `responses.compact`，仅 Responses |
+| `AdvancedSQLiteSession` | 分支、用量分析 | SQLite 的增强版 |
+| `EncryptedSession` | 落库加密 + TTL | 包装别的 session（`[encrypt]`） |
+
+大多数情况直接用内置的就够了，比如 `SQLAlchemySession` 配 `sqlite+aiosqlite` 内存库，或者用 `EncryptedSession` 包一层 SQLite。要接自己的存储，继承 `SessionABC`（需要 `session_id`、`session_settings` 属性和 4 个异步方法）：
+
+下面是一个最简单的 `DictSession`，作为 session 用时多轮记忆正常：
 
 ```python
-# demos/basics/06_redis_session.py
 import json
-from agents import Session
+from agents import SessionSettings
+from agents.memory import SessionABC
+
+
+class DictSession(SessionABC):
+    _store: dict = {}          # 演示用内存；换成 Redis/DB 同理
+
+    def __init__(self, session_id: str, session_settings: SessionSettings | None = None):
+        self.session_id = session_id
+        self.session_settings = session_settings
+        self.key = f"agents:session:{session_id}"
+
+    async def get_items(self, limit: int | None = None):
+        items = self._store.get(self.key, [])
+        return items[-limit:] if limit else list(items)       # limit=最近 N 条
+
+    async def add_items(self, items):
+        self._store.setdefault(self.key, []).extend(json.loads(json.dumps(i, default=str)) for i in items)
+
+    async def pop_item(self):
+        s = self._store.get(self.key, [])
+        return s.pop() if s else None
+
+    async def clear_session(self):
+        self._store.pop(self.key, None)
+```
+
+下面是自己用 Redis 实现的示例，仍然能用，不过直接用内置的 `RedisSession` 更省事：
+
+```python
+import json
+from agents.memory import SessionABC
 import redis.asyncio as redis
 
 
-class RedisSession(Session):
+class MyRedisSession(SessionABC):
+    session_settings = None
+
     def __init__(self, session_id: str, client: redis.Redis):
         self.session_id = session_id
         self.client = client
@@ -124,7 +163,7 @@ class RedisSession(Session):
 
 ```python
 r = redis.Redis(host="localhost")
-session = RedisSession("user_42", r)
+session = MyRedisSession("user_42", r)
 await Runner.run(agent, "...", session=session)
 ```
 
@@ -159,13 +198,13 @@ await Runner.run(support_agent, "另外有问题", session=session)
 # support_agent 能看到刚才 billing 那轮历史
 ```
 
-适合：单一对话流跨多个专家 agent。
+一条对话需要在几个专家 agent 之间流转时，可以这样共用一个 session。
 
 ---
 
 ## 8. handoff + Sessions
 
-更常见的是用 handoffs（不需要手动调多个 Agent）：
+更常见的做法是用 handoffs，不用手动依次调用多个 Agent：
 
 ```python
 triage = Agent(name="Triage", handoffs=[billing, support])
@@ -179,20 +218,50 @@ await Runner.run(triage, "退款", session=session)
 
 ## 9. 会话上限：上下文管理
 
-session 里 items 一直涨 → prompt 越来越长 → 烧 token。
+session 里的 items 只增不减，prompt 会越来越长，token 开销也跟着涨。下面是几种控制办法。
 
-策略：
-
-### 策略 A：限制最近 N 条
+### 策略 A：限制每次取回的历史条数（`SessionSettings`）
 
 ```python
-# 自定义 session 的 get_items 加 limit
-items = await session.get_items(limit=20)
+from agents import RunConfig, SessionSettings
+
+result = await Runner.run(
+    agent, "总结一下刚才聊的", session=session,
+    run_config=RunConfig(session_settings=SessionSettings(limit=50)),   # 只取最近 50 条 item
+)
 ```
+
+`limit=None`（默认）表示取全部。截断只发生在取回的时候，库里存的仍然是全量历史。
+
+### 策略 A+：自己决定历史怎么和新输入合并（`session_input_callback`）
+
+```python
+def keep_recent(history, new_input):
+    return history[-10:] + new_input     # 只保留最近 10 条历史
+
+await Runner.run(agent, "...", session=session,
+                 run_config=RunConfig(session_input_callback=keep_recent))
+```
+
+回调拿到的是副本，可以随意改。SDK 只会把本轮新产生的 items 写回 session，所以裁剪或重排旧历史不会导致旧消息被重复存储。如果要在调用模型前的最后一步再改输入（比如脱敏），用 `RunConfig(call_model_input_filter=...)`。
+
+### 策略 A++：自动压缩（OpenAI Responses 专属）
+
+```python
+from agents import SQLiteSession
+from agents.memory import OpenAIResponsesCompactionSession
+
+session = OpenAIResponsesCompactionSession(
+    session_id="conversation_123",
+    underlying_session=SQLiteSession("conversation_123"),
+)
+```
+
+每轮结束时检查阈值，超了就调 Responses 的 `compact` 重写历史。压缩期间 `run()` 和流式迭代器都会等它完成；对延迟敏感的话，可以设 `should_trigger_compaction=lambda _: False`，闲时手动 `await session.run_compaction({"force": True})`。第三方 Chat Completions 端点用不了。
 
 ### 策略 B：摘要 + 滚动
 
-定期摘要老历史：
+定期把旧历史压成一段摘要：
 
 ```python
 async def compact_session(session, agent):
@@ -211,21 +280,20 @@ async def compact_session(session, agent):
 
 ---
 
-## 10. Session 不存啥
+## 10. Session 不存什么
 
-不会自动存：
+Session 只存对话历史 items。用户 metadata（user_id、language）和业务对象（订单状态、token 余额）都不归它管，应该放进 context：`Runner.run(..., context=obj)`，工具里用 `RunContextWrapper[T]` 取出来，作用类似 Pydantic AI 的 deps。
 
-- 用户 metadata（user_id, language）：放 `context` 参数
-- 业务对象（订单状态、token 余额）：放 `context`
+另外两条约束：
 
-Session 只存"对话历史 items"。其它放 context（详见 [Context 章节](#)，或参考 Pydantic AI 的 deps）。
+- 同一次 run 里，session 不能和 `conversation_id` / `previous_response_id` / `auto_previous_response_id` 一起用，历史要么存在客户端，要么存在 OpenAI 服务端，只能选一种。
+- 被审批挂起的 run 恢复时，要传同一个 session（或者同 ID、同后端的另一个实例）：`await Runner.run(agent, state, session=session)`。
 
 ---
 
-## 11. 完整 demo
+## 11. 完整示例
 
 ```python
-# demos/basics/06_session_chat.py
 import asyncio
 from agents import Agent, Runner, SQLiteSession
 
@@ -248,20 +316,20 @@ asyncio.run(main())
 
 ---
 
-## 12. 跟 Pydantic AI / LangChain 对比
+## 12. 和 Pydantic AI / LangChain 对比
 
 | 框架 | 持久化 | 接口 |
 |------|--------|------|
-| OpenAI Agents | Session 接口（内置 SQLite） | `Runner.run(..., session=)` |
+| OpenAI Agents | Session 接口（内置 SQLite / Redis / SQLAlchemy / Mongo / 加密 / 压缩…） | `Runner.run(..., session=)` |
 | Pydantic AI | message_history list | `agent.run(..., message_history=)` |
 | LangChain | RunnableWithMessageHistory + ChatMessageHistory | configurable_alternatives |
 
-OpenAI Agents 的 Session 抽象**最简单**——只有 `get_items / add_items / pop_item / clear`。
+三者里 OpenAI Agents 的 Session 接口最简单，只有 `get_items / add_items / pop_item / clear_session` 四个方法，内置的后端反而最多。
 
 ---
 
 ## 13. 下一步
 
-- 📖 加守卫拦 PII → [04-guardrails/01-input-guardrails.md](../04-guardrails/01-input-guardrails.md)
-- 📖 多 Agent + Session → [03-handoffs/02-triage-pattern.md](../03-handoffs/02-triage-pattern.md)
-- 📖 部署：在 FastAPI 里用 → [06-integration/03-fastapi-deploy.md](../06-integration/03-fastapi-deploy.md)
+- 用守卫拦截 PII：[Input Guardrails：输入守卫](../04-guardrails/01-input-guardrails.md)
+- 多 Agent 配合 Session：[Triage Pattern：分流模式](../03-handoffs/02-triage-pattern.md)
+- 在 FastAPI 里用：[FastAPI / Lambda 部署](../06-integration/03-fastapi-deploy.md)

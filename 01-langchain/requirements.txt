@@ -1,56 +1,69 @@
+# 版本基线：2026-11（langchain 1.4 / langgraph 1.2 / langsmith 0.14），Python >= 3.10
+
 # ===== 核心 =====
-langchain>=0.3.0
-langchain-core>=0.3.0
-langchain-community>=0.3.0
-langchain-text-splitters>=0.3.0
+langchain>=1.4
+langchain-core>=1.7
+langchain-text-splitters>=1.1
+langchain-community>=0.4
+# 旧 API（AgentExecutor / chains / hub / EnsembleRetriever / 旧 Memory 类等）；只在读老代码、跑 08 篇对照 demo 时需要
+langchain-classic>=1.0
 
 # ===== 模型供应商 =====
-langchain-openai>=0.2.0
-langchain-anthropic>=0.2.0
-# langchain-google-genai>=2.0.0     # 可选：Gemini
-# langchain-ollama>=0.2.0           # 可选：本地 Ollama
-# langchain-deepseek>=0.1.0         # 可选：DeepSeek
+# 千问 / DeepSeek / 本地 vLLM 等 OpenAI 兼容接口都用它，设 OPENAI_BASE_URL 即可
+langchain-openai>=1.7
+langchain-anthropic>=1.7            # 可选：Anthropic
+# langchain-google-genai            # 可选：Gemini
+# langchain-ollama                  # 可选：本地 Ollama
+# langchain-deepseek                # 可选：DeepSeek
 
 # ===== LangGraph =====
-langgraph>=0.2.0
-langgraph-checkpoint>=2.0.0
-langgraph-checkpoint-sqlite>=2.0.0
-# langgraph-checkpoint-postgres>=2.0.0   # 可选：Postgres 持久化
-langgraph-supervisor>=0.0.1           # 可选：Supervisor prebuilt
-langgraph-swarm>=0.0.1                # 可选：Swarm prebuilt
+langgraph>=1.2
+langgraph-checkpoint>=4.0
+langgraph-checkpoint-sqlite>=3.0
+# langgraph-checkpoint-postgres     # 可选：Postgres 持久化
+# langgraph-supervisor / langgraph-swarm：官方已不再主推（supervisor 仓库已归档），
+#   新代码用「子 agent 包成工具」的写法，见 LangGraph 08 篇；仅为读老代码时再装
+# langgraph-cli[inmem]              # 可选：langgraph dev 本地调试
 
 # ===== LangSmith =====
-langsmith>=0.1.0
+langsmith>=0.14
 
 # ===== 向量数据库 =====
-chromadb>=0.5.0
-faiss-cpu>=1.8.0
-# pgvector>=0.3.0                   # 可选
+langchain-chroma>=1.0
+chromadb>=1.0
+faiss-cpu>=1.8
+rank-bm25>=0.2                      # BM25Retriever
+# langchain-postgres                # 可选：PGVector
 
 # ===== Embedding =====
-sentence-transformers>=3.0.0
+# 默认用 OpenAI 兼容的 embedding 接口（如通义 text-embedding-v4）。本地 embedding 为可选，体积大：
+# sentence-transformers>=3.0
 # tiktoken 由 langchain-openai 间接安装
 
 # ===== Document Loaders 常用依赖 =====
-pypdf>=4.0.0
-beautifulsoup4>=4.12.0
-unstructured>=0.15.0
-markdown>=3.5.0
-lxml>=5.0.0
+pypdf>=4.0
+beautifulsoup4>=4.12
+lxml>=5.0
+markdown>=3.5
+# unstructured>=0.15                # 可选：体积大
+# langchain-experimental            # 可选：SemanticChunker 等
 
 # ===== 工具与搜索 =====
-tavily-python>=0.4.0
-duckduckgo-search>=6.0.0
-wikipedia>=1.4.0
-requests>=2.31.0
+# langchain-tavily                  # 可选：Tavily 搜索（需 TAVILY_API_KEY）
+# ddgs                              # 可选：DuckDuckGo 搜索
+wikipedia>=1.4
+requests>=2.31
 
 # ===== Web / API =====
-fastapi>=0.110.0
-uvicorn>=0.27.0
-sse-starlette>=2.0.0
+fastapi>=0.110
+uvicorn>=0.27
+sse-starlette>=2.0
 
 # ===== 杂项 =====
-python-dotenv>=1.0.0
-pydantic>=2.5.0
-typing-extensions>=4.10.0
-rich>=13.7.0
+python-dotenv>=1.0
+pydantic>=2.5
+typing-extensions>=4.10
+rich>=13.7
+jinja2>=3.1                         # template_format="jinja2"
+grandalf>=0.8                       # chain.get_graph().print_ascii()
+greenlet>=3.0                       # SQLChatMessageHistory

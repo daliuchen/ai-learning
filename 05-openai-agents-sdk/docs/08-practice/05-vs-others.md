@@ -1,17 +1,12 @@
 # 横向对比：OpenAI Agents SDK vs Pydantic AI vs LangGraph
 
-> **一句话**：三家都能写 Agent 但风格各异——OpenAI Agents 是"最小原语 + OpenAI 生态"，Pydantic AI 是"类型安全 + 框架无关"，LangGraph 是"图引擎 + 状态机"。本篇用同一个客服 Agent 用三家分别写出来对比。
+> 三个框架都能写 Agent，思路却不一样：OpenAI Agents SDK 原语少，和 OpenAI 生态绑得紧；Pydantic AI 强调类型安全，不挑模型厂商；LangGraph 用图和状态机来组织流程。这篇用同一个客服 Agent，三家各写一遍，放在一起比。
 
 ---
 
 ## 1. 共同任务
 
-同一个客服 Agent：
-
-- Triage 分流到 Billing / Support / Sales
-- 每个专家有 1-2 个 tool
-- 支持多轮对话（session）
-- 评测：同一份 evalset 跑三家
+三家实现的是同一个客服 Agent：Triage 把请求分给 Billing / Support / Sales，每个专家带 1-2 个工具，支持多轮对话（session），最后用同一份 evalset 评测。
 
 ---
 
@@ -35,7 +30,7 @@ billing = Agent(
     name="Billing",
     instructions="账单专员",
     tools=[lookup_invoice],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -43,7 +38,7 @@ support = Agent(
     name="Support",
     instructions="技术支持",
     tools=[search_kb],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -51,7 +46,7 @@ triage = Agent(
     name="Triage",
     instructions="分流到 Billing / Support",
     handoffs=[billing, support],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -61,7 +56,7 @@ async def chat(msg: str, user_id: str):
     return {"reply": result.final_output, "by": result.last_agent.name}
 ```
 
-代码量：**~25 行**。Handoffs 是一等公民，最直接。
+不算空行大约 30 行。Handoffs 是框架内置的概念，分流写起来最直接。
 
 ---
 
@@ -73,7 +68,7 @@ from pydantic_ai.messages import ModelMessage
 
 
 billing = Agent(
-    "openai:gpt-4o-mini",
+    "openai:gpt-6-luna",
     system_prompt="账单专员",
 )
 
@@ -84,7 +79,7 @@ def lookup_invoice(ctx, order_id: str) -> str:
 
 
 support = Agent(
-    "openai:gpt-4o-mini",
+    "openai:gpt-6-luna",
     system_prompt="技术支持",
 )
 
@@ -95,7 +90,7 @@ def search_kb(ctx, query: str) -> str:
 
 
 triage = Agent(
-    "openai:gpt-4o-mini",
+    "openai:gpt-6-luna",
     system_prompt="判断主题。Billing / Support / OTHER。只返回名字。",
 )
 
@@ -125,18 +120,20 @@ async def chat(msg: str, user_id: str):
     return {"reply": result.output, "by": by}
 ```
 
-代码量：**~40 行**。Handoffs 要自己路由——更显式但代码多。优势是**类型严格**。
+不算空行大约 40 行。路由要自己写，逻辑更显式，代价是代码多一些；好处是类型检查严格。
 
 ---
 
 ## 4. LangGraph 写法
 
 ```python
-from langgraph.graph import StateGraph, END, START
-from langchain_openai import ChatOpenAI
+from typing import Annotated, TypedDict
+from langchain.agents import create_agent
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
-from typing import TypedDict
+from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, END, START
+from langgraph.graph.message import add_messages
 
 
 @tool
@@ -149,15 +146,15 @@ def search_kb(query: str) -> str:
     return f"KB: {query}"
 
 
-llm = ChatOpenAI(model="gpt-4o-mini")
+llm = ChatOpenAI(model="gpt-6-luna")
 
 
-billing_agent = create_react_agent(llm, [lookup_invoice], prompt="账单专员")
-support_agent = create_react_agent(llm, [search_kb], prompt="技术支持")
+billing_agent = create_agent(llm, [lookup_invoice], system_prompt="账单专员")
+support_agent = create_agent(llm, [search_kb], system_prompt="技术支持")
 
 
 class State(TypedDict):
-    messages: list
+    messages: Annotated[list, add_messages]      # 每轮的新消息追加进历史，而不是覆盖
     intent: str
     output: str
 
@@ -198,7 +195,7 @@ workflow.add_conditional_edges("triage", router, ["billing", "support", END])
 workflow.add_edge("billing", END)
 workflow.add_edge("support", END)
 
-graph = workflow.compile()
+graph = workflow.compile(checkpointer=InMemorySaver())     # 有 checkpointer，thread_id 才能续上历史
 
 
 async def chat(msg: str, user_id: str):
@@ -208,7 +205,7 @@ async def chat(msg: str, user_id: str):
     return {"reply": result["output"]}
 ```
 
-代码量：**~60 行**。图状态机最显式——能精确控制每个状态转移，但启动复杂。
+不算空行大约 50 行。每一次状态转移都写在图里，控制最精细，但起步的样板代码也最多。
 
 ---
 
@@ -216,19 +213,20 @@ async def chat(msg: str, user_id: str):
 
 | 维度 | OpenAI Agents | Pydantic AI | LangGraph |
 |------|---|---|---|
-| **代码量** | 25 行 | 40 行 | 60 行 |
-| **学习曲线** | 平 | 平 | 较陡 |
-| **多 Agent** | ✅ Handoffs 原生 | 手动调 | ✅ 图节点 |
-| **类型安全** | 中 | ✅ 最强 | 弱 |
-| **状态机** | 弱 | 弱 | ✅ 最强 |
-| **Hosted Tools** | ✅ web_search 等 | ❌ | ❌ |
-| **多 Provider** | LiteLLM 适配 | ✅ 原生 | ✅ 原生 |
-| **观测** | ✅ OpenAI Dashboard 开箱 | Logfire | LangSmith |
-| **Streaming** | ✅ | ✅ | ✅ |
-| **Realtime/Voice** | ✅ | 弱 | 弱 |
-| **持久化** | Sessions（简） | message_history | ✅ Checkpoint 最强 |
-| **Human-in-Loop** | 通过 handoff | 自己写 | ✅ interrupt 一等公民 |
-| **生态** | OpenAI 官方支持 | Pydantic / 社区 | LangChain 系大 |
+| 代码量（上面三段，不算空行） | 约 30 行 | 约 40 行 | 约 50 行 |
+| 学习曲线 | 平 | 平 | 较陡 |
+| 多 Agent | Handoffs 原生支持 | 手动调 | 图节点 |
+| 类型安全 | 中 | 最强 | 弱 |
+| 状态机 | 弱 | 弱 | 最强 |
+| Hosted Tools | 有（web_search 等） | 有（Native Tools，provider 原生工具） | 无 |
+| 多 Provider | 兼容端点（Chat Completions）/ Any-LLM / LiteLLM（0.24 与 litellm 有 `openai` 版本冲突，见 [Multi-provider：接千问 / Claude / Gemini / 本地模型](../05-advanced/04-multi-provider.md)） | 原生支持 | 原生支持 |
+| 观测 | OpenAI Dashboard 开箱（需 OpenAI key）+ 30+ 第三方处理器 | Logfire | LangSmith |
+| Streaming | 支持 | 支持 | 支持 |
+| Realtime/Voice | 支持 | 弱 | 弱 |
+| 持久化 | Sessions（内置 SQLite / Redis / SQLAlchemy / Mongo / 加密 / 压缩…）+ `RunState` 可序列化续跑 | message_history（另有耐久执行集成） | Checkpoint，最强 |
+| Human-in-Loop | `needs_approval` + `RunState`（原生，兼容端点上也可用） | Deferred Tools + `requires_approval`（原生，见 [Pydantic AI 进阶 08：Deferred Tools 与人审批](../../../02-pydantic-ai/docs/03-advanced/08-deferred-tools.md)） | interrupt 是一等公民 |
+| 测试替身 | `agents.testing`（假模型 / 假 Realtime / 假 Voice） | `TestModel` / `FunctionModel` | 自己 mock |
+| 生态 | OpenAI 官方支持 | Pydantic / 社区 | LangChain 系大 |
 
 ---
 
@@ -237,7 +235,7 @@ async def chat(msg: str, user_id: str):
 ```
 用 OpenAI Agents SDK 如果：
 ├─ 跟 OpenAI 生态绑定
-├─ 需要 web_search / file_search / Realtime
+├─ 需要 web_search / file_search / Realtime（这几样只在 OpenAI Responses 模型上可用）
 ├─ 客服分流类场景（Triage / Handoffs）
 └─ 想要"最少配置最快出活"
 
@@ -261,26 +259,19 @@ async def chat(msg: str, user_id: str):
 
 ### 场景 A：电商客服
 
-- Triage 分流为主 → **OpenAI Agents SDK**（Handoffs 自然）
-- 全用 OpenAI 模型 → 加分
-- 要 web_search 查最新政策 → 加分
+以分流为主，Handoffs 用起来很自然，选 OpenAI Agents SDK。如果全用 OpenAI 模型、还要 web_search 查最新政策，就更合适了。
 
 ### 场景 B：财务数据分析 Agent
 
-- 类型严格（金额 / 货币精度）→ **Pydantic AI**
-- 主要单 Agent 跑 SQL + 分析
-- 不需要 Realtime
+金额和货币精度要求类型严格，选 Pydantic AI。这类任务主要是单个 Agent 跑 SQL 加分析，也用不到 Realtime。
 
 ### 场景 C：复杂工作流（合同审核）
 
-- 多步骤、可暂停、人工介入 → **LangGraph**
-- Checkpoint / 时间旅行刚需
-- 多 Agent 并行审不同段
+流程多步、要能暂停、要人工介入，checkpoint 和时间旅行是刚需，还要多个 Agent 并行审不同段落，选 LangGraph。
 
 ### 场景 D：研究助手
 
-- web_search 是硬需求 → **OpenAI Agents SDK**
-- 或者：LangGraph 主流程 + OpenAI Agents 做研究节点
+web_search 是硬需求，选 OpenAI Agents SDK；也可以用 LangGraph 做主流程，把研究节点交给 OpenAI Agents。
 
 ---
 
@@ -297,7 +288,7 @@ async def chat(msg: str, user_id: str):
        └─ 严格类型抽取
 ```
 
-详见 [06-integration/04-vs-others.md](../06-integration/04-vs-others.md)。
+具体接法见 [与 Pydantic AI / LangChain 互操作](../06-integration/04-vs-others.md)。
 
 ---
 
@@ -310,37 +301,31 @@ async def chat(msg: str, user_id: str):
 
 ---
 
-## 10. 一句话总结
+## 10. 总结
 
-- **OpenAI Agents SDK**：跟 OpenAI 玩，handoffs 顺手
-- **Pydantic AI**：跟类型玩，多 provider 顺手
-- **LangGraph**：跟图玩，复杂工作流顺手
-
-没有"最好"，看你**任务的形状**像哪个。
+OpenAI Agents SDK 适合用 OpenAI 模型、需要 handoff 分流的场景；Pydantic AI 适合重视类型、要换着用多家模型的场景；LangGraph 适合流程复杂、需要精细控制状态的场景。选哪个，先看手上的任务属于哪一类。
 
 ---
 
-## 11. 全本手册完结
+## 11. 读完这本手册
 
-走完这 38 篇你应该具备：
+这 38 篇覆盖的内容，大致对应下面这些事：
 
-- ✅ 写一个 Agent + 工具
-- ✅ 用 Handoffs 做多 Agent 路由
-- ✅ 用 Guardrails 防御
-- ✅ 用 Hosted Tools（OpenAI 独门）
-- ✅ 接 LiteLLM 跑 Claude / Gemini
-- ✅ 用 Realtime / Voice
-- ✅ 接 MCP Server
-- ✅ 接观测平台（Logfire / Langfuse / LangSmith）
-- ✅ 部署到 FastAPI / Lambda
-- ✅ 评测 + 迭代 + 生产化
-
-去做点真事吧。
+- 写一个带工具的 Agent
+- 用 Handoffs 做多 Agent 路由
+- 用 Guardrails（含 tool guardrails）和 `needs_approval` 人工审批做防御
+- 用 OpenAI 的 Hosted Tools
+- 接千问等 OpenAI 兼容端点，通过 Any-LLM / LiteLLM 跑 Claude / Gemini
+- 用 Realtime / Voice
+- 接 MCP Server
+- 接观测平台（Logfire / Langfuse / LangSmith）
+- 部署到 FastAPI / Lambda
+- 做评测、迭代和生产化
 
 ---
 
 ## 12. 下一步
 
-- 📖 OpenAI Agents SDK 官方 docs：https://openai.github.io/openai-agents-python/
-- 📖 跟 PE 手册的方法论结合 → [04-prompt-engineering/02-process](../../../04-prompt-engineering/docs/02-process/)
-- 📖 用 Claude Code 自动迭代 Agent → [04-prompt-engineering/08-practice/03-claude-code-as-optimizer.md](../../../04-prompt-engineering/docs/08-practice/03-claude-code-as-optimizer.md)
+- OpenAI Agents SDK 官方 docs：https://openai.github.io/openai-agents-python/
+- 跟 PE 手册的方法论结合 → [Prompt Engineering 手册流程篇](../../../04-prompt-engineering/docs/02-process/)
+- 用 Claude Code 自动迭代 Agent → [PE Practice 03：用 Claude Code 当 Prompt 优化器](../../../04-prompt-engineering/docs/08-practice/03-claude-code-as-optimizer.md)

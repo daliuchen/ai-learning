@@ -4,21 +4,24 @@
 Retriever 类型对比：BM25 / Vector / Ensemble / MultiQuery
 依赖前一节 11_vectorstore.py 已构建好 ./chroma_kb
 """
+import os
 from dotenv import load_dotenv
 
-from langchain.retrievers import EnsembleRetriever
-from langchain.retrievers.multi_query import MultiQueryRetriever
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_classic.retrievers.multi_query import MultiQueryRetriever
 from langchain_chroma import Chroma
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
+EMBED_MODEL = os.environ.get("QWEN_EMBED_MODEL", "text-embedding-v4")
 
 
 def main():
-    emb = OpenAIEmbeddings(model="text-embedding-3-small")
-    vs = Chroma(persist_directory="./chroma_kb", collection_name="lc", embedding_function=emb)
+    emb = OpenAIEmbeddings(model=EMBED_MODEL, check_embedding_ctx_length=False, chunk_size=10)
+    vs = Chroma(persist_directory="./chroma_kb", collection_name="lc_demo", embedding_function=emb)
 
     vector = vs.as_retriever(search_kwargs={"k": 4})
 
@@ -34,7 +37,7 @@ def main():
     ensemble = EnsembleRetriever(retrievers=[bm25, vector], weights=[0.4, 0.6])
     mq = MultiQueryRetriever.from_llm(
         retriever=ensemble,
-        llm=ChatOpenAI(model="gpt-4o-mini"),
+        llm=ChatOpenAI(model=MODEL),
     )
 
     queries = [

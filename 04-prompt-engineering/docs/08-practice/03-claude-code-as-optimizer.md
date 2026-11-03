@@ -1,10 +1,10 @@
 # PE Practice 03：用 Claude Code 当 Prompt 优化器
 
-> **一句话**：Claude Code（或类似 Agent）能成为你的 PE 协作者——帮你看 evalset 失败、提改进假设、改 prompt、跑 evalset 验证。本篇讲怎么让 Claude Code 进入这种"PE optimizer" 模式。
+> 前面讲的迭代闭环（看评测失败、提假设、改 prompt、重跑验证）步骤固定，很适合交给 Claude Code 这类编码 agent 去执行，你只负责 review 和拍板。这篇讲怎么给它布置任务、设哪些约束，以及哪些决定不能交给它。
 
 ---
 
-## 1. 思路
+## 1. 分工
 
 ```
 [你] 提供:
@@ -23,11 +23,9 @@
 [你] Review + 决定接受 / rollback
 ```
 
-整个 PE 迭代闭环交给 Agent。
-
 ---
 
-## 2. 起步：让 Claude Code 看你的项目
+## 2. 第一轮：让它熟悉项目
 
 项目结构：
 
@@ -44,7 +42,7 @@ my-classifier/
     └── v0.json
 ```
 
-打开 Claude Code 在这个目录，第一轮 prompt：
+在这个目录下打开 Claude Code，第一轮这样交代：
 
 ```
 看一下当前项目结构。我有一个客服分类 prompt v0，在 evalset/v1.0.jsonl 上跑分 76%。
@@ -62,13 +60,13 @@ my-classifier/
 只改 prompts/v1.md，不要动其他文件。
 ```
 
-Claude Code 会按这个 plan 走。
+Claude Code 会按这个步骤往下走。
 
 ---
 
-## 3. 给 Claude Code 的"约束"
+## 3. 给它立规矩
 
-让它做得好的关键：明确的 PE 工程纪律。
+能不能用好，取决于你有没有把迭代纪律写清楚：
 
 ```
 重要约束（PE 工程纪律）：
@@ -83,32 +81,27 @@ Claude Code 会按这个 plan 走。
 8. 失败的样本里如果发现是 evalset 本身有问题（标错），单独标注，不要默默修
 ```
 
-Claude Code 是好工具但需要约束——否则它倾向"激进改"。
+不加约束的话，它倾向于一次改很多地方。
 
 ---
 
 ## 4. 多轮迭代
 
-第二轮 prompt：
+第二轮只需要一句：
 
 ```
 继续迭代。基于 v1 结果，做 v2。同样规则。
 ```
 
-Claude Code 会：
-- 读 v1 结果
-- 找新的最大失败类（v1 解决了 reverse sarcasm，可能还有 multi-class 问题）
-- 改一处 → v2
-- 跑评测
-- 报告
+它会读 v1 的结果，找出新的最大失败类（v1 解决了反讽，接下来可能是多类别问题），改一处生成 v2，跑评测，再给报告。
 
-跑 5-10 轮 → 通常 88-93%。
+一般跑 5-10 轮，通过率能到 88-92%。
 
 ---
 
-## 5. 让 Claude Code 看 trace
+## 5. 让它分析线上 trace
 
-如果有线上 trace 数据（LangSmith / Langfuse），可以让 Claude Code 也看：
+如果有 LangSmith 或 Langfuse 的线上 trace，也可以交给它看：
 
 ```
 我把过去 7 天 100 条线上 trace export 到 traces/recent.jsonl。
@@ -121,11 +114,11 @@ Claude Code 会：
 只提议，不要直接写 evalset（我要 review）。
 ```
 
-Claude Code 充当 trace 分析师 + evalset 编辑器。
+这时它同时在做 trace 分析和评测集补充，但评测集的最终写入要由你把关。
 
 ---
 
-## 6. 让 Claude Code 重构 prompt
+## 6. 让它给 prompt 减肥
 
 ```
 现在 v8 通过率 91%，但 prompt 已经 1500 token + 5 个示例。
@@ -138,38 +131,33 @@ Claude Code 充当 trace 分析师 + evalset 编辑器。
 跑 evalset 确认。
 ```
 
-定期"减肥"避免 prompt 一直膨胀。
+一轮轮打补丁，prompt 只会越来越长，隔一段时间就该精简一次。
 
 ---
 
-## 7. Claude Code 不擅长的事
+## 7. 不该交给它的事
 
-| 不擅长 | 你来做 |
+| 事情 | 由谁决定 |
 |--------|--------|
-| **判断业务可接受门槛** | "91% 够吗" 要你 / PM 决定 |
-| **决定上线** | 灰度策略、风险评估 |
-| **改 evalset 的"权威"** | 加 / 改 / 删 evalset 必须人审 |
-| **跨模型决策** | 换模型涉及成本 / 合规 |
-| **架构改造** | 拆 sub-agent / 加 RAG 是大决策 |
-| **rollback** | 别让 Agent 自动 rollback |
+| 业务上多少分算够 | "91% 够不够"要你或 PM 来定 |
+| 是否上线 | 灰度策略、风险评估 |
+| 评测集的增删改 | 必须人工审核 |
+| 换模型 | 涉及成本和合规 |
+| 架构改造 | 拆子 agent、加 RAG 都是大决策 |
+| 回滚 | 不要让 agent 自动回滚 |
 
-Claude Code 是**协作者**不是**决策者**。
+这些事 Claude Code 可以给出分析和建议，决定要由人来做。
 
 ---
 
-## 8. 工作流自动化（高级）
+## 8. 做成 Skill
 
-可以把 PE 迭代写成 Claude Code Skill：
+可以把一轮迭代封装成 Claude Code Skill，文件放在 `.claude/skills/pe-iter/SKILL.md`（frontmatter 必须在文件第一行）：
 
 ```markdown
-# .claude/skills/pe-iter/SKILL.md
-
 ---
-name: PE Iteration
-description: 跑一轮 PE 迭代：看失败 → 改 prompt → 验证 → 报告
-triggers:
-  - "迭代一下 prompt"
-  - "run pe iter"
+name: pe-iter
+description: 跑一轮 PE 迭代：看失败 → 改 prompt → 验证 → 报告。当用户说"迭代一下 prompt"或"run pe iter"时使用。
 ---
 
 工作流：
@@ -181,11 +169,13 @@ triggers:
 6. 报告给用户
 ```
 
-之后 Claude Code 里直接 `/pe-iter` 就跑一轮。
+之后在 Claude Code 里输入 `/pe-iter` 就能跑一轮。skill 的触发条件写在 `description` 里，不再用单独的 `triggers` 字段。
+
+> 补充：Anthropic 官方的 `claude-api` skill 自带 `build-eval`（访谈式建评测集）和 `hillclimb`（在评测上按 train/validation/test 拆分迭代改 prompt）两个子命令，思路和本篇一致，可以直接拿来用。
 
 ---
 
-## 9. 完整示例对话
+## 9. 一段完整对话
 
 ```
 [You] 看一下项目。我有 prompts/v0.md，evalset/v1.0.jsonl，跑过一次 results/v0.json（76% 通过率）。
@@ -235,24 +225,23 @@ broken: 0 条
 [Claude Code] ...
 ```
 
-5-10 轮后到 88-92%——一晚上做完。
+这样跑 5-10 轮，通过率到 88-92%，一个晚上就能做完。
 
 ---
 
 ## 10. 注意事项
 
-1. **始终 review LLM 改的 prompt**：可能改坏了关键约束
-2. **每轮 git commit**：方便 rollback
-3. **关键 prompt 别让 Agent 自动 push 到 production**
-4. **Token cost 要监控**：每轮跑 evalset 都烧钱
-5. **不要无限循环跑**：设 max_iter
+- 它改过的 prompt 一定要自己 review，可能会顺手改坏关键约束
+- 每轮都 git commit，方便回滚
+- 重要的 prompt 不要让 agent 自动推到生产环境
+- 盯着 token 花费，每轮跑评测集都要钱
+- 设好最大轮数，别让它无限循环
 
 ---
 
-## 11. demo：自动化 iter 脚本
+## 11. demo：用脚本自动迭代
 
 ```python
-# demos/practice/03_auto_iter.py
 """手动用 Claude Code Skill 之外，也可以脚本化"""
 import subprocess, json
 from pathlib import Path
@@ -265,12 +254,13 @@ client = anthropic.Anthropic()
 def iter_one_round(prompt_dir: Path, evalset: Path, current_results: Path):
     """让 Claude 改一版 prompt 然后跑 evalset"""
     # 拉数据
-    current_prompt = (prompt_dir / "current.md").read_text()
+    current_version = (prompt_dir / "current.txt").read_text().strip()   # 例如 "v3"
+    current_prompt = (prompt_dir / f"{current_version}.md").read_text()
     failures = json.loads(current_results.read_text())["failures"][:20]
     
     # 让 Claude 改 prompt
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5-5",
         max_tokens=4000,
         system="""你是 PE 优化助手。看失败案例，提议改进 prompt v_{n+1}。
 
@@ -291,10 +281,10 @@ def iter_one_round(prompt_dir: Path, evalset: Path, current_results: Path):
         }],
     )
     
-    result = json.loads(resp.content[0].text)
+    result = json.loads(resp.content[-1].text)
     
     # 写新版
-    new_version = f"v{count_versions(prompt_dir) + 1}.md"
+    new_version = f"v{len(list(prompt_dir.glob('v*.md')))}.md"   # v0 起编号，已有 N 个就叫 vN
     (prompt_dir / new_version).write_text(result["new_prompt"])
     
     # 跑 evalset
@@ -315,44 +305,42 @@ if __name__ == "__main__":
 
 ---
 
-## 12. 全本手册总结
+## 12. 全书回顾
 
-44 篇覆盖完：
+全书 44 篇：
 
 | 章 | 篇数 |
 |---|------|
 | 01-foundations | 5 |
-| 02-process（中轴线） | 6 |
+| 02-process（主线） | 6 |
 | 03-techniques | 10 |
 | 04-advanced | 6 |
 | 05-by-task | 5 |
 | 06-models | 4 |
 | 07-production | 5 |
-| 08-practice（本章结尾） | 3 |
-| **合计** | **44** |
+| 08-practice（本章） | 3 |
+| 合计 | 44 |
 
-走完这本手册你应该具备：
+读完这本手册，你应该能：
 
-- 能澄清模糊需求，写 Spec
-- 能建 evalset + 评测器
-- 能按"一次改一处"严格迭代
-- 知道什么时候停
-- 会用三家 API 的特性
-- 会做 caching / versioning / observability
-- 能让 LLM 协作迭代 prompt
-
-去做点真事吧。
+- 把模糊的需求问清楚，写成 Spec
+- 建评测集和评测器
+- 严格按"一次只改一处"迭代
+- 判断什么时候该停
+- 用好三家 API 各自的特性
+- 做缓存、版本管理和可观测
+- 让 LLM 协助你迭代 prompt
 
 ---
 
 ## 13. 下一步
 
-- 跟着 [08-practice/01-build-classifier.md](./01-build-classifier.md) 做一个自己的分类器
-- 在公司里推广 PE 工程纪律
-- 写自己的 PE 工具 / Skill
-- 反哺：把你踩的坑也分享出来
+- 照着 [从需求到一个分类器（完整闭环）](./01-build-classifier.md) 做一个自己的分类器
+- 在团队里推行这套迭代纪律
+- 写自己的 PE 工具或 Skill
+- 把你踩过的坑也写出来分享
 
 ## 参考资料
 
-- 全本手册入口：[../../README.md](../../README.md)
-- 跨手册关联：[LangSmith](../../../01-langchain/docs/02-langsmith/) · [Pydantic Evals](../../../02-pydantic-ai/docs/04-modules/02-evals.md) · [MCP](../../../03-mcp/README.md)
+- 全书入口：[README](../../README.md)
+- 其他手册：[LangSmith](../../../01-langchain/docs/02-langsmith/) · [Pydantic Evals](../../../02-pydantic-ai/docs/04-modules/02-evals.md) · [MCP](../../../03-mcp/README.md)

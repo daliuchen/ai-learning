@@ -1,16 +1,16 @@
 # PE Practice 01：从需求到一个分类器（完整闭环）
 
-> **一句话**：本篇是 02-process 中轴线的完整实战——从模糊需求开始，一步步走完 Spec、v0、evalset、迭代、上线，每步给你**真实代码 + 真实数据 + 真实迭代记录**。读完你应该能照着做一个自己的分类器。
+> 这篇把 02-process 那一章讲的流程完整走一遍：从一个模糊的需求出发，依次写 Spec、起 v0、建评测集、迭代、上线。每一步都附上代码、数据和迭代记录，读完你应该能照着做出自己的分类器。
 
 ---
 
 ## 1. 任务背景
 
-某 SaaS 公司客服每天收到 1000+ 条用户反馈，想让 AI 自动分类、路由到对应处理队列。这是真实需求。
+一家 SaaS 公司的客服每天收到 1000 多条用户反馈，希望用 AI 自动分类，再路由到对应的处理队列。
 
 ---
 
-## 2. Stage 1: 需求澄清（7 问）
+## 2. Stage 1：需求澄清（7 问）
 
 ```markdown
 # feedback-classifier PE Spec
@@ -44,13 +44,13 @@
 
 ## Q7 评测
 - 已有 300 条人工标注（QA 团队）
-- 抽 200 训练 / 100 评测
+- 200 条留作示例池和开发集 / 100 条做评测集
 - 每周线上抽 20 条人工 review
 ```
 
 ---
 
-## 3. Stage 2: Baseline v0
+## 3. Stage 2：Baseline v0
 
 ```python
 # prompts/classifier/v0.txt
@@ -71,7 +71,7 @@ bug / feature / complaint / praise / question / billing / account / other
 """
 ```
 
-跑 10 个 probe 样本：
+先拿 10 个探针样本试一下：
 
 ```
 ✅ bug         → bug
@@ -90,7 +90,7 @@ bug / feature / complaint / praise / question / billing / account / other
 
 ---
 
-## 4. Stage 3: 建 evalset
+## 4. Stage 3：建评测集
 
 `evalset/v1.0.jsonl`（节选）：
 
@@ -102,7 +102,7 @@ bug / feature / complaint / praise / question / billing / account / other
 {"id":"s005","input":"","exp":{"category":"other","conf_min":0,"has_pii":false},"tag":"edge-empty"}
 {"id":"s006","input":"我手机 13800138000，急退款","exp":{"category":"billing","has_pii":true},"tag":"edge-pii"}
 {"id":"s007","input":"App 闪退啊！崩溃！请帮我修好不然投诉！","exp":{"category":"bug","conf_min":0.85},"tag":"happy"}
-... (~30 happy + 15 edge + 5 attack)
+... (共 100 条：60 happy、8 tricky-sarcasm、2 edge-empty、5 edge-pii、5 attack、20 multi-class)
 ```
 
 `eval_runner.py`：
@@ -119,16 +119,15 @@ client = anthropic.Anthropic()
 
 def run_prompt(prompt: str, text: str) -> dict:
     resp = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=300,
-        temperature=0,
+        model="claude-haiku-5-5",
+        max_tokens=1024,
         system=prompt,
         messages=[{"role": "user", "content": text or "(empty)"}],
     )
     try:
-        return json.loads(resp.content[0].text)
+        return json.loads(resp.content[-1].text)
     except json.JSONDecodeError:
-        return {"_parse_error": resp.content[0].text}
+        return {"_parse_error": resp.content[-1].text}
 
 
 def evaluate(sample: dict, output: dict) -> tuple[bool, list]:
@@ -189,16 +188,16 @@ if __name__ == "__main__":
   edge-empty:        2/2
   edge-pii:          4/5
   attack:            3/5
-  multi-class:       6/10
+  multi-class:       6/20
 ```
 
-baseline 76%。
+baseline 是 76%。
 
 ---
 
-## 5. Stage 4: 迭代
+## 5. Stage 4：迭代
 
-### v1: 加反讽示例（解决 tricky-sarcasm）
+### v1：加反讽示例，解决 tricky-sarcasm
 
 ```diff
 -(no examples)
@@ -211,11 +210,14 @@ baseline 76%。
 
 ```
 通过 84/100 = 84.0%
-  tricky-sarcasm:    7/8   ✅ (+4)
+  tricky-sarcasm:    7/8   (+4)
+  multi-class:       10/20 (+4)
   其他类目无 regression
 ```
 
-### v2: 加 multi-class 提示
+multi-class 也涨了 4 条，这几条样本里混着反讽语气，主类原来被判成 praise，示例顺带把它们纠正了。
+
+### v2：补充多类别的处理规则
 
 ```diff
 +约束：
@@ -225,10 +227,13 @@ baseline 76%。
 
 ```
 通过 88/100 = 88.0%
-  multi-class:       8/10  ✅ (+2)
+  happy:             60/60 (+2)
+  multi-class:       12/20 (+2)
 ```
 
-### v3: 强化 PII 检测
+happy 里那两条也是一句话同时报 bug 又威胁投诉的（比如 s007），「具体 bug 描述优先」这条规则让它们回到了 bug。
+
+### v3：把 PII 判定写细
 
 ```diff
 +has_pii 判定：
@@ -240,12 +245,15 @@ baseline 76%。
 
 ```
 通过 90/100 = 90.0%
-  edge-pii:          5/5   ✅ (+1)
+  edge-pii:          5/5   (+1)
+  multi-class:       13/20 (+1)
 ```
 
-### v4: 调 confidence 校准
+multi-class 多对的那条带了订单号，之前被误判成含 PII，「5-6 位数字不算」把它放过了。
 
-发现 edge case 的 confidence 偏高，加：
+### v4：校准 confidence
+
+边界样本的 confidence 不稳定，有的过高、有的过低，于是加了一段校准规则：
 
 ```diff
 +confidence 校准:
@@ -257,13 +265,14 @@ baseline 76%。
 
 ```
 通过 91/100 = 91.0%
+  tricky-sarcasm:    8/8   (+1)
 ```
 
-到此可以上线了——继续涨需要换模型 / 加 self-consistency，成本不划算。
+多过的这条反讽样本，之前类别判对了，但 confidence 只给到 0.4，低于 0.5 的下限；有了「边界 / 反讽 → 0.5-0.65」这个锚点就过了。剩下的 9 条失败：attack 2 条、multi-class 7 条。到这里就可以上线了。再往上涨需要换模型或者加 self-consistency，成本上不划算。
 
 ---
 
-## 6. Stage 5: 上线（伪代码）
+## 6. Stage 5：上线（目录结构）
 
 ```
 .
@@ -275,16 +284,11 @@ baseline 76%。
 └── (灰度: 5% v4 → 100% v4)
 ```
 
-监控指标：
-- 通过率（用 LLM-judge 实时打分）
-- 转人工率（confidence < 0.6）
-- PII 路由数
-- 错误率
-- 成本
+上线后监控这几项：通过率（用 LLM-judge 实时打分）、转人工率（confidence < 0.6 的比例）、PII 路由数、错误率、成本。
 
 ---
 
-## 7. Stage 6: 监控反哺
+## 7. Stage 6：监控与反哺
 
 ```python
 # 每周抽线上 20 条
@@ -295,14 +299,15 @@ labeled = qa_label(sample)
 add_to_evalset(labeled)
 ```
 
-evalset 从 100 长到 150 → 200 → 300...
+评测集就这样从 100 条慢慢涨到 150、200、300 条。
 
 ---
 
 ## 8. 完整代码
 
+上面的迭代和评测都在 Claude Haiku 5.5 上跑；下面的上线版本改用 GPT-6 Luna 的 Structured Outputs 锁住 schema。换了模型，就要拿同一份 `evalset/v1.0.jsonl` 重跑一遍，确认通过率没掉再上线。
+
 ```python
-# demos/practice/01_classifier_full.py
 """完整客服分类器（v4 最终版）"""
 from typing import Literal
 from pydantic import BaseModel, Field
@@ -352,9 +357,9 @@ has_pii 判定:
 
 
 def classify(text: str) -> Classification:
-    resp = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
-        temperature=0,
+    resp = client.chat.completions.parse(
+        model="gpt-6-luna",
+        temperature=0,   # GPT-6 是否接受自定义 temperature 以模型页为准；不接受就删掉这行
         response_format=Classification,
         messages=[
             {"role": "system", "content": SYSTEM},
@@ -380,22 +385,22 @@ if __name__ == "__main__":
 
 ---
 
-## 9. 复盘：这次迭代教训
+## 9. 复盘
 
-| 教训 | 启示 |
+| 现象 | 结论 |
 |------|------|
-| v0 没 few-shot 反讽全错 | 关键 edge 必须有示例 |
-| v1 加示例没 break 其他类 | "代表性"示例不损通用性 |
-| v2 multi-class 难调 | 严格 enum + 副类放 reasoning |
-| v3 PII 用数字 pattern 就够 | 没必要上正则模型 |
-| v4 confidence 校准 | 模型默认 over-confident，要 anchor |
-| 91% 已够 | 剩 9% 用人工兜底，不死磕 99% |
+| v0 没给反讽的 few-shot，反讽样本几乎全错 | 关键的边界情况一定要有示例 |
+| v1 加了示例，其他类别没有退步 | 有代表性的示例不会损害通用性 |
+| v2 多类别最难调 | 严格限定 enum，副类写进 reasoning |
+| v3 PII 靠数字模式就判得准 | 没必要上专门的识别模型 |
+| v4 校准 confidence | 模型给的 confidence 不稳定，有的过高有的过低，需要给锚点 |
+| 91% 就停 | 剩下 9% 交给人工兜底，不必死磕 99% |
 
-总时间：4 天（含 Spec + evalset + 4 轮迭代 + 上线 + 监控搭建）。
+总共花了 4 天，包括写 Spec、建评测集、4 轮迭代、上线和搭监控。
 
 ---
 
 ## 10. 下一步
 
-- 📖 Research Agent 迭代史 → [02-research-agent.md](./02-research-agent.md)
-- 📖 用 Claude Code 优化 prompt → [03-claude-code-as-optimizer.md](./03-claude-code-as-optimizer.md)
+- [Research Agent 的 5 版迭代史](./02-research-agent.md)
+- [用 Claude Code 当 Prompt 优化器](./03-claude-code-as-optimizer.md)

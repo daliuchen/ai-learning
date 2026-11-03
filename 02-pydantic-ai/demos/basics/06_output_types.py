@@ -30,9 +30,9 @@ load_dotenv()
 
 def pick_model():
     if os.getenv("OPENAI_API_KEY"):
-        return "openai:gpt-4o-mini"
+        return "openai-chat:qwen-flash"
     if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic:claude-3-5-haiku-latest"
+        return "anthropic:claude-haiku-4-5"
     print("[warn] 未检测到 API key，使用 TestModel\n")
     return TestModel()
 
@@ -49,7 +49,7 @@ class Joke(BaseModel):
 
 def demo_pydantic() -> None:
     print("===== 1) Pydantic Model 输出 =====")
-    agent = Agent(MODEL, output_type=Joke, system_prompt="讲一个程序员笑话。")
+    agent = Agent(MODEL, output_type=Joke, instructions="讲一个程序员笑话。")
     r = agent.run_sync("来一个 Python 笑话")
     print(repr(r.output))
     print()
@@ -58,10 +58,10 @@ def demo_pydantic() -> None:
 # ---------- 2) 标量 / list / dict ----------
 def demo_scalar() -> None:
     print("===== 2) 标量 / list / dict =====")
-    a_int = Agent(MODEL, output_type=int, system_prompt="只回数字。")
+    a_int = Agent(MODEL, output_type=int, instructions="只回数字。")
     print("int  :", a_int.run_sync("2+3 等于多少？").output)
 
-    a_list = Agent(MODEL, output_type=list[str], system_prompt="列出名称。")
+    a_list = Agent(MODEL, output_type=list[str], instructions="列出名称。")
     print("list :", a_list.run_sync("中国一线城市有哪些？").output)
     print()
 
@@ -82,7 +82,7 @@ def demo_union() -> None:
     agent = Agent(
         MODEL,
         output_type=Union[Invoice, Receipt],
-        system_prompt="根据内容判断是发票还是收据，返回对应结构。",
+        instructions="根据内容判断是发票还是收据，返回对应结构。",
     )
     for prompt in ["阿里云 ¥1280", "买了 3 个苹果"]:
         r = agent.run_sync(prompt)
@@ -100,9 +100,8 @@ def demo_validator() -> None:
     agent = Agent(
         MODEL,
         output_type=Greeting,
-        system_prompt="生成一句简短的问候语。",
-        retries=2,
-        output_retries=2,
+        instructions="生成一句简短的问候语。",
+        retries={'tools': 2, 'output': 2},  # 按类别分别设置重试预算（V2 写法）
     )
 
     @agent.output_validator
@@ -144,7 +143,7 @@ def demo_invoice() -> None:
     agent = Agent(
         MODEL,
         output_type=FullInvoice,
-        system_prompt="从文本中精确提取发票字段。注意 total 必须等于明细累加。",
+        instructions="从文本中精确提取发票字段。注意 total 必须等于明细累加。",
         retries=3,
     )
     text = """
@@ -158,7 +157,7 @@ def demo_invoice() -> None:
     """
     try:
         r = agent.run_sync(text)
-        print(r.output.model_dump_json(indent=2, default=str))
+        print(r.output.model_dump_json(indent=2))
     except Exception as e:
         # TestModel 无法理解 prompt，可能交叉校验失败
         print(f"抽取失败：{type(e).__name__}: {e}")

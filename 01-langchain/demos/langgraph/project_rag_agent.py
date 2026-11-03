@@ -1,80 +1,69 @@
 """
 project_rag_agent.py
 ====================
-实战项目 1：完整 RAG 问答 Agent
+实战项目 1：RAG 问答 Agent（langchain 1.x：create_agent + 中间件）
 - 内部知识库检索（kb_search）
-- 互联网兜底（web_search，可选 Tavily）
-- 需要审批的工具（send_email）+ HITL
-- SqliteSaver 持久化
-- 多轮对话
+- 互联网兜底（web_search，可选 Tavily；没配 key 时返回提示）
+- 需要审批的工具（send_email）→ HumanInTheLoopMiddleware
+- SqliteSaver 持久化（多轮 + 断点续跑）
+
+运行（在 01-langchain 目录下）：python demos/langgraph/project_rag_agent.py
+模型/向量：OpenAI 兼容接口（如通义千问）。
+  OPENAI_API_KEY / OPENAI_BASE_URL；QWEN_MODEL（默认 qwen-flash）；QWEN_EMBED_MODEL（默认 text-embedding-v4）
 """
 import os
 from pathlib import Path
-from typing_extensions import Annotated, TypedDict
 
 from dotenv import load_dotenv
-
-from langchain_chroma import Chroma
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage
+from langchain.agents import create_agent
+from langchain.agents.middleware import HumanInTheLoopMiddleware
+from langchain_core.documents import Document
 from langchain_core.tools import tool
+from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.graph import END, START, StateGraph
-from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
-from langgraph.types import Command, interrupt
+from langgraph.types import Command
 
 load_dotenv()
 
-DB_DIR = "./rag_db"
-COLLECTION = "kb"
-DOCS_GLOB = "docs/**/*.md"
+MODEL = os.environ.get("QWEN_MODEL", "gpt-4o-mini")
+EMBED_MODEL = os.environ.get("QWEN_EMBED_MODEL", "text-embedding-3-small")
+# 知识库范围：默认只索引两篇，省 embedding 调用；想全量就改成 docs/**/*.md
+DOCS_GLOB = os.environ.get("KB_GLOB", "docs/01-langchain/0[15]-*.md")
 SQLITE_PATH = "./rag_agent.db"
 
 
-# ---------------- 知识库 ----------------
-def ensure_kb():
-    if os.path.exists(DB_DIR):
-        return
-    docs = DirectoryLoader(".", glob=DOCS_GLOB,
-                           loader_cls=lambda p: TextLoader(p, encoding="utf-8")).load()
-    if not docs:
-        # 兜底：随便造一篇
-        Path("./docs/01-langchain").mkdir(parents=True, exist_ok=True)
-        Path("./docs/01-langchain/_demo.md").write_text(
-            "# Demo\nLCEL 是 LangChain Expression Language\n", encoding="utf-8")
-        docs = DirectoryLoader(".", glob=DOCS_GLOB,
-                               loader_cls=lambda p: TextLoader(p, encoding="utf-8")).load()
-    chunks = RecursiveCharacterTextSplitter(
-        chunk_size=600, chunk_overlap=80,
-    ).split_documents(docs)
-    Chroma.from_documents(
-        chunks,
-        OpenAIEmbeddings(model="text-embedding-3-small"),
-        persist_directory=DB_DIR,
-        collection_name=COLLECTION,
-    )
+# ---------------- 知识库（内存向量库；生产换 Chroma / pgvector 等） ----------------
+def build_kb() -> InMemoryVectorStore:
+    docs = [
+        Document(page_content=p.read_text(encoding="utf-8"), metadata={"source": str(p)})
+        for p in sorted(Path(".").glob(DOCS_GLOB))
+    ] or [Document(page_content="LCEL 是 LangChain Expression Language，用 | 把 Runnable 串起来。")]
+    chunks = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=80).split_documents(docs)
+    # 通义 embedding 接口一次最多 10 条，且不接受 token 数组 → chunk_size=10 + 关掉长度检查
+    emb = OpenAIEmbeddings(model=EMBED_MODEL, chunk_size=10, check_embedding_ctx_length=False)
+    return InMemoryVectorStore.from_documents(chunks, emb)
 
 
-def _vs():
-    return Chroma(
-        persist_directory=DB_DIR,
-        collection_name=COLLECTION,
-        embedding_function=OpenAIEmbeddings(model="text-embedding-3-small"),
-    )
+_vs: InMemoryVectorStore | None = None
+
+
+def vs() -> InMemoryVectorStore:
+    global _vs
+    if _vs is None:
+        _vs = build_kb()
+    return _vs
 
 
 # ---------------- 工具 ----------------
 @tool
 def kb_search(query: str) -> str:
     """从内部知识库（LangChain 教程）搜索资料。优先使用。"""
-    vs = _vs()
-    docs = vs.similarity_search(query, k=4)
+    docs = vs().similarity_search(query, k=4)
     if not docs:
         return "未在内部知识库找到相关资料"
-    return "\n\n".join(f"[{i+1}] {d.page_content}" for i, d in enumerate(docs))
+    return "\n\n".join(f"[{i + 1}] {d.page_content}" for i, d in enumerate(docs))
 
 
 @tool
@@ -83,6 +72,7 @@ def web_search(query: str) -> str:
     if not os.getenv("TAVILY_API_KEY"):
         return "（未配置 TAVILY_API_KEY，跳过 web_search）"
     from langchain_community.tools.tavily_search import TavilySearchResults
+
     return str(TavilySearchResults(max_results=3).invoke(query))
 
 
@@ -92,103 +82,47 @@ def send_email(to: str, subject: str, body: str) -> str:
     return f"[mock] 邮件已发送 → {to}, 主题：{subject}"
 
 
-SAFE_TOOLS = [kb_search, web_search]
-DANGEROUS_TOOLS = [send_email]
-ALL_TOOLS = SAFE_TOOLS + DANGEROUS_TOOLS
-
-
-# ---------------- Graph ----------------
-class State(TypedDict):
-    messages: Annotated[list[BaseMessage], add_messages]
-
-
 SYSTEM = (
     "你是公司知识库助手。回答原则：\n"
     "1. 优先用 kb_search 查内部知识库\n"
     "2. 没找到再用 web_search\n"
     "3. 中文回答，引用资料用 [n] 标注\n"
-    "4. 涉及发邮件等危险操作时调用 send_email，会自动暂停等待人工审批"
+    "4. 涉及发邮件时调用 send_email，会自动暂停等待人工审批"
 )
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0).bind_tools(ALL_TOOLS)
 
 
-def agent(state: State):
-    msgs = [SystemMessage(content=SYSTEM), *state["messages"]]
-    return {"messages": [model.invoke(msgs)]}
-
-
-def review(state: State):
-    last = state["messages"][-1]
-    dangerous_calls = [c for c in last.tool_calls if c["name"] in {"send_email"}]
-    if not dangerous_calls:
-        return {}
-    decision = interrupt({
-        "type": "approval",
-        "tool_calls": [{"name": c["name"], "args": c["args"]} for c in dangerous_calls],
-    })
-    if decision == "yes":
-        return {}
-    return {"messages": [
-        ToolMessage(content="人工拒绝执行", tool_call_id=c["id"]) for c in dangerous_calls
-    ]}
-
-
-def route(state: State) -> str:
-    last = state["messages"][-1]
-    if not last.tool_calls:
-        return END
-    if any(c["name"] in {"send_email"} for c in last.tool_calls):
-        return "review"
-    return "safe_tools"
-
-
-def post_review(state: State) -> str:
-    last = state["messages"][-1]
-    if isinstance(last, ToolMessage) and "拒绝" in last.content:
-        return "agent"
-    return "dangerous_tools"
-
-
-def build(memory):
-    g = StateGraph(State)
-    g.add_node("agent", agent)
-    g.add_node("safe_tools", ToolNode(SAFE_TOOLS))
-    g.add_node("review", review)
-    g.add_node("dangerous_tools", ToolNode(DANGEROUS_TOOLS))
-    g.add_edge(START, "agent")
-    g.add_conditional_edges(
-        "agent", route,
-        {"safe_tools": "safe_tools", "review": "review", END: END},
+def build_app(checkpointer):
+    return create_agent(
+        ChatOpenAI(model=MODEL, temperature=0),
+        tools=[kb_search, web_search, send_email],
+        system_prompt=SYSTEM,
+        middleware=[
+            # 只有 send_email 需要审批；kb_search / web_search 直接放行
+            HumanInTheLoopMiddleware(interrupt_on={"send_email": True}),
+        ],
+        checkpointer=checkpointer,  # HITL 必须有 checkpointer
     )
-    g.add_edge("safe_tools", "agent")
-    g.add_conditional_edges(
-        "review", post_review,
-        {"dangerous_tools": "dangerous_tools", "agent": "agent"},
-    )
-    g.add_edge("dangerous_tools", "agent")
-    return g.compile(checkpointer=memory)
 
 
 def main():
-    ensure_kb()
     with SqliteSaver.from_conn_string(SQLITE_PATH) as memory:
-        app = build(memory)
+        app = build_app(memory)
         cfg = {"configurable": {"thread_id": "demo-user"}}
 
-        for q in [
-            "LCEL 是什么？",
-            "它和老版本 chain 的区别？",
-        ]:
+        for q in ["LCEL 是什么？", "它和老版本 chain 的区别？"]:
             print(f"\n>>> {q}\n")
             out = app.invoke({"messages": [("human", q)]}, config=cfg)
             print(out["messages"][-1].content)
 
-        # 危险操作
+        # 危险操作：会在 send_email 之前被中断
         print("\n>>> 给 boss@x.com 发一封请假邮件\n")
-        out = app.invoke({"messages": [("human", "给 boss@x.com 发一封请假邮件，正文'明天请假'")]}, config=cfg)
+        out = app.invoke(
+            {"messages": [("human", "给 boss@x.com 发一封请假邮件，正文'明天请假'")]}, config=cfg
+        )
         if "__interrupt__" in out:
-            print("【待审】", out["__interrupt__"][0].value)
-            final = app.invoke(Command(resume="yes"), config=cfg)
+            req = out["__interrupt__"][0].value["action_requests"][0]
+            print("【待审】", req["name"], req["args"])
+            final = app.invoke(Command(resume={"decisions": [{"type": "approve"}]}), config=cfg)
             print(final["messages"][-1].content)
 
 

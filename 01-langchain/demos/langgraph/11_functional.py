@@ -3,14 +3,16 @@
 ================
 Functional API：@entrypoint + @task 演示
 """
+import os
+
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI
-from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.func import entrypoint, task
 
 load_dotenv()
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0.4)
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash"), temperature=0.4)
 
 
 @task
@@ -28,7 +30,7 @@ def combine(joke_text: str, poem_text: str) -> str:
     return f"--- 笑话 ---\n{joke_text}\n\n--- 诗 ---\n{poem_text}"
 
 
-@entrypoint(checkpointer=MemorySaver())
+@entrypoint(checkpointer=InMemorySaver())
 def workflow(topic: str) -> str:
     f1 = joke(topic)
     f2 = poem(topic)

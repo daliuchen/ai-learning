@@ -15,18 +15,20 @@
     - 依赖注入：deps_type + RunContext
     EOF
 
-    pip install pydantic-ai chromadb sentence-transformers pypdf python-dotenv
+    pip install "pydantic-ai-slim[openai]" pypdf python-dotenv
     export OPENAI_API_KEY=...
     python demos/practice/02_project_rag.py
 
 需要：
     - 一些 .md / .pdf 放在 ./sample_docs/ 目录
-    - OPENAI_API_KEY（Agent 用 gpt-4o-mini）
+    - OPENAI_API_KEY + OPENAI_BASE_URL（千问；Agent 用 qwen-flash、embedding 用 text-embedding-v4）
+      没有 key 时 Agent 走 test 模型、embedding 走 TestEmbeddingModel，只能演示流程
 """
 
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -34,6 +36,9 @@ from typing import Protocol
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
+
+# 有千问 key 用千问（OpenAI 兼容端点），否则用内置 test 模型
+MODEL_NAME = "openai-chat:qwen-flash" if os.getenv("OPENAI_API_KEY") else "test"
 
 load_dotenv()
 
@@ -98,63 +103,57 @@ def split_documents(docs: list[Document], chunk_size: int = 600, overlap: int = 
 
 
 # ============================================================
-# 3) Embedder（默认本地 sentence-transformers）
+# 3) Embedder + 4) 向量库（内存 + JSON 落盘）
 # ============================================================
+# Pydantic AI 自带 Embedder（统一的 embed_query / embed_documents 接口），
+# 但不规定向量库——这里用 30 行的内存索引 + JSON 文件持久化，换 pgvector / FAISS 只改这个类。
 
-class Embedder(Protocol):
-    def embed(self, texts: list[str]) -> list[list[float]]: ...
+import json
+import math
 
-class LocalEmbedder:
-    """本地多语言 embedding，首次会下载模型，约 100MB。"""
-    def __init__(self, model_name: str = "BAAI/bge-small-zh-v1.5"):
-        from sentence_transformers import SentenceTransformer
-        print(f"📥 加载 embedding 模型 {model_name}…")
-        self.model = SentenceTransformer(model_name)
+from pydantic_ai import Embedder
+from pydantic_ai.embeddings import TestEmbeddingModel
 
-    def embed(self, texts: list[str]) -> list[list[float]]:
-        return self.model.encode(texts, normalize_embeddings=True).tolist()
+USE_REAL = bool(os.getenv("OPENAI_API_KEY"))
+EMBED_MODEL = os.getenv("QWEN_EMBED_MODEL", "text-embedding-v4")
 
 
-# ============================================================
-# 4) 向量库（ChromaDB）
-# ============================================================
+def make_embedder() -> Embedder:
+    if USE_REAL:
+        return Embedder(f"openai:{EMBED_MODEL}")  # 千问 embedding（OpenAI 兼容端点）
+    print("[!] 无 OPENAI_API_KEY：用 TestEmbeddingModel，检索没有语义，仅演示流程")
+    return Embedder(TestEmbeddingModel(dimensions=32))
+
+
+def _cos(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    return dot / ((math.sqrt(sum(x * x for x in a)) or 1.0) * (math.sqrt(sum(y * y for y in b)) or 1.0))
+
 
 class VectorStore:
-    def __init__(self, embedder: Embedder, persist_dir: str = "./chroma_db",
-                 collection_name: str = "kb"):
-        import chromadb
-        from chromadb.config import Settings
+    def __init__(self, embedder: Embedder, persist_path: str = "./kb_index.json"):
         self.embedder = embedder
-        client = chromadb.PersistentClient(
-            path=persist_dir,
-            settings=Settings(anonymized_telemetry=False),
-        )
-        self.col = client.get_or_create_collection(
-            name=collection_name, embedding_function=None,
-        )
+        self.path = Path(persist_path)
+        self.items: list[dict] = []
+        if self.path.exists():
+            self.items = json.loads(self.path.read_text(encoding="utf-8"))
 
     def add(self, docs: list[Document]) -> None:
         if not docs:
             return
-        texts = [d.text for d in docs]
-        embs = self.embedder.embed(texts)
-        ids = [f"doc-{i}-{abs(hash(d.source + d.text[:30])) & 0xFFFFFFFF}"
-               for i, d in enumerate(docs)]
-        metas = [{"source": d.source} for d in docs]
-        self.col.upsert(ids=ids, documents=texts, embeddings=embs, metadatas=metas)
+        result = self.embedder.embed_documents_sync([d.text for d in docs])  # 文档侧
+        for d, v in zip(docs, result.embeddings):
+            self.items.append({"text": d.text, "source": d.source, "vec": list(v)})
+        self.path.write_text(json.dumps(self.items), encoding="utf-8")
 
-    def search(self, query: str, k: int = 4) -> list[Document]:
-        q_emb = self.embedder.embed([query])[0]
-        res = self.col.query(query_embeddings=[q_emb], n_results=k)
-        out = []
-        if not res["documents"] or not res["documents"][0]:
-            return out
-        for txt, meta in zip(res["documents"][0], res["metadatas"][0]):
-            out.append(Document(text=txt, source=meta["source"]))
-        return out
+    async def search(self, query: str, k: int = 4) -> list[Document]:
+        # 工具函数跑在事件循环里，所以这里必须用 async 的 embed_query（*_sync 版本不能在运行中的循环里调用）
+        qv = list((await self.embedder.embed_query(query)).embeddings[0])  # 查询侧
+        ranked = sorted(self.items, key=lambda it: _cos(qv, it["vec"]), reverse=True)[:k]
+        return [Document(text=it["text"], source=it["source"]) for it in ranked]
 
     def count(self) -> int:
-        return self.col.count()
+        return len(self.items)
 
 
 # ============================================================
@@ -190,10 +189,10 @@ SYSTEM = """你是一个严谨的文档问答助手。
 """
 
 rag_agent = Agent[RagDeps, Answer](
-    "openai:gpt-4o-mini",
+    MODEL_NAME,
     deps_type=RagDeps,
     output_type=Answer,
-    system_prompt=SYSTEM,
+    instructions=SYSTEM,
 )
 
 @rag_agent.tool
@@ -203,7 +202,7 @@ async def retrieve(ctx: RunContext[RagDeps], query: str) -> list[dict]:
     参数：
         query: 用自然语言描述要搜的内容。
     """
-    docs = ctx.deps.store.search(query, k=ctx.deps.top_k)
+    docs = await ctx.deps.store.search(query, k=ctx.deps.top_k)
     return [{"source": d.source, "text": d.text} for d in docs]
 
 
@@ -234,7 +233,7 @@ def build_index(docs_dir: str = "./sample_docs") -> VectorStore:
             "RAG 全称 Retrieval-Augmented Generation，先检索再生成。\n"
             "在 Pydantic AI 里，把检索逻辑包成 @agent.tool 即可。\n\n"
             "## 推荐组件\n"
-            "- Embedder: sentence-transformers (本地) 或 OpenAI text-embedding-3-small\n"
+            "- Embedder: pydantic_ai.Embedder（OpenAI 兼容 / Cohere / Voyage / 本地 sentence-transformers）\n"
             "- 向量库: ChromaDB / FAISS / Qdrant\n"
             "- Reranker: BAAI/bge-reranker-base 提升精度\n",
             encoding="utf-8",
@@ -246,12 +245,12 @@ def build_index(docs_dir: str = "./sample_docs") -> VectorStore:
     chunks = split_documents(raw, chunk_size=600, overlap=80)
     print(f"✂️  切成 {len(chunks)} 个块")
 
-    store = VectorStore(LocalEmbedder())
+    store = VectorStore(make_embedder())
     if store.count() == 0:
         print("🔢 第一次入库…")
         store.add(chunks)
     else:
-        print(f"♻️  向量库已存在 {store.count()} 条，跳过入库（删 ./chroma_db 可重建）")
+        print(f"♻️  向量库已存在 {store.count()} 条，跳过入库（删 ./kb_index.json 可重建）")
     return store
 
 
@@ -278,10 +277,6 @@ def ask(store: VectorStore, question: str) -> None:
 # ============================================================
 
 def main() -> None:
-    if not os.getenv("OPENAI_API_KEY"):
-        print("❌ 请先在 .env 设置 OPENAI_API_KEY")
-        return
-
     store = build_index("./sample_docs")
     print(f"\n✅ 索引就绪（{store.count()} 条），开始问答（输入 q 退出）\n")
 
@@ -296,8 +291,8 @@ def main() -> None:
         ask(store, q)
         print("-" * 60)
 
-    # 进交互
-    while True:
+    # 进交互（非交互环境 / 没 key 时直接结束）
+    while sys.stdin.isatty():
         try:
             q = input("\n❓ ").strip()
         except (EOFError, KeyboardInterrupt):

@@ -5,9 +5,11 @@
     langgraph dev
 然后浏览器打开 Studio。
 """
+import os
+
+from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
-from langgraph.prebuilt import create_react_agent
 
 
 @tool
@@ -22,5 +24,5 @@ def calc(expr: str) -> str:
     return str(eval(expr, {"__builtins__": {}}, {}))
 
 
-model = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-graph = create_react_agent(model, [get_weather, calc])
+model = ChatOpenAI(model=os.environ.get("QWEN_MODEL", "qwen-flash"), temperature=0)
+graph = create_agent(model, [get_weather, calc])  # create_agent 返回的就是编译好的图

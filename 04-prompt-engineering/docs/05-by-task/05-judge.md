@@ -1,6 +1,6 @@
-# PE By-Task 05：LLM-as-Judge —— 让 LLM 当评测员
+# PE By-Task 05：LLM-as-Judge
 
-> **一句话**：LLM-as-judge 是评测 LLM 输出**主观质量**的核心工具——但有陷阱（自我偏好、位置偏差、过度宽容）。本篇讲怎么设计可靠的 judge prompt + 校准方法。
+> 输出的主观质量（写得好不好、清不清楚）没法靠字符串比对来评，通常要让另一个 LLM 来打分。这个办法好用，但有几个固定的偏差：偏爱自己写的内容、偏爱排在前面的选项、给分普遍偏松。这篇讲怎么写一个可靠的 judge prompt，以及怎么校准它。
 
 ---
 
@@ -8,11 +8,11 @@
 
 | 类型 | 例子 |
 |------|------|
-| **打分** | 给 1-5 分 |
-| **二选一** | A 和 B 哪个更好 |
-| **维度评估** | 准确 / 简洁 / 风格 / 安全 各打分 |
-| **是否合格** | 是 / 否 + 原因 |
-| **找问题** | 列出输出的问题清单 |
+| 打分 | 给 1-5 分 |
+| 二选一 | A 和 B 哪个更好 |
+| 分维度评估 | 准确 / 简洁 / 风格 / 安全 各打分 |
+| 是否合格 | 是 / 否 + 原因 |
+| 找问题 | 列出输出的问题清单 |
 
 ---
 
@@ -47,36 +47,35 @@ JUDGE_SYSTEM = """你是严格的<领域>评审专家。
 
 ---
 
-## 3. 避免自我偏好（self-preference bias）
+## 3. 自我偏好（self-preference bias）
 
-研究发现：**模型偏爱自己生成的内容**。用 GPT-4o 当 judge 评 GPT-4o 输出，分数会比让 Claude 评偏高。
+研究发现，模型会偏爱自己生成的内容。用 GPT 当 judge 去评 GPT 的输出，分数会比让 Claude 来评更高。
 
-对策：
-- judge 模型**不同家**于 generator
-- 多 judge 投票（GPT + Claude + Gemini 三家平均）
-- 公开 evalset（去掉模型 fingerprint）
+应对办法：
+
+- judge 和 generator 用不同厂商的模型
+- 多个 judge 投票，比如 GPT、Claude、Gemini 三家取平均
+- 评测集去掉能看出是哪个模型写的痕迹
 
 ---
 
-## 4. 避免位置偏差（position bias）
+## 4. 位置偏差（position bias）
 
-二选一时，模型倾向选**先出现**的那个：
+二选一时，模型倾向于选先出现的那个：
 
 ```
 A: ...
 B: ...
 哪个更好？
 
-→ 模型 60% 选 A，30% 选 B，10% 平
+→ 两份质量相当时，模型选 A 的次数明显多于 B（示意）
 ```
 
-对策：
-- 跑两次：A/B 顺序 + B/A 顺序——平均
-- 让 judge 明确"位置不应影响判断"
-- 用 randomization
+应对办法：按 A/B 和 B/A 两种顺序各跑一次；在 prompt 里写明"顺序不应影响判断"；或者随机打乱顺序。
 
 ```python
 def fair_pairwise_judge(a, b):
+    # judge_compare 返回胜出的那份内容本身（不是 "first"/"second" 这样的位置）
     s1 = judge_compare(a, b)   # A 在前
     s2 = judge_compare(b, a)   # B 在前
     # 一致才信
@@ -85,20 +84,17 @@ def fair_pairwise_judge(a, b):
 
 ---
 
-## 5. 避免过度宽容（over-leniency）
+## 5. 给分偏松（over-leniency）
 
-LLM 默认"礼貌"——容易给所有输出 4-5 分。
+LLM 默认很客气，什么输出都容易给 4-5 分。
 
-对策：
-- prompt 强制"3 分是中位数，4-5 留给优秀"
-- 显式比较 vs 优秀基准
-- 加 calibration examples（给几个 "1 分什么样、5 分什么样"）
+应对办法：在 prompt 里规定"3 分是中位数，4-5 分只给优秀的"；让它对照一个优秀基准来比；再加几个校准样例，告诉它 1 分和 5 分分别长什么样。
 
 ---
 
-## 6. Calibration with examples
+## 6. 用样例校准打分尺度
 
-让 judge 看 anchor 例子学打分尺度：
+给 judge 看几个锚点样例，让它学会这把尺子：
 
 ```
 打分参考（1-5 分）:
@@ -121,20 +117,27 @@ LLM 默认"礼貌"——容易给所有输出 4-5 分。
 现在评估下面的输出：
 ```
 
-加 anchor → 分数分布拉开，区分度变好。
+加了锚点之后，分数分布会明显拉开，区分度变好。
 
 ---
 
-## 7. Judge 必须 temperature=0
+## 7. Judge 的输出要尽量稳定
 
-**铁律**。否则同一输入两次评分不同，评测无意义。
+同一个输入两次打分不一样，这个评测就没有意义。
+
+- 能设采样参数的模型（Qwen / 多数开源模型）：`temperature=0`
+- Claude 新模型（4.7+）已不接受 `temperature`，Gemini 3+ 建议保持默认值。这时改用下面几种办法压低波动：
+  1. 结构化输出（固定 JSON schema，每个维度用枚举或整数）
+  2. 把评分细则写死（见上一节的锚点样例），3 分是普通合格
+  3. 同一输入评 3 次，取中位数或多数票，并把"重复评分一致率"当作 judge 自身的质量指标
+  4. 固定 judge 模型的具体版本，升级模型就重跑一遍 judge 校准集
 
 ```python
-# ❌ 错
-judge_resp = client.messages.create(temperature=0.7, ...)
+# ❌ 给 Claude 新模型传采样参数 → 400
+# judge_resp = client.messages.create(temperature=0, ...)
 
-# ✅ 对
-judge_resp = client.messages.create(temperature=0, ...)
+# ✅ 结构化输出 + 多次评分取中位数
+scores = [judge_once(sample) for _ in range(3)]
 ```
 
 ---
@@ -143,17 +146,17 @@ judge_resp = client.messages.create(temperature=0, ...)
 
 | 方式 | 优点 | 缺点 |
 |------|------|------|
-| **直接打分**（1-5） | 简单 / 单次 | 模型打分不准 / 漂移 |
-| **Pairwise**（A vs B） | 相对准、稳定 | 2 次调用 / 位置偏差 |
-| **Ranking** (rank N) | 一次比多个 | N 个候选时 cost 高 |
+| 直接打分（1-5） | 简单，单次调用 | 绝对分数不准，容易漂移 |
+| Pairwise（A vs B） | 相对判断更准、更稳 | 要调用 2 次，有位置偏差 |
+| Ranking（rank N） | 一次比多个 | 候选多时成本高 |
 
-实战：**Pairwise** 适合迭代时"v_n 比 v_{n-1} 好吗"；**打分** 适合绝对质量监控。
+我的用法是：迭代时判断"v_n 是否比 v_{n-1} 好"用 pairwise，做线上的绝对质量监控用直接打分。
 
 ---
 
-## 9. Critic-Refine pipeline
+## 9. Critic-Refine 流水线
 
-judge 不只是评——也指导改进：
+judge 除了打分，还能给改进方向：
 
 ```python
 def judge_then_refine(input, output, max_iter=3):
@@ -166,13 +169,13 @@ def judge_then_refine(input, output, max_iter=3):
     return output
 ```
 
-形成生成 → 评 → 改 → 评的闭环。
+这样就形成了生成、评审、修改、再评审的循环。
 
 ---
 
-## 10. 校准 judge：和人工 ground truth 比
+## 10. 用人工标注校准 judge
 
-每周抽 20-50 条做"人工 + judge 双打"：
+每周抽 20-50 条，人工和 judge 各标一遍：
 
 ```python
 # 人工标 ground truth: pass/fail
@@ -181,15 +184,14 @@ def judge_then_refine(input, output, max_iter=3):
 agreement_rate = sum(human[i] == judge[i] for i in ...) / N
 ```
 
-- agreement > 85% → judge 可信
-- agreement < 70% → judge prompt 要改 / 换更强模型
+- 一致率 > 85%：judge 可以信
+- 一致率 < 70%：改 judge prompt，或者换更强的模型
 
 ---
 
 ## 11. 完整 demo
 
 ```python
-# demos/by_task/05_judge.py
 import json
 from pydantic import BaseModel, Field
 from openai import OpenAI
@@ -223,9 +225,9 @@ JUDGE_SYS = """你是严格的总结评审专家。
 
 
 def judge_summary(original: str, summary: str) -> JudgeResult:
-    resp = client.beta.chat.completions.parse(
-        model="gpt-4o",   # judge 用更强模型
-        temperature=0,
+    resp = client.chat.completions.parse(
+        model="gpt-6.1-terra",   # judge 用更强模型
+        temperature=0,   # GPT-6 是否接受自定义 temperature 以模型页为准；不接受就删掉这行
         response_format=JudgeResult,
         messages=[
             {"role": "system", "content": JUDGE_SYS},
@@ -258,17 +260,17 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **judge 同 generator 同模型** | 自我偏好；换家 |
-| **judge temperature ≠ 0** | 不可重复 |
-| **判断没维度分开** | 单总分掩盖问题 |
-| **没 calibration anchor** | 分数都 4-5，区分度差 |
-| **不做人工校准** | judge 不准你不知道 |
-| **位置偏差** | pairwise 要交换顺序双跑 |
-| **判官 prompt 模糊** | 给具体维度 + 评分标准 |
+| judge 和 generator 是同一个模型 | 有自我偏好，换一家 |
+| judge 输出不稳定 | 能设就 temperature=0；Claude 新模型用结构化输出 + 多次评分取中位数 |
+| 不分维度，只给总分 | 一个总分会掩盖具体问题 |
+| 没有校准锚点 | 分数全挤在 4-5，没区分度 |
+| 不做人工校准 | judge 不准你也不会知道 |
+| 位置偏差 | pairwise 要交换顺序各跑一次 |
+| judge prompt 模糊 | 写清具体维度和评分标准 |
 
 ---
 
-## 13. 05-by-task 章总结
+## 13. 本章回顾
 
 | 篇 | 主题 |
 |---|------|
@@ -282,9 +284,9 @@ if __name__ == "__main__":
 
 ## 14. 下一步
 
-- 📖 模型差异 → [06-models/](../06-models/)
-- 📖 生产化 → [07-production/](../07-production/)
-- 📖 实战 → [08-practice/01-build-classifier.md](../08-practice/01-build-classifier.md)
+- 模型差异：[06-models/](../06-models/)
+- 生产化：[07-production/](../07-production/)
+- 实战：[从需求到一个分类器（完整闭环）](../08-practice/01-build-classifier.md)
 
 ## 参考资料
 

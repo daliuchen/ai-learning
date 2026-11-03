@@ -5,13 +5,15 @@ Tool 系统综合演示：自定义工具 / bind_tools / 错误处理 / 注入�
 """
 from typing_extensions import Annotated
 
+import os
 from dotenv import load_dotenv
 
 from langchain_core.messages import HumanMessage, ToolMessage
-from langchain_core.tools import InjectedToolArg, tool
+from langchain_core.tools import InjectedToolArg, ToolException, tool
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
+MODEL = os.environ.get("QWEN_MODEL", "qwen-flash")  # 任意 OpenAI 兼容模型；默认千问，base_url 读 OPENAI_BASE_URL
 
 
 @tool
@@ -26,10 +28,17 @@ def calc(expr: str) -> str:
     return str(eval(expr, {"__builtins__": {}}, {}))
 
 
-@tool(handle_tool_errors=lambda e: f"工具失败：{type(e).__name__}: {e}")
+@tool
 def divide(a: float, b: float) -> float:
     """除法。"""
+    if b == 0:
+        raise ToolException("除数不能为 0")
     return a / b
+
+
+# 只有 ToolException 会被这个 handler 接住并变成给模型的文字；
+# 其它异常（比如真正的 bug）仍然直接抛出
+divide.handle_tool_error = lambda e: f"工具失败：{e}"
 
 
 @tool
@@ -44,9 +53,9 @@ def query_orders(
 def react_loop():
     tools = [get_weather, calc, divide, query_orders]
     by_name = {t.name: t for t in tools}
-    model = ChatOpenAI(model="gpt-4o-mini").bind_tools(tools)
+    model = ChatOpenAI(model=MODEL).bind_tools(tools)
 
-    messages = [HumanMessage(content="查下北京天气；2/0 是多少；再帮我搜下我的'iPhone'订单")]
+    messages = [HumanMessage(content="查下北京天气；用 divide 工具算 7 除以 0；再帮我搜下我的'iPhone'订单")]
 
     for _ in range(5):
         resp = model.invoke(messages)

@@ -1,15 +1,15 @@
 # PE By-Task 02：信息抽取（Extractor）
 
-> **一句话**：把非结构化文本变成结构化 JSON——发票、名片、合同、邮件、用户反馈。关键是 **schema 设计 + null 处理 + 引用源**。
+> 发票、名片、合同、邮件、用户反馈，这些非结构化文本最后往往都要变成一份结构化 JSON。抽取任务做得好不好，主要看三件事：schema 怎么设计、缺失字段怎么填 null、每个值能不能追溯到原文。
 
 ---
 
 ## 1. 任务特征
 
 - 输入：自由文本（短信 / 邮件 / 表单 / PDF / 图片 OCR 结果）
-- 输出：JSON 含 N 个字段（可嵌套）
-- 评测：每字段 accuracy + 整体一致率
-- 关键挑战：字段缺失、格式不一、含噪声
+- 输出：含 N 个字段的 JSON，可嵌套
+- 评测：每个字段的 accuracy，加上整体一致率
+- 难点：字段缺失、格式五花八门、夹杂噪声
 
 ---
 
@@ -45,9 +45,9 @@ SYSTEM = """你是结构化信息抽取系统。
 
 ---
 
-## 3. Null 处理（最重要的设计点）
+## 3. Null 处理
 
-抽取最大坑：**模型不愿意填 null，倾向猜**。
+这是抽取任务里最重要的设计点。模型天生不愿意填 null，宁可猜一个值。
 
 ```
 输入: "今天买了点东西 50 块"
@@ -56,7 +56,7 @@ SYSTEM = """你是结构化信息抽取系统。
 正确输出: {"vendor": null, "amount": 50, ...}
 ```
 
-prompt 必须**反复**强调：
+所以 prompt 里要把这条规则写得很重，最好配一个反例：
 
 ```
 重要：
@@ -72,19 +72,19 @@ prompt 必须**反复**强调：
 
 ---
 
-## 4. 引用源（让幻觉可定位）
+## 4. 引用源：让幻觉可以定位
 
-要求模型每个字段标"源句"：
+要求模型给每个字段附上它在原文里的出处：
 
 ```python
-class Field(BaseModel):
-    value: str | None
+class SourcedValue(BaseModel):   # 别叫 Field，会和 pydantic.Field 撞名
+    value: str | float | None
     source: str | None  # 原文出处片段
 
 
 class Invoice(BaseModel):
-    vendor: Field
-    amount: Field
+    vendor: SourcedValue
+    amount: SourcedValue
     ...
 ```
 
@@ -98,13 +98,13 @@ class Invoice(BaseModel):
 }
 ```
 
-后处理可校验 `source` 是否真的在原文中——不在 = 幻觉。
+后处理时检查 `source` 是否真的出现在原文里。找不到，就说明这个值是编的。
 
 ---
 
 ## 5. 嵌套 schema
 
-复杂数据用嵌套：
+数据复杂时用嵌套结构：
 
 ```python
 class LineItem(BaseModel):
@@ -119,7 +119,7 @@ class Invoice(BaseModel):
     total: float
 ```
 
-structured output API 支持深层嵌套，但 **>3 层** 准确率下降。深嵌套考虑拆分。
+structured output API 支持深层嵌套，但超过 3 层准确率会下降，这时可以考虑拆成几次抽取。
 
 ---
 
@@ -136,9 +136,9 @@ structured output API 支持深层嵌套，但 **>3 层** 准确率下降。深�
 
 ---
 
-## 7. 抽取 + 分类（组合任务）
+## 7. 抽取 + 分类
 
-很多任务同时要"抽取字段 + 判断分类"：
+很多任务既要抽字段，又要顺手做个判断：
 
 ```python
 class TicketSummary(BaseModel):
@@ -148,11 +148,11 @@ class TicketSummary(BaseModel):
     user_id: str | None  # 抽取
 ```
 
-structured output 一次搞定。
+用 structured output 一次调用就能同时拿到。
 
 ---
 
-## 8. 列表抽取（n + 1 个字段）
+## 8. 列表抽取
 
 ```python
 class Person(BaseModel):
@@ -167,9 +167,7 @@ class MeetingNotes(BaseModel):
     decisions: list[str]
 ```
 
-list 字段告诉模型可以"找多个" / "没找到就空列表"。
-
-prompt 加：
+list 类型本身就在告诉模型"可以有多个，也可以一个都没有"。prompt 里再补几句：
 
 ```
 attendees:
@@ -182,19 +180,17 @@ attendees:
 
 ## 9. 图片 / PDF 抽取
 
-参考 [04-advanced/04-multimodal.md](../04-advanced/04-multimodal.md)。
+详见 [多模态 Prompting（图片 / 文档 / 视频）](../04-advanced/04-multimodal.md)。几个要点：
 
-要点：
-- 多模态 + structured output 一起用
-- 模糊字段返回 null + 标注 `confidence`
-- 关键字段加 `source_image_region`（坐标）便于人工核对
+- 多模态输入和 structured output 一起用
+- 看不清的字段返回 null，并附上 `confidence`
+- 关键字段加 `source_image_region`（坐标），方便人工核对
 
 ---
 
 ## 10. 完整 demo
 
 ```python
-# demos/by_task/02_extractor_invoice.py
 from typing import Literal
 from pydantic import BaseModel, Field
 from openai import OpenAI
@@ -209,10 +205,11 @@ class LineItem(BaseModel):
 
 
 class Invoice(BaseModel):
-    vendor: str
-    invoice_date: str = Field(description="ISO YYYY-MM-DD")
-    currency: Literal["CNY", "USD", "EUR", "JPY", "OTHER"]
-    total_amount: float
+    # 允许缺失的字段都要声明成可空，否则 strict schema 会逼模型编一个值
+    vendor: str | None
+    invoice_date: str | None = Field(description="ISO YYYY-MM-DD")
+    currency: Literal["CNY", "USD", "EUR", "JPY", "OTHER"] | None
+    total_amount: float | None
     tax_id: str | None = None
     line_items: list[LineItem] = []
 
@@ -246,8 +243,8 @@ Service: EC2, S3""",
 
 for text in INVOICES:
     print(f"\n=== {text[:30]}... ===")
-    resp = client.beta.chat.completions.parse(
-        model="gpt-4o-mini",
+    resp = client.chat.completions.parse(
+        model="gpt-6-luna",
         response_format=Invoice,
         messages=[
             {"role": "system", "content": SYSTEM},
@@ -263,19 +260,19 @@ for text in INVOICES:
 
 | 坑 | 排查 |
 |----|------|
-| **不允许 null** | 模型硬编 |
-| **没引用源字段** | 幻觉无法定位 |
-| **嵌套太深** | 拆分 schema |
-| **list 字段没说"可空"** | 模型放硬塞 |
-| **日期 / 金额格式不一** | 强制 ISO + 后处理验证 |
-| **关键字段没 retry** | parse 失败立即降级 |
-| **不评每字段独立 accuracy** | 总通过率掩盖某字段差 |
+| 不允许 null | 模型会编一个值填上 |
+| 没有引用源字段 | 出了幻觉也查不到是哪个字段 |
+| 嵌套太深 | 拆分 schema |
+| list 字段没说可以为空 | 模型会硬塞内容凑数 |
+| 日期 / 金额格式不统一 | 强制 ISO，后处理再校验一遍 |
+| 关键字段没有 retry | parse 一失败就直接降级了 |
+| 不按字段单独算 accuracy | 总通过率会掩盖某个字段特别差 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 文本生成 → [03-generator.md](./03-generator.md)
-- 📖 总结 → [04-summarizer.md](./04-summarizer.md)
-- 📖 多模态抽取 → [04-advanced/04-multimodal.md](../04-advanced/04-multimodal.md)
-- 📖 structured output 深入 → [03-techniques/05-structured-output.md](../03-techniques/05-structured-output.md)
+- [文本生成（Generator）](./03-generator.md)
+- [总结（Summarizer）](./04-summarizer.md)
+- 多模态抽取：[多模态 Prompting（图片 / 文档 / 视频）](../04-advanced/04-multimodal.md)
+- structured output 深入：[结构化输出（JSON / XML / Schema）](../03-techniques/05-structured-output.md)

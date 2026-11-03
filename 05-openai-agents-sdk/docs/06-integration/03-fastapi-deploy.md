@@ -1,6 +1,6 @@
 # FastAPI / Lambda 部署
 
-> **一句话**：把 Agent 包到 FastAPI / AWS Lambda 里，用 async handler + Sessions + 流式响应，做成生产级 chat API。
+> 这篇把 Agent 包进 FastAPI 和 AWS Lambda，用 async handler、Sessions 和流式响应搭一个能上线的 chat API，顺带讲错误映射、鉴权和 Lambda 上 trace 丢失的问题。
 
 ---
 
@@ -16,7 +16,7 @@ from agents import Agent, Runner, SQLiteSession
 app = FastAPI()
 
 
-agent = Agent(name="A", instructions="...", model="gpt-4o-mini")
+agent = Agent(name="A", instructions="...", model="gpt-6-luna")
 
 
 class ChatReq(BaseModel):
@@ -62,14 +62,22 @@ async def chat_stream(req: ChatReq):
     return StreamingResponse(gen(), media_type="text/event-stream")
 ```
 
-前端用 `EventSource` 接收：
+> SSE 的一条 `data:` 只能占一行。模型吐出的 delta 一旦带换行，上面直接 `f"data: {delta}"` 的写法就会把消息切坏。生产里先把 delta 序列化再发：`yield f"data: {json.dumps(delta, ensure_ascii=False)}\n\n"`，前端再 `JSON.parse`。
+>
+> 官方对流式还有三条要求：一定要把 `stream_events()` 迭代到底，`final_output`、session 落库、`interruptions` 都要等它结束才齐；流式过程中的失败是在 `stream_events()` 里抛出来的；客户端断开时调用 `result.cancel()`，然后继续把事件消费完。用千问这类 Chat Completions 端点时，要设 `ModelSettings(include_usage=True)` 才能拿到 token 用量。
+
+前端要注意，浏览器原生的 `EventSource` 只支持 GET。POST 接口得用 `fetch` + `ReadableStream` 自己解析 SSE（或者把接口改成 GET，或用 `@microsoft/fetch-event-source`）：
 
 ```javascript
-const es = new EventSource("/chat/stream", { method: "POST", ... });
-es.onmessage = (e) => {
-  if (e.data === "[DONE]") es.close();
-  else appendToken(e.data);
-};
+const res = await fetch("/chat/stream", { method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({message, user_id}) });
+const reader = res.body.getReader(); const dec = new TextDecoder();
+for (;;) {
+  const { value, done } = await reader.read();
+  if (done) break;
+  for (const line of dec.decode(value).split("\n\n")) {
+    if (line.startsWith("data: ")) { const d = line.slice(6); if (d !== "[DONE]") appendToken(d); }
+  }
+}
 ```
 
 ---
@@ -127,7 +135,7 @@ async def chat(req: ChatReq, ctx: AppCtx = Depends(get_ctx)):
     return {"reply": result.final_output}
 ```
 
-Agent 里的 tools 通过 `ctx.context.db` 拿连接池。
+Agent 里的工具通过 `ctx.context.db` 拿到连接池。
 
 ---
 
@@ -138,9 +146,10 @@ from agents.exceptions import (
     InputGuardrailTripwireTriggered,
     OutputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    ModelTimeoutError,
     AgentsException,
 )
-from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 
 
 @app.exception_handler(InputGuardrailTripwireTriggered)
@@ -160,22 +169,28 @@ async def max_turns_handler(req, exc):
     )
 
 
+@app.exception_handler(ModelTimeoutError)
+async def model_timeout_handler(req, exc):
+    return JSONResponse(status_code=504, content={"error": "model_timeout"})
+
+
 @app.exception_handler(AgentsException)
 async def agent_error_handler(req, exc):
-    return JSONResponse(
-        status_code=500,
-        content={"error": "internal", "detail": str(exc)},
-    )
+    # 别把 str(exc) 原样回给用户：可能含工具参数 / 内部信息；详情写日志
+    return JSONResponse(status_code=500, content={"error": "internal"})
 ```
+
+> Starlette 的 `exception_handler` 按异常类的继承关系匹配最具体的那个。上面几个都是 `AgentsException` 的子类，它们各自的 handler 会优先于兜底的 `AgentsException`。
 
 ---
 
 ## 6. Background sessions cleanup
 
-定期清理 SQLite session：
+定期清理 SQLite session。注意 `@app.on_event("startup")` 已经被 FastAPI 弃用，改用 `lifespan`：
 
 ```python
 import asyncio
+from contextlib import asynccontextmanager
 
 
 async def cleanup_sessions():
@@ -185,10 +200,17 @@ async def cleanup_sessions():
         await asyncio.sleep(3600 * 24)
 
 
-@app.on_event("startup")
-async def startup():
-    asyncio.create_task(cleanup_sessions())
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(cleanup_sessions())
+    yield
+    task.cancel()
+
+
+app = FastAPI(lifespan=lifespan)
 ```
+
+多副本部署时别用本地 SQLite 文件，换成 `RedisSession` 或 `SQLAlchemySession`（见 [Sessions：会话状态自动管理](../01-basics/06-sessions.md)），多个实例共享同一份存储；`RedisSession` 还可以设 `ttl` 让过期会话自动清掉。
 
 ---
 
@@ -198,15 +220,18 @@ async def startup():
 # lambda_handler.py
 import asyncio
 import json
-from agents import Agent, Runner
+from agents import Agent, Runner, flush_traces
 
 
-agent = Agent(name="A", instructions="...", model="gpt-4o-mini")
+agent = Agent(name="A", instructions="...", model="gpt-6-luna")
 
 
 def handler(event, context):
     body = json.loads(event["body"])
-    result = asyncio.run(Runner.run(agent, body["message"]))
+    try:
+        result = asyncio.run(Runner.run(agent, body["message"]))
+    finally:
+        flush_traces()          # Lambda 冻结后后台线程不再跑，不 flush 的话 trace 可能丢
 
     return {
         "statusCode": 200,
@@ -218,43 +243,44 @@ def handler(event, context):
 打包：
 
 ```bash
-pip install -t package/ openai-agents
+pip install -t package/ openai-agents      # 注意 Lambda 运行时的 Python 版本要 >= 3.10
 cp lambda_handler.py package/
 cd package && zip -r ../function.zip . && cd ..
 aws lambda update-function-code --function-name agent-chat --zip-file fileb://function.zip
 ```
 
-⚠️ Lambda 限制：
+Lambda 的几个限制：
 
 - 15 分钟 timeout（够用）
 - 6 MB payload（streaming 需要 Function URL with streaming）
-- 冷启动 ~1-2s（备 provisioned concurrency）
+- 冷启动有额外延迟，依赖越多越明显（在意的话配 provisioned concurrency）
+- 响应返回后后台线程会被冻结，而 tracing 默认是后台批量导出的，所以 handler 结束前要调 `flush_traces()`（官方说 Celery 等后台任务同理，在 `trace()` 退出之后调）
 
 ---
 
 ## 8. Streaming + Lambda
 
-Lambda Function URL 支持 streaming：
+Lambda Function URL 支持响应流式（invoke mode 设为 `RESPONSE_STREAM`），但 AWS 托管运行时里原生支持流式 handler 的是 Node.js。Python 的常见做法是用 Lambda Web Adapter 把上面第 2 节的 FastAPI 流式接口原样跑在 Lambda 上，或者自己写自定义运行时。下面只是结构示意，`response_stream` 代表运行时提供的输出流：
 
 ```python
-# 用 awslambdaric / aws-lambda-streamfy
 import asyncio
+from openai.types.responses import ResponseTextDeltaEvent
 
 
-def handler(event, context, response_stream):
+def handler(event, context, response_stream):     # 示意：签名取决于你用的运行时 / 适配层
     async def run():
         from agents import Agent, Runner
         agent = Agent(...)
         result = Runner.run_streamed(agent, event["body"])
         async for ev in result.stream_events():
-            if ev.type == "raw_response_event":
+            if ev.type == "raw_response_event" and isinstance(ev.data, ResponseTextDeltaEvent):
                 response_stream.write(ev.data.delta.encode())
         response_stream.end()
 
     asyncio.run(run())
 ```
 
-详见 AWS Lambda streaming response docs。
+细节见 AWS Lambda response streaming 和 Lambda Web Adapter 的文档。
 
 ---
 
@@ -262,7 +288,7 @@ def handler(event, context, response_stream):
 
 ```dockerfile
 # Dockerfile
-FROM python:3.11-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 COPY requirements.txt .
@@ -306,7 +332,6 @@ async def chat(req: ChatReq, x_api_key: str = Header(None)):
 ## 11. 完整 demo
 
 ```python
-# demos/integration/03_fastapi.py
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -323,7 +348,7 @@ agent = Agent(
     name="ChatBot",
     instructions="友好聊天，能查天气",
     tools=[get_weather],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -343,10 +368,10 @@ async def chat(req: ChatReq):
         return {
             "reply": result.final_output,
             "agent": result.last_agent.name,
-            "tokens": result.usage.total_tokens,
+            "tokens": result.context_wrapper.usage.total_tokens,
         }
-    except AgentsException as e:
-        raise HTTPException(500, detail=str(e))
+    except AgentsException:
+        raise HTTPException(500, detail="internal")      # 详情写日志，别把 str(e) 回给用户
 
 
 @app.post("/chat/stream")
@@ -373,6 +398,6 @@ if __name__ == "__main__":
 
 ## 12. 下一步
 
-- 📖 跟 Pydantic AI / LangChain 互操作 → [04-vs-others.md](./04-vs-others.md)
-- 📖 生产 cost / latency 优化 → [07-production/02-cost-latency.md](../07-production/02-cost-latency.md)
-- 📖 实战完整服务 → [08-practice/01-customer-triage.md](../08-practice/01-customer-triage.md)
+- 和 Pydantic AI / LangChain 互操作 → [与 Pydantic AI / LangChain 互操作](./04-vs-others.md)
+- 生产环境的成本与延迟优化 → [Cost / Latency 优化](../07-production/02-cost-latency.md)
+- 一个完整的服务实战 → [实战 1：客服 Triage Agent](../08-practice/01-customer-triage.md)

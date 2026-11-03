@@ -1,10 +1,10 @@
 # PE Production 01：Prompt 版本管理
 
-> **一句话**：prompt 应该像代码一样进 git、有 changelog、能 diff、能 rollback。本篇讲三种版本管理方案——文件 + git、LangSmith Hub、自建——以及怎么把"prompt 改动"接入 CI/CD。
+> prompt 应该和代码一样对待：进 git，有 changelog，能 diff，能回滚。这篇比较三种版本管理方案（文件 + git、LangSmith Hub、自建服务），再讲怎么把 prompt 改动接进 CI/CD。
 
 ---
 
-## 1. 为什么 Prompt 必须版本化
+## 1. 为什么 prompt 必须版本化
 
 ```
 [周一 10:00] 工程师 A 改了 prompt，上线，效果好
@@ -13,17 +13,19 @@
 [周四 11:00] "谁能告诉我现在线上跑的是哪个版本？" 一片寂静
 ```
 
-不版本化的代价：
+不做版本管理，会遇到这些问题：
 
-- 改坏了无法回滚
-- 多人改 → 互相 override
+- 改坏了没法回滚
+- 多人同时改，互相覆盖
 - 不知道线上跑的是哪一版
 - 看不到改动历史
-- evalset 跑分对不上版本
+- 评测集的跑分对不上 prompt 版本
 
 ---
 
-## 2. 方案 A：文件 + Git（最简单）
+## 2. 方案 A：文件 + Git
+
+这是最简单的方案。
 
 ```
 your-repo/
@@ -57,9 +59,9 @@ def load(name: str, version: str | None = None) -> str:
 SYSTEM = load("feedback-classifier")
 ```
 
-切版本：改 `current.txt` 一行就好。
+切版本只要改 `current.txt` 里的一行。
 
-CHANGELOG.md 长这样：
+CHANGELOG.md 大概长这样：
 
 ```markdown
 # feedback-classifier CHANGELOG
@@ -80,46 +82,44 @@ CHANGELOG.md 长这样：
 - 通过率: 78%
 ```
 
-**优点**：零工具栈、PR review 友好。
-**缺点**：跨语言项目麻烦、UI 编辑差。
+优点是不需要任何额外工具，PR review 也方便。缺点是跨语言的项目不好共享，也没有可视化的编辑界面。
 
 ---
 
 ## 3. 方案 B：LangSmith Prompt Hub
 
-LangSmith 提供 prompt 集中管理：
+LangSmith 提供集中式的 prompt 管理：
 
 ```python
 from langsmith import Client
 
 client = Client()
 
-# 拉 prompt
-prompt = client.pull_prompt("my-classifier/v1.2.0")
+# 拉 prompt：按 commit hash 钉死某个版本
+prompt = client.pull_prompt("my-classifier:abc12345")
 
 # 推新版本
-client.push_prompt("my-classifier", prompt_object, commit_message="加 reasoning")
+client.push_prompt("my-classifier", object=prompt_object, commit_description="加 reasoning")
 
-# 用 alias
-production_prompt = client.pull_prompt("my-classifier:production")  # alias 指向某版本
+# 用 tag
+production_prompt = client.pull_prompt("my-classifier:production")  # production tag 指向某个 commit
 ```
 
-**优点**：UI 编辑、跨语言、和 LangSmith 评测一体。
-**缺点**：依赖外部服务、网络依赖。
+优点是有 UI 可以编辑，跨语言可用，和 LangSmith 的评测打通。缺点是依赖外部服务和网络。
 
-详 [01-langchain/02-langsmith/04-prompt-hub](../../../01-langchain/docs/02-langsmith/04-prompt-hub.md)。
+详见 [LangSmith 04：Prompt Hub 与 Playground](../../../01-langchain/docs/02-langsmith/04-prompt-hub.md)。
 
 ---
 
-## 4. 方案 C：数据库 / API（自建）
+## 4. 方案 C：自建数据库 / API
 
-大公司常自建：
+规模大的公司常常自己搭：
 
 ```
 [Admin UI] → [PostgreSQL: prompts table] → [App fetches via API]
 ```
 
-schema：
+表结构：
 
 ```sql
 CREATE TABLE prompts (
@@ -135,14 +135,11 @@ CREATE TABLE prompts (
 );
 ```
 
-适合：
-- 多团队、多产品共用
-- 非工程师也要改 prompt（PM / 内容运营）
-- 需要 RBAC / 审计
+适合这些情况：多个团队、多个产品共用 prompt；PM、内容运营这些非工程师也要改 prompt；需要权限控制和审计。
 
 ---
 
-## 5. SemVer 风格的 prompt 版本
+## 5. 用 SemVer 给 prompt 编号
 
 ```
 v1.2.3
@@ -151,7 +148,7 @@ v1.2.3
  └───── major: schema 或行为大改
 ```
 
-什么时候 bump：
+什么改动升哪一位：
 
 | 改动 | 版本 |
 |------|------|
@@ -162,9 +159,9 @@ v1.2.3
 
 ---
 
-## 6. Prompt + evalset 绑定
+## 6. prompt 和评测集绑定
 
-每个 prompt 版本绑定一个 evalset 版本：
+每个 prompt 版本对应一个评测集版本：
 
 ```yaml
 # prompts/feedback-classifier/v1.0.0.meta.yaml
@@ -174,23 +171,23 @@ results:
   total_pass_rate: 0.92
   by_tag:
     happy: 30/30
-    edge: 12/15
+    edge: 11/15
     regression: 8/8
 deployed_at: 2026-05-20T10:00:00Z
 deployed_by: alice
 ```
 
-跑评测时**永远**记下：
+每次跑评测都要记下这几项：
 
-- prompt version
-- evalset version
-- 模型版本（"gpt-4o-2024-08-06"，不是 "gpt-4o"）
+- prompt 版本
+- 评测集版本
+- 模型版本，要记带日期的具体 snapshot 名，而不是会随时间指向新版本的别名
 - 评测时间
 - 通过率分布
 
 ---
 
-## 7. CI 跑评测
+## 7. 在 CI 里跑评测
 
 `.github/workflows/prompt-eval.yml`：
 
@@ -228,56 +225,61 @@ jobs:
           fi
 ```
 
-PR 改 prompt → 自动跑 evalset → 不达标阻止 merge。
+PR 一改 prompt 就自动跑评测集，不达标就不让合并。
 
 ---
 
 ## 8. 灰度发布
 
-不要一上来 100% 切：
+新版本不要一上来就全量切换：
 
 ```python
+import hashlib
+
 def get_prompt_version(user_id: str) -> str:
     # 5% 用 v1.0.0，95% 用 v0.9.0
-    if hash(user_id) % 100 < 5:
+    # 别用内置 hash()：字符串的 hash 每个进程随机加盐，同一用户换个进程就可能分到另一组
+    bucket = int(hashlib.md5(user_id.encode()).hexdigest(), 16) % 100
+    if bucket < 5:
         return "v1.0.0"
     return "v0.9.0"
 ```
 
-监控两个版本的：
-- 通过率（如果有 ground truth）
-- 用户感知（看反馈 / dispute）
-- 延迟 / cost
+两个版本并行时盯这几个指标：
+
+- 通过率（有 ground truth 的话）
+- 用户反馈和申诉
+- 延迟和成本
 - 错误率
 
-OK 后逐步扩 → 50% → 100%。
+没问题再逐步放量到 50%、100%。
 
 ---
 
-## 9. Rollback
+## 9. 回滚
 
-发现新版本有问题：
+发现新版本有问题时：
 
 ```bash
 echo "v0.9.0" > prompts/feedback-classifier/current.txt
 git commit -am "rollback to v0.9.0 due to ..."
 ```
 
-LangSmith：改 `production` alias 指回老版本。
+用 LangSmith 的话，把 `production` tag 指回老版本的 commit。
 
-自建 DB：UPDATE `is_current=TRUE` 到老版本。
+自建数据库的话，把老版本的 `is_current` 改回 TRUE。
 
-**关键**：rollback 必须**秒级**。如果切版本要发版、要重启服务——是设计问题。
+**回滚必须能在秒级完成。** 如果切个版本还要发版、重启服务，那是设计出了问题。
 
 ---
 
 ## 10. 完整 demo
 
 ```python
-# demos/production/01_prompt_loader.py
 """文件 + git 风格 prompt loader"""
 from pathlib import Path
-import json
+
+import yaml  # pip install pyyaml
 
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -292,8 +294,8 @@ class PromptStore:
         if version is None:
             version = (family / "current.txt").read_text().strip()
         content = (family / f"{version}.md").read_text()
-        meta = json.loads((family / f"{version}.meta.json").read_text()) \
-            if (family / f"{version}.meta.json").exists() else {}
+        meta_file = family / f"{version}.meta.yaml"   # 第 6 节的元数据文件
+        meta = yaml.safe_load(meta_file.read_text()) if meta_file.exists() else {}
         return {
             "name": name,
             "version": version,
@@ -315,16 +317,16 @@ if __name__ == "__main__":
 
 ---
 
-## 11. 团队协作约定
+## 11. 团队约定
 
 | 约定 | 含义 |
 |------|------|
-| **PR 改 prompt 必须改 CHANGELOG** | 不写就打回 |
-| **PR 改 prompt 必须跑 evalset** | CI 把关 |
-| **改 prompt 必须有 issue / PRD link** | 不能"我觉得这样更好" |
-| **重大改动 review 2+ 人** | 防止 single-point |
-| **prompt 改和代码改分 PR** | 各自评测 |
-| **prompt 历史不删** | 即使版本废弃也留着 |
+| 改 prompt 的 PR 必须同时改 CHANGELOG | 不写就打回 |
+| 改 prompt 的 PR 必须跑评测集 | 由 CI 把关 |
+| 改 prompt 要关联 issue 或需求文档 | 不能只凭"我觉得这样更好" |
+| 重大改动至少 2 人 review | 避免一个人说了算 |
+| prompt 改动和代码改动分开提 PR | 方便各自评测 |
+| prompt 历史版本不删 | 版本废弃了也留着 |
 
 ---
 
@@ -332,21 +334,21 @@ if __name__ == "__main__":
 
 | 坑 | 排查 |
 |----|------|
-| **prompt 写死在代码** | 每次改都发版 |
-| **prompt 不带版本号** | 不知道线上哪版 |
-| **改 prompt 不跑评测** | 改坏不知道 |
-| **不写 CHANGELOG** | 三个月后回来抓瞎 |
-| **rollback 要重启服务** | 太慢 |
-| **prompt 没和 evalset 绑定** | 评测结果无意义 |
-| **多人改 prompt 没 lock** | 互相 override |
+| prompt 写死在代码里 | 每次改都要发版 |
+| prompt 没有版本号 | 不知道线上是哪一版 |
+| 改 prompt 不跑评测 | 改坏了也不知道 |
+| 不写 CHANGELOG | 三个月后回头看完全想不起来 |
+| 回滚要重启服务 | 太慢 |
+| prompt 没和评测集绑定 | 评测结果说明不了问题 |
+| 多人改 prompt 没有锁 | 互相覆盖 |
 
 ---
 
 ## 13. 下一步
 
-- 📖 Prompt Caching → [02-caching.md](./02-caching.md)
-- 📖 Templating → [03-templating.md](./03-templating.md)
-- 📖 A/B 与可观测 → [04-ab-observability.md](./04-ab-observability.md)
+- [Prompt Caching 实战](./02-caching.md)
+- [Prompt Templating（Jinja 与框架内置模板）](./03-templating.md)
+- [A/B 与可观测](./04-ab-observability.md)
 
 ## 参考资料
 

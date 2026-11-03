@@ -1,12 +1,12 @@
 # CE 04-02：会话记忆管理
 
-> **一句话**：单次会话内，对话历史会无限长大，而窗口和钱包都有限。会话记忆管理就是在 token 预算内决定「保留哪几轮原文、把哪些轮压成摘要、丢弃哪些」。经典三招——全量 buffer、滑动 window、summary buffer（窗口 + 摘要）——本质是「保真度」和「token 成本」之间的取舍。
+> 一次会话里，对话历史会一直变长，窗口和预算却都有上限。会话记忆管理要做的，是在 token 预算内决定哪几轮保留原文、哪些压成摘要、哪些直接丢掉。常用的三种做法是全量 buffer、滑动 window 和 summary buffer（窗口加摘要），它们的差别在于保真度和 token 成本怎么取舍。
 
 ---
 
 ## 1. 问题：历史只增不减，窗口会爆
 
-短期记忆活在窗口里（见 [01-short-vs-long.md](./01-short-vs-long.md)）。最朴素的做法是把每一轮 user/assistant 原样追加，一路拼下去：
+短期记忆在窗口里（见 [短期记忆 vs 长期记忆](./01-short-vs-long.md)）。最朴素的做法是把每一轮 user/assistant 原样追加：
 
 ```python
 # ❌ 全量 buffer：聊得越久越贵，最终撞窗
@@ -16,18 +16,15 @@ messages.append({"role": "assistant", "content": reply})
 # messages 永远只增不减
 ```
 
-后果：
+聊久了会出两个问题。一是 token 线性增长：第 100 轮要把前 99 轮全发一遍，每次都重复付费，响应也越来越慢。二是撞窗：累计超过窗口上限后，要么报错，要么粗暴地砍掉开头，对话一下子接不上。
 
-1. **token 线性涨**：第 100 轮要把前 99 轮全发一遍，输入 token 越来越多，每次都重复付费、响应越来越慢。
-2. **撞窗截断**：累计超过窗口上限，要么报错，要么粗暴砍头，连贯性瞬间断裂。
-
-会话记忆管理就是回答：**在固定的 token 预算里，留什么、压什么、丢什么。**
+所以会话记忆管理要回答的是：在固定的 token 预算里，留什么、压什么、丢什么。
 
 ---
 
-## 2. 三种经典策略
+## 2. 三种常用策略
 
-借鉴 LangChain memory 的几个经典概念（虽然新版 LangGraph 已重构 API，但这几种「思路」是通用的，跨任何框架都成立）：
+下面几个概念来自 LangChain 早期的 memory 模块。新版 LangGraph 已经重构了 API，但这些思路放到任何框架里都成立：
 
 | 策略 | 怎么做 | 保真度 | token 成本 | 适用 |
 |------|--------|--------|-----------|------|
@@ -36,13 +33,13 @@ messages.append({"role": "assistant", "content": reply})
 | Summary Buffer（摘要+窗口） | 近 N 轮原文 + 更早的压成摘要 | 较高（要点不丢） | 较低且可控 | 长会话、Agent |
 | Token Buffer | 按 token 数而非轮数截断 | 中 | 精确封顶 | 严格预算场景 |
 
-核心规律：**越靠近现在的轮次越值钱**，保留原文；越久远的越该被压缩或丢弃——因为当前对话的指代、上下文几乎都落在最近几轮。
+规律是越靠近现在的轮次越值钱，应该保留原文；越久远的越该压缩或丢弃。当前对话里的指代和上下文，几乎都落在最近几轮。
 
 ---
 
 ## 3. 滑动窗口（Window）：最简单有效
 
-只保留最近 `k` 轮，旧的丢弃。成本恒定，实现一行：
+只保留最近 `k` 轮，旧的丢掉。成本恒定，实现只要一行：
 
 ```python
 # ✅ 滑动窗口：永远只发最近 k 轮
@@ -51,13 +48,13 @@ def windowed(history: list[dict], k_turns: int = 6) -> list[dict]:
     return history[-k_turns * 2:]
 ```
 
-缺点很明显：**窗口外的信息彻底蒸发**。用户第 1 轮说「我叫张三」，聊到第 20 轮你已经不记得了。所以纯滑窗适合「不需要记早期细节」的场景（如一问一答的检索问答），需要长记忆的场景得叠加摘要或长期记忆。
+缺点也明显：窗口外的信息彻底没了。用户第 1 轮说「我叫张三」，到第 20 轮就不记得了。纯滑窗适合不需要记早期细节的场景，比如一问一答的检索问答；需要长记忆的场景，得叠加摘要或长期记忆。
 
 ---
 
 ## 4. Summary Buffer：窗口 + 摘要的混合
 
-这是工程上最常用的折中：**最近 N 轮保原文（保连贯），更早的滚动压成一段摘要（保要点、省 token）**。
+这是工程上最常用的折中：最近 N 轮保留原文，保证连贯；更早的滚动压成一段摘要，保住要点、省下 token。
 
 ```
 ┌─────────────────────────────────────────────┐
@@ -70,19 +67,19 @@ def windowed(history: list[dict], k_turns: int = 6) -> list[dict]:
 └─────────────────────────────────────────────┘
 ```
 
-当原文轮数超过阈值，就把「溢出的最旧几轮」喂给模型压成摘要，合并进既有摘要里：
+原文轮数超过阈值时，把溢出的最旧几轮交给模型压成摘要，并合并进已有摘要：
 
 ```python
 import anthropic
 
 client = anthropic.Anthropic()
-MODEL = "claude-sonnet-4-5"
+MODEL = "claude-sonnet-5-5"
 
 def summarize(old_summary: str, overflow: list[dict]) -> str:
     convo = "\n".join(f"{m['role']}: {m['content']}" for m in overflow)
     resp = client.messages.create(
         model=MODEL,
-        max_tokens=512,
+        max_tokens=2048,
         system=(
             "你在维护一段对话摘要。把【已有摘要】和【新增对话】合并成一段更新后的摘要。"
             "保留：用户身份、偏好、已达成的结论、未完成的任务。丢弃寒暄与冗余。用第三人称，简洁。"
@@ -92,7 +89,7 @@ def summarize(old_summary: str, overflow: list[dict]) -> str:
             "content": f"【已有摘要】\n{old_summary or '（空）'}\n\n【新增对话】\n{convo}",
         }],
     )
-    return resp.content[0].text
+    return next(b.text for b in resp.content if b.type == "text")
 ```
 
 完整的 summary buffer 记忆类：
@@ -106,7 +103,7 @@ class SummaryBufferMemory:
 
     def add(self, role: str, content: str) -> None:
         self.recent.append({"role": role, "content": content})
-        # 溢出的最旧轮次滚动进摘要
+        # 溢出的最旧轮次滚动进摘要（为了简洁，这里每次溢出都压一次；生产里攒一批再压，见第 6 节）
         if len(self.recent) > self.keep_recent:
             overflow = self.recent[: len(self.recent) - self.keep_recent]
             self.recent = self.recent[-self.keep_recent :]
@@ -130,13 +127,13 @@ mem.add("user", "刚才说的退货方案细化一下")
 context = mem.to_messages()
 ```
 
-这样无论聊多久，进窗口的 token 都被压在「一段摘要 + 最近 N 轮」的恒定量级，且早期关键信息不会凭空蒸发。
+这样不管聊多久，进窗口的 token 都稳定在「一段摘要加最近 N 轮」的量级，早期的关键信息也不会丢。
 
 ---
 
 ## 5. Token 预算下保留哪些轮次
 
-不是「轮数」而是「token」才是真正的硬约束。给会话历史划一个 token 预算（比如总窗口的 30%，见 [01-foundations/05-context-budget.md](../01-foundations/05-context-budget.md)），从最新往回填，填满为止：
+硬约束其实是 token，不是轮数。给会话历史划一块 token 预算（比如 [Context Budget](../01-foundations/05-context-budget.md) 那张预算表里给历史的额度），从最新一条往回填，填满为止：
 
 ```python
 def fit_budget(history: list[dict], max_tokens: int, count_tokens) -> list[dict]:
@@ -150,7 +147,7 @@ def fit_budget(history: list[dict], max_tokens: int, count_tokens) -> list[dict]
     return list(reversed(kept))  # 恢复时间序
 ```
 
-保留优先级的经验法则：
+哪些该优先留、哪些该先压，可以参考下表：
 
 | 优先保留 | 优先压缩/丢弃 |
 |----------|---------------|
@@ -165,22 +162,22 @@ def fit_budget(history: list[dict], max_tokens: int, count_tokens) -> list[dict]
 
 | 坑 | 后果 | 对策 |
 |----|------|------|
-| 摘要把关键事实压没了 | 模型"忘记"用户身份/偏好 | 摘要 prompt 明确指定必留字段 |
+| 摘要把关键事实压没了 | 模型忘了用户身份/偏好 | 摘要 prompt 里写明必须保留的字段 |
 | 摘要太频繁 | 每次溢出都调一次模型，慢且贵 | 攒够一批再压（批量摘要） |
-| 滑窗砍掉了 tool_call 配对 | 出现孤立的 tool_result 报错 | 按"完整轮"裁剪，别拦腰切 |
-| 摘要本身越滚越长 | 又变回 token 爆炸 | 给摘要本身设上限，超了再压一次 |
+| 滑窗砍掉了 tool_call 配对 | 出现孤立的 tool_result 报错 | 按完整轮次裁剪，别从中间切开 |
+| 摘要本身越滚越长 | 又回到 token 暴涨 | 给摘要本身设上限，超了再压一次 |
 | 把长期记忆塞进会话 buffer | 会话一结束就丢 | 持久信息走长期记忆，别混进短期 buffer |
 
 ---
 
 ## 7. 下一步
 
-- 📖 这只解决「单次会话」，跨会话怎么持久化与召回 → [03-storage-recall.md](./03-storage-recall.md)
-- 📖 摘要其实是压缩的一种，系统讲压缩看下一章 → [05-compaction/01-why-compact.md](../05-compaction/01-why-compact.md)
-- 📖 短期 vs 长期记忆的分层观 → [01-short-vs-long.md](./01-short-vs-long.md)
-- 📖 会话历史的 token 预算怎么分 → [01-foundations/05-context-budget.md](../01-foundations/05-context-budget.md)
+- 这篇只管单次会话，跨会话怎么持久化与召回：[记忆的存储与召回](./03-storage-recall.md)
+- 摘要是压缩的一种，压缩的系统讲法在下一章：[为什么要压缩上下文](../05-compaction/01-why-compact.md)
+- 短期与长期记忆的分层：[短期记忆 vs 长期记忆](./01-short-vs-long.md)
+- 会话历史的 token 预算怎么分：[Context Budget](../01-foundations/05-context-budget.md)
 
 ## 参考资料
 
-- LangChain，"How to add memory to chatbots"：https://python.langchain.com/docs/how_to/chatbots_memory/
+- LangChain，"How to add memory to chatbots"：https://docs.langchain.com/oss/python/langchain/short-term-memory
 - LangGraph 持久化与短期记忆：https://langchain-ai.github.io/langgraph/concepts/memory/

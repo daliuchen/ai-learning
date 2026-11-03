@@ -1,6 +1,6 @@
-# Lifecycle Hooks：在关键节点插钩子
+# Lifecycle Hooks：生命周期钩子
 
-> **一句话**：实现 `AgentHooks` / `RunHooks` 接口，在 agent 开始 / 工具调用 / handoff / 结束等节点做副作用——日志、metric、缓存、补 context 都用得到。
+> 实现 `AgentHooks` 或 `RunHooks`，就能在 agent 开始、调用工具、handoff、结束这些节点上执行自己的代码，记日志、打 metric、做审计、上报进度都靠它。
 
 ---
 
@@ -16,8 +16,7 @@
 ## 2. AgentHooks 接口
 
 ```python
-from agents.lifecycle import AgentHooks
-from agents import RunContextWrapper, Agent, Tool
+from agents import AgentHooks, RunContextWrapper, Agent, Tool     # agents.lifecycle 里也有，顶层直接 import 更省事
 
 
 class MyHooks(AgentHooks):
@@ -63,8 +62,14 @@ class MyHooks(AgentHooks):
         tool: Tool,
         result: str,
     ) -> None:
-        """tool 返回结果"""
+        """tool 返回结果（函数工具是字符串；MCP 工具是 {'type': 'text', 'text': ...} 这样的 dict）"""
         pass
+
+    async def on_llm_start(self, context, agent, system_prompt, input_items) -> None:
+        """每次调模型前（可以在这里记 prompt、算 token 预估）"""
+
+    async def on_llm_end(self, context, agent, response) -> None:
+        """每次模型返回后；response.usage 是这一次调用的用量"""
 
 
 agent = Agent(name="A", instructions="...", hooks=MyHooks())
@@ -75,7 +80,7 @@ agent = Agent(name="A", instructions="...", hooks=MyHooks())
 ## 3. RunHooks 接口
 
 ```python
-from agents.lifecycle import RunHooks
+from agents import RunHooks
 
 
 class MyRunHooks(RunHooks):
@@ -84,13 +89,16 @@ class MyRunHooks(RunHooks):
     async def on_handoff(self, context, from_agent, to_agent): ...
     async def on_tool_start(self, context, agent, tool): ...
     async def on_tool_end(self, context, agent, tool, result): ...
+    async def on_llm_start(self, context, agent, system_prompt, input_items): ...
+    async def on_llm_end(self, context, agent, response): ...
 
 
 # 在 Runner.run 时传
 result = await Runner.run(agent, "...", hooks=MyRunHooks())
+# Agent.as_tool 的子 Agent 那次 run 也可以单独传 hooks：translator.as_tool(..., hooks=...)
 ```
 
-`RunHooks` 在所有 Agent 上触发（包括 handoff 后的），适合横切关注点。
+`RunHooks` 会在所有 Agent 上触发，包括 handoff 之后的，适合放日志、监控这类横切逻辑。
 
 ---
 
@@ -151,7 +159,7 @@ class MetricsHooks(RunHooks):
 
 ---
 
-## 6. 用例 3：审计 / 合规
+## 6. 用例 3：审计和合规
 
 ```python
 class AuditHooks(RunHooks):
@@ -189,7 +197,7 @@ class CacheHooks(RunHooks):
         pass
 ```
 
-⚠️ Hook 不能"代替"或"修改"操作——它只观察。要缓存得在 tool 内部：
+上面这种写法其实做不到缓存：hook 只能观察，不能替换或修改操作本身。缓存要写在 tool 内部：
 
 ```python
 _cache = {}
@@ -205,7 +213,7 @@ def cached_search(query: str) -> str:
 
 ---
 
-## 8. 用例 5：Streaming 进度上报
+## 8. 用例 5：流式上报进度
 
 ```python
 class ProgressHooks(RunHooks):
@@ -233,17 +241,15 @@ async def chat(ws):
 
 ---
 
-## 9. AgentHooks vs RunHooks 怎么选
+## 9. AgentHooks 和 RunHooks 怎么选
 
-- 我只关心这个 Agent → AgentHooks（更高内聚）
-- 我要监控整个 run（含 handoff 后的 agents）→ RunHooks
-- 两个混用没问题——会都触发
+只关心某一个 Agent，就用 AgentHooks，逻辑跟着 Agent 走；要监控整个 run，包括 handoff 之后的 agent，就用 RunHooks。两者也可以混用，都会触发。
 
 ---
 
-## 10. Hooks 内抛异常会咋样
+## 10. Hook 里抛异常会怎样
 
-抛异常 → 整个 run 失败：
+整个 run 会失败。比如在工具 hook 里 `raise RuntimeError("oops")`，`Runner.run` 抛出的是 `UserError: Error running tool ping: oops`：
 
 ```python
 class BadHooks(RunHooks):
@@ -251,7 +257,7 @@ class BadHooks(RunHooks):
         raise RuntimeError("oops")  # 整个 Runner.run 抛
 ```
 
-**生产慎重**：hooks 要稳。常见 pattern：
+所以生产环境里的 hook 要写得稳，我一般这样包一层：
 
 ```python
 async def on_tool_start(self, ctx, agent, tool):
@@ -267,11 +273,10 @@ async def on_tool_start(self, ctx, agent, tool):
 ## 11. 完整 demo
 
 ```python
-# demos/advanced/03_lifecycle_hooks.py
 import asyncio
 import time
 from agents import Agent, Runner, function_tool
-from agents.lifecycle import RunHooks
+from agents import RunHooks
 
 
 @function_tool
@@ -306,7 +311,7 @@ agent = Agent(
     name="A",
     instructions="用 slow_op 计算",
     tools=[slow_op],
-    model="gpt-4o-mini",
+    model="gpt-6-luna",
 )
 
 
@@ -333,6 +338,6 @@ Final: 10
 
 ## 12. 下一步
 
-- 📖 接 LiteLLM 跑 Claude → [04-multi-provider.md](./04-multi-provider.md)
-- 📖 Realtime API → [05-realtime.md](./05-realtime.md)
-- 📖 实战：用 hooks 做 SSE 进度上报 → [06-integration/03-fastapi-deploy.md](../06-integration/03-fastapi-deploy.md)
+- 接千问、Claude 等非 OpenAI 模型 → [Multi-provider：接千问 / Claude / Gemini / 本地模型](./04-multi-provider.md)
+- [Realtime Agent：实时语音 API](./05-realtime.md)
+- 实战：用 hooks 做 SSE 进度上报 → [FastAPI / Lambda 部署](../06-integration/03-fastapi-deploy.md)

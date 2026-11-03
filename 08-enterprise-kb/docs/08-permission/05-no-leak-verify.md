@@ -1,10 +1,10 @@
-# EKB 42：越权不召回——给权限体系上锁
+# EKB 42：验证越权内容不会被召回
 
-> **一句话**：权限的最终验收只有一条——**任何角色都检索不到对它受限的文档，一次都不行**。本篇把这条做成一个专门的安全测试（穷举所有受限文档 × 所有无权角色），作为上线的硬门禁，并讲怎么防住「召回没漏但答案/引用漏了」的次生泄漏。
+> 权限的最终验收标准只有一条：任何角色都检索不到对它受限的文档，一次都不行。这篇把它做成一个专门的安全测试，穷举所有受限文档和所有无权角色的组合，作为上线前的硬门禁；另外也讲怎么防住召回没漏、答案或引用却漏了的次生泄漏。
 
 ---
 
-## 1. 终极验收标准
+## 1. 验收标准
 
 ```
 对每一篇受限文档 D：
@@ -14,30 +14,35 @@
 若有任何一例 D 出现 → 权限失败，禁止上线
 ```
 
-这比抽几个用例更严——它**穷举**受限文档和无权角色的组合，不留侥幸。
+这比抽几个用例严格得多，它把受限文档和无权角色的组合全部跑一遍，不靠运气。
 
 ---
 
 ## 2. 自动化越权扫描
 
-不用人工想问题，直接用文档自己的内容去「钓」——如果用文档原文都钓不出来，普通提问更不可能漏：
+不必人工去想问题，直接拿文档自己的内容去「钓」。连原文都钓不出来，普通提问就更不会漏：
 
 ```python
 # permission/leak_scan.py
 def leak_scan(conn) -> list[dict]:
     leaks = []
+    # 受限文档 = acl 里没有 'all' 这一行的文档（同时标了 all 的文档本来就公开）
     restricted = conn.execute(
-        "SELECT DISTINCT doc_id FROM acl WHERE role != 'all'").fetchall()
-    all_roles = conn.execute("SELECT DISTINCT role FROM acl").fetchall()
+        "SELECT DISTINCT doc_id FROM acl "
+        "WHERE doc_id NOT IN (SELECT doc_id FROM acl WHERE role = 'all')").fetchall()
+    all_roles = [r["role"] for r in conn.execute(
+        "SELECT DISTINCT role FROM acl WHERE role != 'all'").fetchall()]
 
-    for (doc_id,) in restricted:
+    for row in restricted:                              # 连接是 dict_row，按列名取
+        doc_id = row["doc_id"]
         visible = get_doc_roles(conn, doc_id)          # 该文档可见角色
         # 用文档自己的一段内容当查询，最容易命中自己
         probe = get_doc_sample_text(conn, doc_id)
-        for (role,) in all_roles:
-            if role in visible or role == "all":
+        for role in all_roles:
+            if role in visible:
                 continue                                # 有权，跳过
-            hits = vector_search(probe, roles=[role], k=20)
+            # 两路都要扫：只扫向量路，BM25 路的漏洞查不出来
+            hits = vector_search(probe, roles=[role], k=20) + bm25_search(probe, roles=[role], k=20)
             if any(h["doc_id"] == doc_id for h in hits):
                 leaks.append({"doc": doc_id, "role": role})  # ❌ 越权命中
     return leaks
@@ -45,13 +50,13 @@ def leak_scan(conn) -> list[dict]:
 assert leak_scan(conn) == [], "存在越权泄漏，禁止上线！"
 ```
 
-**用文档原文当探针**是关键——这是最容易命中该文档的查询，它都漏不出来，权限才算真严。
+用文档原文当探针，是因为这是最容易命中这篇文档的查询。它都漏不出来，权限才算可靠。
 
 ---
 
-## 3. 防次生泄漏：召回、答案、引用三处都要查
+## 3. 防次生泄漏：召回、答案、引用三处都查
 
-召回过滤对了，泄漏还可能从别处溜出来（[38 篇](./01-permission-is-devil.md) 的四个入口）：
+召回过滤做对了，泄漏还可能从别的地方溜出去，也就是 [为什么权限是企业知识库的难点](./01-permission-is-devil.md) 里列的四个入口：
 
 ```python
 def full_leak_check(role: str, doc_id_restricted: int, result: dict):
@@ -62,13 +67,13 @@ def full_leak_check(role: str, doc_id_restricted: int, result: dict):
         assert not is_restricted_for(role, cite["doc_id"]), "引用泄漏受限文档！"
 ```
 
-最容易被忽略的是**引用层**：即使召回过滤对了，如果引用卡片的数据来源没同样过滤，可能把受限文档的标题/链接展示出去。**引用构造也要用同一套权限过滤。**
+最容易被忽略的是引用层。召回过滤即使做对了，引用卡片的数据如果从别处取、没有经过同样的过滤，受限文档的标题和链接照样会被展示出去。构造引用时也要走同一套权限过滤。
 
 ---
 
-## 4. 把它接进 CI 当门禁
+## 4. 接进 CI 当门禁
 
-权限测试不是跑一次就完，要**每次改动都自动跑**——因为重构检索、改缓存、调融合，都可能不小心破坏权限：
+权限测试不能跑一次就算完，每次改动都要自动跑。重构检索、改缓存、调融合，都可能不小心把权限弄坏：
 
 ```python
 # 上线门禁（接 CI）
@@ -81,21 +86,21 @@ def permission_gate(conn):
     print("✅ 权限门禁通过")
 ```
 
-任何改动让这个门禁红，就是引入了权限回归，必须在合并前修掉。**权限是会被无意中改坏的，所以要持续守。**
+哪次改动让这个门禁变红，就说明引入了权限回归，必须在合并前修掉。权限很容易在无意中被改坏，只能靠持续检查来守住。
 
 ---
 
-## 5. 权限验收 checklist
+## 5. 权限验收清单
 
 上线前逐条确认：
 
-- [ ] `leak_scan` 全绿（穷举受限文档 × 无权角色，零命中）
-- [ ] 多角色对照用例全过（有权能看、无权兜底）
-- [ ] 引用层无受限文档泄漏
+- [ ] `leak_scan` 全部通过（受限文档和无权角色的组合全跑一遍，零命中）
+- [ ] 多角色对照用例全部通过（有权能看到，无权走兜底）
+- [ ] 引用层没有泄漏受限文档
 - [ ] 多角色用户取并集正确
-- [ ] 改文档可见性后重跑，无残留
-- [ ] BM25 路和向量路都验证过（不只测了一路）
-- [ ] 角色来自服务端可信来源，前端无法伪造
+- [ ] 改了文档可见性后重跑，没有残留
+- [ ] BM25 路和向量路都验证过，不是只测了一路
+- [ ] 角色来自服务端的可信来源，前端无法伪造
 - [ ] 权限门禁已接入 CI
 
 ---
@@ -104,16 +109,16 @@ def permission_gate(conn):
 
 | 坑 | 后果 | 正确做法 |
 |----|------|----------|
-| 只抽几个用例测权限 | 组合漏覆盖 | 穷举扫描 |
-| 不用文档原文当探针 | 钓不出真漏洞 | 原文做最强探针 |
-| 只查召回，不查引用 | 引用层泄漏 | 三层都查 |
-| 权限测一次就不管 | 后续改动悄悄破坏 | CI 持续门禁 |
-| 信任前端传的角色 | 伪造越权 | 服务端可信来源 |
+| 只抽几个用例测权限 | 有些组合没覆盖到 | 穷举扫描 |
+| 不用文档原文当探针 | 钓不出实际存在的漏洞 | 用原文做探针 |
+| 只查召回，不查引用 | 引用层泄漏 | 召回、答案、引用三层都查 |
+| 权限测一次就不管了 | 后续改动悄悄弄坏 | 在 CI 里持续当门禁 |
+| 信任前端传来的角色 | 伪造角色越权 | 角色取自服务端可信来源 |
 
 ---
 
 ## 下一步
 
-权限上锁完成，知识库已经安全可信。接下来做出能让人用的界面：
+权限上了锁，知识库可以放心用了。接下来做一个让人用得上的界面：
 
-→ [09-frontend/01-qa-page-streaming](../09-frontend/01-qa-page-streaming.md)
+→ [问答页](../09-frontend/01-qa-page-streaming.md)

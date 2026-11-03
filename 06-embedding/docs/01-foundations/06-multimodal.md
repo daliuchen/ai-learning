@@ -1,19 +1,19 @@
 # 多模态 Embedding：CLIP 原理
 
-> **一句话**：CLIP / OpenCLIP / Jina-CLIP 这类模型把**图片**和**文字**编码到同一个向量空间，于是"文字搜图"、"图搜图"、"图搜文"都用同一个 cosine 算就行。
+> CLIP、OpenCLIP、Jina-CLIP 这类模型把图片和文字编码进同一个向量空间，于是文字搜图、图搜图、图搜文都能用同一套 cosine 相似度来做。这篇讲 CLIP 的训练思路、实际怎么用，以及它在哪些地方靠不住。
 
 ---
 
 ## 1. 什么是多模态 embedding
 
 ```python
-embed_text("一只穿宇航服的猫")  → [0.12, -0.43, ..., 0.05]
+embed_text("a cat in a spacesuit")  → [0.12, -0.43, ..., 0.05]
 embed_image(open("astronaut_cat.jpg"))  → [0.13, -0.41, ..., 0.06]
                                           ↑
                                   跟上面那个文本向量很近
 ```
 
-文字向量和图片向量在同一个空间——这就是跨模态对齐。
+文字向量和图片向量落在同一个空间里，这就叫跨模态对齐。
 
 ---
 
@@ -21,11 +21,11 @@ embed_image(open("astronaut_cat.jpg"))  → [0.13, -0.41, ..., 0.06]
 
 > CLIP: Learning Transferable Visual Models From Natural Language Supervision (2021)
 
-1. **数据**：从网上爬 4 亿对 (image, alt-text)
-2. **架构**：
+1. 数据：从网上爬了 4 亿对 (image, alt-text)
+2. 架构：
    - 文本 encoder（transformer）→ text embedding
    - 图片 encoder（ViT 或 ResNet）→ image embedding
-3. **训练目标**：contrastive
+3. 训练目标：contrastive
 
 ```
 batch 里 N 对 (image, text)：
@@ -33,7 +33,7 @@ batch 里 N 对 (image, text)：
   让 (image_i, text_j) i ≠ j 相似度最低
 ```
 
-结果：图片和它配对的文本被拉近，跟其它都被推远 → 同一向量空间。
+训练的结果是，每张图片和它配对的文本被拉近，和其他文本被推远，两种模态就落进了同一个向量空间。
 
 ---
 
@@ -43,19 +43,20 @@ batch 里 N 对 (image, text)：
 |------|-----|------|
 | OpenAI CLIP ViT-B/32 | 512 | 原版，2021 |
 | OpenAI CLIP ViT-L/14 | 768 | 更强，慢 |
-| OpenCLIP（laion） | 不同 | 开源复现，社区训 |
-| Jina-CLIP-v1 | 768 | 文字能力更强 |
-| SigLIP（Google） | 768 | 比 CLIP 更高质量 |
-| EVA-CLIP | 不同 | 性能 SOTA |
+| OpenCLIP（laion） | 不同 | 开源复现，社区训练 |
+| jina-clip-v2 | 1024（可截维） | 多语言，文本侧支持 8k token，文字能力比 CLIP 强 |
+| SigLIP / SigLIP 2（Google） | 随模型尺寸不同 | 用 sigmoid loss 训练，同等规模下通常比 CLIP 好 |
+| EVA-CLIP | 不同 | 社区大规模训练的 CLIP 变体 |
 
-OpenAI 的原版 CLIP 模型可在 https://github.com/openai/CLIP 找到（不是 OpenAI API 的一部分）。
+> 除了经典的 CLIP 双塔，新一代商用多模态 embedding 已经能把文本、图片，甚至视频、音频、图文混排的 PDF 放进同一个向量空间。比如千问 `qwen3-vl-embedding`（文本/图片/视频，256–2560 维，见百炼官方文档）、Cohere `embed-v5.0`（文本/图片/混合）、Jina `jina-embeddings-v5-omni`（图/音/视频，非商用协议）。它们对截图、PDF 页这类图文混排的文档更友好。本篇后面讲的 CLIP 原理和代码同样适用，把 embed 函数换成对应的 API 即可（需要对应平台的账号）。
+
+OpenAI 原版 CLIP 的模型在 https://github.com/openai/CLIP ，它不属于 OpenAI API。
 
 ---
 
 ## 4. 跑起来：OpenCLIP
 
 ```python
-# demos/foundations/06_multimodal.py
 import torch
 import open_clip
 from PIL import Image
@@ -70,7 +71,7 @@ model.eval()
 
 
 def embed_image(path: str):
-    img = preprocess(Image.open(path)).unsqueeze(0)
+    img = preprocess(Image.open(path).convert("RGB")).unsqueeze(0)
     with torch.no_grad():
         feat = model.encode_image(img)
         feat /= feat.norm(dim=-1, keepdim=True)
@@ -106,7 +107,7 @@ for q in queries:
     print(f"'{q}' → {best} (sim={sims[best]:.3f})")
 ```
 
-输出大致：
+输出大致如下：
 
 ```
 'a kitten' → cat.jpg (sim=0.302)
@@ -114,27 +115,23 @@ for q in queries:
 'a puppy' → dog.jpg (sim=0.295)
 ```
 
-CLIP 数值绝对值不高（0.2-0.3 已经很好），看 **相对排序**。
+CLIP 给出的相似度绝对值普遍不高，0.2 到 0.3 已经算很好，应该看相对排序。
 
 ---
 
-## 5. CLIP 的"陷阱"
+## 5. CLIP 的弱点
 
-CLIP 在 zero-shot 任务很强，但：
+CLIP 做 zero-shot 任务很强，但下面几类情况它处理不好：
 
 | 弱点 | 表现 |
 |------|------|
-| 文字理解弱 | "猫在桌子下" vs "桌子在猫下"，CLIP 区分不开 |
-| 数字 / 计数 | "三只猫" 和 "五只猫"，CLIP 弱 |
-| 否定 | "没有猫" 跟 "有猫" 容易混 |
-| 长文本 | text encoder 上下文短（77 tokens），长描述损失大 |
-| 中文 | OpenAI CLIP 训练数据英文为主，中文弱 |
+| 文字理解弱 | "猫在桌子下"和"桌子在猫下"，CLIP 区分不开 |
+| 数字 / 计数 | "三只猫"和"五只猫"分不太清 |
+| 否定 | "没有猫"和"有猫"容易混 |
+| 长文本 | text encoder 只有 77 tokens 的上下文，长描述损失大 |
+| 中文 | OpenAI CLIP 的训练数据以英文为主，中文弱 |
 
-**实战**：
-
-- 文字描述精炼、突出关键词
-- 中文用 Chinese-CLIP 或 Jina-CLIP（支持多语言）
-- 复杂语义考虑用 LLM-based 多模态模型（CLIP 不擅长）
+应对办法：文字描述写得精炼，突出关键词；中文场景用 Chinese-CLIP 或支持多语言的 Jina-CLIP；语义复杂的需求，考虑基于 LLM 的多模态模型。
 
 ---
 
@@ -149,7 +146,7 @@ def find_similar_images(query_image_path, image_db):
     return sorted(sims, key=lambda x: -x[1])[:5]
 ```
 
-电商商品图搜索、相册去重、内容审核。
+用在电商商品图搜索、相册去重、内容审核等场景。
 
 ### 6.2 文搜图
 
@@ -160,7 +157,7 @@ def text_to_image(query, image_db):
     return sorted(sims, key=lambda x: -x[1])[:5]
 ```
 
-图库搜索、设计素材库、视频帧搜索（关键帧 embed 后用文字搜）。
+用在图库搜索、设计素材库，以及视频帧搜索（先把关键帧 embed，再用文字去搜）。
 
 ### 6.3 图分类 zero-shot
 
@@ -174,13 +171,13 @@ def classify_image(image_path, labels):
 classify_image("photo.jpg", ["cat", "dog", "car", "tree"])
 ```
 
-不用训练，直接零样本分类。
+不用训练，直接做零样本分类。
 
 ---
 
 ## 7. 把多模态接到向量库
 
-向量库不关心向量来自啥模态：
+向量库并不关心向量来自哪种模态：
 
 ```python
 from qdrant_client import QdrantClient
@@ -210,14 +207,14 @@ client.upsert(collection_name="products", points=points)
 
 # 用文字搜
 query_vec = embed_text("red sneakers")
-hits = client.search(
+hits = client.query_points(
     collection_name="products",
-    query_vector=query_vec.tolist(),
+    query=query_vec.tolist(),
     limit=10,
-)
+).points
 ```
 
-只要 dim 一致，文 / 图向量可以混存。
+文字向量和图片向量能放在一起比，前提是它们出自同一个 CLIP 模型（同一个向量空间）。维度一样但来自不同模型的向量不能混用。
 
 ---
 
@@ -225,17 +222,16 @@ hits = client.search(
 
 ```
 仅图搜图（电商相似商品）：
-  → OpenCLIP ViT-L/14（开源）
-  → 或 SigLIP（更强）
+  → OpenCLIP ViT-L/14 / SigLIP 2（开源，用自己的商品图比一下再定）
 
 中文场景：
-  → Chinese-CLIP / Jina-CLIP-v1
+  → Chinese-CLIP / jina-clip-v2
 
 多语言文搜图：
-  → Jina-CLIP-v1 / multilingual-clip
+  → jina-clip-v2 / multilingual-clip
 
 需要把图描述精细：
-  → 用 LLaVA / GPT-4V 生成描述，再用文本 embedding
+  → 用多模态大模型（Qwen-VL 系列、gpt-6.1-sol 等）生成描述，再用文本 embedding
   → 而不是直接 CLIP
 
 视频：
@@ -247,7 +243,7 @@ hits = client.search(
 
 ## 9. CLIP + 文本 embedding 混搭
 
-实战常见做法：
+商品检索里常见的做法是两路并行：
 
 ```
 商品检索：
@@ -258,18 +254,17 @@ hits = client.search(
   两路结果 RRF 融合
 ```
 
-详见 [05-retrieval/02-bm25-fusion.md](../05-retrieval/02-bm25-fusion.md) 的融合方法。
+融合方法见[BM25 + Dense 融合：RRF / Weighted](../05-retrieval/02-bm25-fusion.md)。
 
 ---
 
 ## 10. 实战项目示例
 
 ```python
-# demos/applications/multimodal_search.py
 # 见 08-applications/03-multimodal.md
 ```
 
-详见 [08-applications/03-multimodal.md](../08-applications/03-multimodal.md)。
+完整示例在[多模态：图搜图 / 文搜图 / 图搜文](../08-applications/03-multimodal.md)。
 
 ---
 
@@ -277,18 +272,18 @@ hits = client.search(
 
 | 坑 | 解 |
 |----|----|
-| 用 OpenAI text-embedding 给图搜 | 不行，模态不一致 |
-| CLIP 处理 OCR-heavy 图（文档截图） | CLIP 弱，考虑 OCR + 文本 embedding |
-| 视频直接 embed | 切关键帧再 embed 每帧 |
-| 不归一化向量 | CLIP 输出要 normalize 才能 cosine |
+| 用 OpenAI text-embedding 做图片检索 | 不行，模态对不上 |
+| 用 CLIP 处理文字很多的图（文档截图） | CLIP 在这里很弱，改用 OCR + 文本 embedding |
+| 整段视频直接 embed | 先切关键帧，再逐帧 embed |
+| 向量没有归一化 | open_clip 的输出默认没归一化，拿 dot 当 cosine 用之前要先 normalize |
 
 ---
 
 ## 12. 下一步
 
-01-foundations 完结。开始挑模型 / 搭库：
+基础原理部分到这里结束，接下来开始挑模型、搭向量库：
 
-- 📖 OpenAI text-embedding-3 选型 → [02-models/01-openai.md](../02-models/01-openai.md)
-- 📖 商业 API 对比 → [02-models/02-cohere-voyage.md](../02-models/02-cohere-voyage.md)
-- 📖 开源模型 → [02-models/03-open-source.md](../02-models/03-open-source.md)
-- 📖 多模态应用实战 → [08-applications/03-multimodal.md](../08-applications/03-multimodal.md)
+- OpenAI text-embedding-3 选型：[OpenAI text-embedding-3 系列](../02-models/01-openai.md)
+- 商业 API 对比：[Cohere 与 VoyageAI：OpenAI 之外的商业 API](../02-models/02-cohere-voyage.md)
+- 开源模型：[开源模型：Qwen3-Embedding / BGE / Jina / Nomic](../02-models/03-open-source.md)
+- 多模态应用实战：[多模态：图搜图 / 文搜图 / 图搜文](../08-applications/03-multimodal.md)

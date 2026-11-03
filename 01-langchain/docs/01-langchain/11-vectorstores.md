@@ -1,6 +1,6 @@
 # LangChain 11：Embeddings 与 Vector Stores
 
-> **一句话**：Embedding 把文本变成向量，Vector Store 把向量存进库并支持相似度检索。这两件事是 RAG 的"基础设施层"，选择直接影响成本与性能。
+> Embedding 把文本变成向量，Vector Store 把向量存起来并按相似度检索。这是 RAG 底下的两块基础设施，选哪个模型、哪个库，直接决定了检索质量、成本和能撑多大的数据量。
 
 ---
 
@@ -12,13 +12,14 @@
 |------|------|-----------|----------|
 | OpenAI `text-embedding-3-small` | 1536（可缩） | $0.02 / 1M tokens | 中等 |
 | OpenAI `text-embedding-3-large` | 3072（可缩） | $0.13 / 1M | 好 |
-| `bge-large-zh-v1.5` (HF) | 1024 | 本地免费 | **优秀** |
+| `bge-large-zh-v1.5` (HF) | 1024 | 本地免费 | 优秀 |
 | `bge-m3` (HF) | 1024（多向量） | 本地免费 | 优秀 + 多语言 |
 | Cohere `embed-multilingual-v3` | 1024 | 付费 | 好 |
 | `nomic-embed-text` (Ollama) | 768 | 本地免费 | 一般 |
 | Voyage AI `voyage-3` | 1024 | 付费 | 好 |
+| 通义千问 `text-embedding-v4` | 默认 1024（可选 64–2048） | 阿里云按量，便宜 | 优秀 |
 
-**中文项目首选**：bge-large-zh-v1.5 / bge-m3 本地部署，或 OpenAI 3-large。
+中文项目我会优先考虑本地部署 bge-large-zh-v1.5 或 bge-m3；不想自己部署，就用通义 `text-embedding-v4` 或 OpenAI 3-large。
 
 ---
 
@@ -32,7 +33,7 @@ class Embeddings:
     def embed_query(self, text: str) -> List[float]: ...
 ```
 
-**注意**：`embed_documents` 是给文档用的，`embed_query` 是给查询用的，部分模型（BGE 系列）两者 prompt 不一样。
+`embed_documents` 用来编码文档，`embed_query` 用来编码查询。两者别混用：有些模型（BGE、Qwen3-Embedding 等）要求查询加指令前缀、文档不加，分成两个方法才能在实现里处理这种差异。
 
 ### 2.1 OpenAI
 
@@ -46,6 +47,18 @@ print(len(v))   # 1536
 # 缩短维度（OpenAI 3 系列支持）
 emb_short = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=512)
 ```
+
+接千问这类 OpenAI 兼容的 Embedding 服务时有两个坑，用 `text-embedding-v4` 时都会碰到：
+
+```python
+emb = OpenAIEmbeddings(
+    model="text-embedding-v4",
+    check_embedding_ctx_length=False,   # 关掉 tiktoken 预切分：兼容接口不接受 token 数组，只接受字符串
+    chunk_size=10,                      # 千问一次请求最多 10 条文本，超了会报错
+)
+```
+
+`base_url` / `api_key` 同样读 `OPENAI_BASE_URL` / `OPENAI_API_KEY`。统一初始化也可以用 `from langchain.embeddings import init_embeddings`。
 
 ### 2.2 本地 HuggingFace
 
@@ -73,13 +86,13 @@ emb = OllamaEmbeddings(model="nomic-embed-text")
 
 ### 2.4 自定义
 
-继承 `Embeddings` 类实现两个方法即可，用 sentence-transformers / triton-server 都行。
+继承 `Embeddings` 类，实现上面两个方法就行，底层用 sentence-transformers 还是 triton-server 都可以。
 
 ---
 
 ## 3. Vector Store 接口
 
-所有 VectorStore 实现这些方法：
+所有 VectorStore 都实现了这些方法：
 
 ```python
 .add_documents(docs: List[Document]) -> List[str]
@@ -119,9 +132,9 @@ vs = Chroma(
 )
 ```
 
-适合 < 1M 文档的本地 / 小型项目。
+适合文档量在百万以下的本地或小型项目。
 
-### 4.2 FAISS（内存级，超快）
+### 4.2 FAISS（内存级，很快）
 
 ```python
 from langchain_community.vectorstores import FAISS
@@ -133,7 +146,7 @@ vs.save_local("./faiss_index")
 vs2 = FAISS.load_local("./faiss_index", emb, allow_dangerous_deserialization=True)
 ```
 
-不支持 metadata 高级过滤，纯向量检索。
+它本身只做向量检索，LangChain 的 `FAISS` 支持的 `filter`（dict 或函数）是取回候选后再在 Python 里过滤，做不了复杂条件，数据量大时也不高效。
 
 ### 4.3 PGVector（Postgres 扩展，生产推荐）
 
@@ -148,7 +161,7 @@ vs = PGVector.from_documents(
 )
 ```
 
-支持复杂 metadata SQL 过滤，企业首选之一。
+能用 SQL 对 metadata 做复杂过滤，已经在用 Postgres 的团队基本不用再引入新组件。
 
 ### 4.4 Milvus / Weaviate / Qdrant
 
@@ -156,14 +169,15 @@ vs = PGVector.from_documents(
 from langchain_milvus import Milvus
 vs = Milvus.from_documents(chunks, emb, connection_args={"uri": "http://localhost:19530"})
 
-from langchain_community.vectorstores import Weaviate, Qdrant
+# Weaviate / Qdrant 已拆成独立包：pip install langchain-weaviate / langchain-qdrant
+from langchain_qdrant import QdrantVectorStore
 ```
 
-百万-千万级 + 复杂 schema 时上这些专业向量库。
+数据到了百万到千万级、schema 也复杂时，再上这些专门的向量库。
 
 ### 4.5 Elasticsearch / OpenSearch
 
-混合检索（BM25 + 向量）友好：
+适合做 BM25 + 向量的混合检索：
 
 ```python
 from langchain_elasticsearch import ElasticsearchStore
@@ -176,16 +190,16 @@ vs = ElasticsearchStore.from_documents(
 )
 ```
 
-### 4.6 内存 + DataFrame
+### 4.6 内存（InMemoryVectorStore）
 
-最快上手，适合 prototype：
+上手最快，适合做原型：
 
 ```python
 from langchain_core.vectorstores import InMemoryVectorStore
 vs = InMemoryVectorStore.from_documents(chunks, emb)
 ```
 
-不持久化。
+进程退出数据就没了。
 
 ---
 
@@ -203,7 +217,7 @@ vs.delete(ids)
 vs.delete(filter={"source": "x"})  # 是否支持取决于实现
 ```
 
-**关键工程实践**：给 doc 一个稳定 id（如 hash），重启重建索引时去重。
+工程上建议给每个 doc 一个稳定的 id（比如内容 hash），重启或重建索引时才能去重。
 
 ---
 
@@ -219,9 +233,9 @@ vs.similarity_search(
 )
 ```
 
-Chroma 支持 `{"source": {"$in": ["a","b"]}}`，PGVector 用 SQL 表达式，Pinecone / Milvus 用 schema 字段，**具体语法看各实现文档**。
+过滤语法各家不同：Chroma 支持 `{"source": {"$in": ["a","b"]}}`，PGVector 用 SQL 表达式，Pinecone / Milvus 用 schema 字段，具体以各自的文档为准。
 
-`as_retriever` 可以把过滤"绑死"：
+`as_retriever` 可以把过滤条件固定下来：
 
 ```python
 retriever = vs.as_retriever(
@@ -233,7 +247,7 @@ retriever = vs.as_retriever(
 
 ## 7. MMR：缓解结果同质化
 
-向量检索常返回非常相似的几条，丢失多样性。MMR (Maximal Marginal Relevance) 在相关性和多样性之间权衡：
+向量检索经常返回几条内容几乎一样的结果。MMR（Maximal Marginal Relevance）在相关性和多样性之间做权衡：
 
 ```python
 vs.max_marginal_relevance_search(
@@ -259,13 +273,13 @@ for doc, score in vs.similarity_search_with_score("...", k=3):
     print(score, doc.page_content[:80])
 ```
 
-注意**不同 VectorStore 的 score 语义不一样**：
+不同 VectorStore 返回的 score 含义不一样：
 - Chroma: distance（越小越像）
 - FAISS: distance（越小越像）
 - PGVector: cosine distance（越小越像）
 - Pinecone: similarity（越大越像）
 
-建议自己做归一化或绝对阈值前先实测。
+所以在做归一化或定绝对阈值之前，先拿自己的数据跑一遍看看分数分布。
 
 ---
 
@@ -278,11 +292,13 @@ for doc, score in vs.similarity_search_with_score("...", k=3):
 | PGVector | `vector_l2_ops` / `vector_cosine_ops`，`HNSW` 或 `IVFFlat` |
 | Milvus | `IVF_FLAT` / `HNSW` / `GPU_IVF_FLAT` |
 
-百万级以上必须用 ANN（近似最近邻），HNSW 是当前最通用选择。
+到了百万级以上就必须用 ANN（近似最近邻）索引，目前最通用的是 HNSW。
 
 ---
 
 ## 10. 实战 demo：构建一个本地知识库
+
+完整代码：[`demos/langchain/11_vectorstore.py`](../../demos/langchain/11_vectorstore.py)
 
 ```python
 # demos/langchain/11_vectorstore.py
@@ -300,9 +316,9 @@ emb = OpenAIEmbeddings(model="text-embedding-3-small")
 if not os.path.exists(PERSIST):
     docs = DirectoryLoader(DOCS, glob="*.md", loader_cls=lambda p: TextLoader(p, encoding="utf-8")).load()
     chunks = RecursiveCharacterTextSplitter(chunk_size=600, chunk_overlap=80).split_documents(docs)
-    vs = Chroma.from_documents(chunks, emb, persist_directory=PERSIST, collection_name="lc")
+    vs = Chroma.from_documents(chunks, emb, persist_directory=PERSIST, collection_name="lc_demo")
 else:
-    vs = Chroma(persist_directory=PERSIST, collection_name="lc", embedding_function=emb)
+    vs = Chroma(persist_directory=PERSIST, collection_name="lc_demo", embedding_function=emb)
 
 for d, s in vs.similarity_search_with_score("LCEL 是什么", k=3):
     print(f"[{s:.4f}] {d.metadata.get('source')}\n{d.page_content[:200]}\n")
@@ -317,14 +333,13 @@ for d, s in vs.similarity_search_with_score("LCEL 是什么", k=3):
 | 中文检索质量差 | 用了英文 embedding | 换 bge-zh / OpenAI 3-large |
 | 同一查询返回完全一样的 K 条 | 文档高度重复 | 用 MMR / 去重 |
 | 持久化文件越用越大 | Chroma 不会自动 compact | 定期重建索引 |
-| add 时 id 冲突 | 没设 ids | 显式 hash 算 id |
+| 重复入库后同一文档存了多份 | 不设 ids 时每次都自动生成新的 UUID | 用内容哈希做 id，重复写入会覆盖而不是新增 |
 | `filter` 不生效 | 不同 VS 语法不同 | 查文档 / 用 `as_retriever` 试 |
-| 加载 FAISS 报安全错误 | pickle 安全开关 | `allow_dangerous_deserialization=True` |
+| 加载 FAISS 报安全错误 | pickle 安全开关 | `allow_dangerous_deserialization=True`（只加载自己生成的文件） |
+| `from langchain_community.vectorstores import Chroma` 有弃用警告 | 已有专用包 | `pip install langchain-chroma`，`from langchain_chroma import Chroma` |
+| Chroma 报 `Expected a name containing 3-512 characters` | Chroma 1.x 要求 collection 名至少 3 个字符 | 名字别用 `kb` 这种 2 字符短名 |
+| 千问 embedding 报 batch size / 参数类型错误 | 兼容接口限制 | `check_embedding_ctx_length=False, chunk_size=10` |
 
 ---
 
-## 12. 本章 demo
-
-[`demos/langchain/11_vectorstore.py`](../../demos/langchain/11_vectorstore.py)
-
-下一篇：[12-retrievers.md](12-retrievers.md)
+下一篇：[LangChain 12：Retrievers 检索器](12-retrievers.md)

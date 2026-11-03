@@ -1,36 +1,36 @@
-# PE Advanced 04：多模态 Prompting —— 图片 / 文档 / 视频
+# PE Advanced 04：多模态 Prompting（图片 / 文档 / 视频）
 
-> **一句话**：现代 LLM 能"看图"（图片、PDF、屏幕截图）和"听音频"——但 prompt 写法和纯文本有差异：要明确引导模型**看哪里**、**看什么**，结构化提取比开放描述准得多。
+> 现在的大模型能看图片、PDF、屏幕截图，有的还能听音频。多模态 prompt 的写法和纯文本不太一样：你得明确告诉模型看哪里、看什么，而且结构化提取比让它自由描述准得多。
 
 ---
 
-## 1. 三家多模态支持
+## 1. 三家的多模态支持
 
 | 模型 | 图片 | PDF | 视频 | 音频 |
 |------|------|-----|------|------|
-| Claude Sonnet 4 | ✅ | ✅ | ⚠️（帧抽样）| ❌ |
-| GPT-4o | ✅ | ✅ | ✅（逐帧） | ✅ |
-| Gemini 2.0 | ✅ | ✅ | ✅（原生） | ✅ |
+| Claude 5 家族（Sonnet 5.5 等） | 支持 | 支持 | 不支持原生视频（需自己抽帧） | 不支持 |
+| GPT-6 家族 | 支持 | 支持 | 抽帧 | 走专门的音频模型 |
+| Gemini 3.8 Flash / 4 Argon | 支持 | 支持 | 支持（原生） | 支持 |
+
+> 这张表按 2026-11 各家官方模型页整理。视频、音频这类细项变化快，上线前请以模型页为准。Claude 的 PDF 上限是单次请求 32MB、600 页（200K 窗口的模型为 100 页）。
 
 ---
 
-## 2. 基本传入方式
+## 2. 怎么传入
 
 ### Anthropic
 
 ```python
-import anthropic, base64, httpx
+import anthropic, base64
 
 client = anthropic.Anthropic()
 
-# 用 URL
-image_url = "https://example.com/chart.png"
-
-# 或本地文件
+# 本地文件转 base64；图片在公网上时也可以直接用
+# {"type": "image", "source": {"type": "url", "url": "https://example.com/chart.png"}}
 image_data = base64.standard_b64encode(open("chart.png", "rb").read()).decode()
 
 resp = client.messages.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     max_tokens=1000,
     messages=[{
         "role": "user",
@@ -48,7 +48,7 @@ resp = client.messages.create(
 from openai import OpenAI
 client = OpenAI()
 resp = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-6.1-terra",
     messages=[{
         "role": "user",
         "content": [
@@ -65,7 +65,7 @@ resp = client.chat.completions.create(
 from google import genai
 client = genai.Client()
 resp = client.models.generate_content(
-    model="gemini-2.0-flash",
+    model="gemini-3.8-flash",
     contents=[
         {"file_data": {"mime_type": "image/png", "file_uri": "..."}},
         "提取图表里的数字",
@@ -75,17 +75,17 @@ resp = client.models.generate_content(
 
 ---
 
-## 3. 多模态 prompt 设计原则
+## 3. 多模态 prompt 的写法
 
-### 3.1 引导模型"看哪里"
-模型不会自动聚焦——明确说：
+### 3.1 告诉模型看哪里
+模型不会自己聚焦，要说清楚：
 
 ```
 ❌ "分析这张图"
 ✅ "聚焦图表右下角的数据表，提取 Q3 和 Q4 的营收数字"
 ```
 
-### 3.2 结构化提取 > 自由描述
+### 3.2 结构化提取，别让它自由描述
 ```
 ❌ "描述这张发票"
 ✅ "从发票中提取以下字段，返回 JSON：
@@ -96,18 +96,18 @@ resp = client.models.generate_content(
    - line_items (array of {name, qty, price})"
 ```
 
-### 3.3 给参考点
+### 3.3 给出参照物
 ```
 "在图中找到红色圆圈标记的对象，描述它"
 "分析以左下角时间戳为准的第三个柱状条"
 ```
 
-### 3.4 防"看错"
+### 3.4 允许它说看不清
 ```
 "如果图片不清楚 / 看不见某字段，返回 null 而不是猜"
 ```
 
-### 3.5 多图片处理
+### 3.5 多张图片
 ```
 messages=[{
     "role": "user",
@@ -119,11 +119,11 @@ messages=[{
 }]
 ```
 
-明确标号 + 任务描述。
+每张图都编号，任务里按编号引用。
 
 ---
 
-## 4. 常见任务模板
+## 4. 常用任务模板
 
 ### 4.1 OCR + 抽取
 ```
@@ -137,7 +137,7 @@ messages=[{
 返回 JSON。
 ```
 
-### 4.2 图表读取
+### 4.2 读图表
 ```
 任务：读取图表数据。
 
@@ -152,7 +152,7 @@ messages=[{
 }
 ```
 
-### 4.3 UI 截图 → 代码
+### 4.3 UI 截图转代码
 ```
 任务：这是一个网页截图。生成等价的 HTML + Tailwind CSS。
 
@@ -163,7 +163,7 @@ messages=[{
 - 注释关键区域
 ```
 
-### 4.4 文档解析（PDF）
+### 4.4 解析 PDF
 ```
 任务：从 PDF 提取以下信息：
 
@@ -178,19 +178,19 @@ messages=[{
 
 ---
 
-## 5. 视频 / 长内容
+## 5. 视频和长内容
 
-Gemini 2.0 支持完整视频上传：
+Gemini 原生支持上传完整视频：
 
 ```python
 video_file = client.files.upload(file="video.mp4")
 resp = client.models.generate_content(
-    model="gemini-2.0-flash",
+    model="gemini-3.8-flash",
     contents=[video_file, "总结视频里 5:00-7:00 之间讨论的内容"],
 )
 ```
 
-GPT-4o / Claude 没有"原生视频"，需要先抽帧：
+Claude 和 OpenAI 的通用模型不支持原生视频，要先抽帧：
 
 ```python
 frames = extract_frames("video.mp4", every_seconds=5)
@@ -204,41 +204,29 @@ content = [
 
 ## 6. 多模态的失败模式
 
-### 6.1 模型"瞎编"图里没有的东西
+### 6.1 编造图里没有的东西
 ```
 图：一只猫
 prompt: "这只狗在做什么？"
 模型: "这只柯基在草地上奔跑..." ← 把猫看成狗
 ```
 
-对策：明确"先看 + 描述图里实际有的"。
+对策：先让模型描述图里实际有什么，再回答问题。
 
-### 6.2 OCR 出错
-小字 / 复杂字体 / 模糊图 → OCR 错。
+### 6.2 OCR 识别错
+字太小、字体复杂、图片模糊，都会让 OCR 出错。可以让模型同时返回置信度和原文片段，关键字段用结构化输出约束，拿不准的填 null。
 
-对策：
-- 让模型返回 confidence + 原文片段
-- 关键字段用结构化输出强制
-- 不确定 → null
+### 6.3 多张图搞混
+给了 3 张图，模型把图 1 的内容说成图 3。对策是明确编号，并在问题里写「图 X 中」。
 
-### 6.3 多图混淆
-3 张图，模型把图 1 的事说成图 3 的。
-
-对策：明确编号 + "图 X 中"。
-
-### 6.4 Token 消耗
-高分辨率图 = 大量 token。Claude 高分图 ~1500 tokens。
-
-对策：
-- 不必要时压缩图像
-- 关键区域裁剪
+### 6.4 Token 消耗大
+高分辨率图片很占 token，Claude 一张高分辨率图大约 1500 tokens。不需要细节时就压缩图片，或者只裁出关键区域。
 
 ---
 
 ## 7. demo：发票 OCR
 
 ```python
-# demos/advanced/04_multimodal_invoice.py
 import base64, json
 import anthropic
 client = anthropic.Anthropic()
@@ -247,8 +235,8 @@ client = anthropic.Anthropic()
 def ocr_invoice(image_path: str) -> dict:
     data = base64.standard_b64encode(open(image_path, "rb").read()).decode()
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=500,
+        model="claude-sonnet-5-5",
+        max_tokens=1024,
         system="""你是发票 OCR + 信息抽取系统。
 从图片提取以下字段，返回 JSON：
 - vendor (string)
@@ -271,7 +259,7 @@ def ocr_invoice(image_path: str) -> dict:
             ],
         }],
     )
-    return json.loads(resp.content[0].text)
+    return json.loads(resp.content[-1].text)
 ```
 
 ---
@@ -280,20 +268,20 @@ def ocr_invoice(image_path: str) -> dict:
 
 | 坑 | 排查 |
 |----|------|
-| **"分析这张图"** | 模糊，明确"提取 X / 描述 Y" |
-| **不要求 null 兜底** | 模型瞎编 |
-| **多图不编号** | 混淆 |
-| **图很小但用最高分辨率** | 浪费 token |
-| **PDF 一次塞太多页** | context 爆 + 中部丢失 |
-| **OCR 出错没 confidence** | 下游不知道哪条不可靠 |
+| 只说「分析这张图」 | 太含糊，改成「提取 X」「描述 Y」 |
+| 没让模型在看不清时填 null | 模型会编 |
+| 多张图不编号 | 容易混淆 |
+| 小图也用最高分辨率 | 浪费 token |
+| PDF 一次塞太多页 | context 撑爆，中间部分丢失 |
+| OCR 结果不带置信度 | 下游不知道哪条不可靠 |
 
 ---
 
 ## 9. 下一步
 
-- 📖 meta-prompting → [05-meta-prompting.md](./05-meta-prompting.md)
-- 📖 注入防御 → [06-injection-defense.md](./06-injection-defense.md)
-- 📖 实战 OCR + 流程 → [05-by-task/02-extractor.md](../05-by-task/02-extractor.md)
+- [Meta-Prompting，用 LLM 写和优化 Prompt](./05-meta-prompting.md)
+- [Prompt Injection 防御](./06-injection-defense.md)
+- [信息抽取（Extractor）](../05-by-task/02-extractor.md)：OCR 加抽取的完整流程
 
 ## 参考资料
 

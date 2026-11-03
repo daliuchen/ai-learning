@@ -4,15 +4,20 @@ import { useRouter } from 'next/router'
 
 const config: DocsThemeConfig = {
   logo: (
-    <span style={{ fontWeight: 700, fontSize: 18 }}>
-      📚 AI Learning · 大模型应用开发学习手册集合
+    <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 10 }}>
+      <span style={{ fontWeight: 800, fontSize: 18, letterSpacing: '-0.02em' }}>AI Learning</span>
+      <span className="al-logo-sub" style={{ fontSize: 13, opacity: 0.6 }}>大模型应用开发中文手册</span>
     </span>
   ),
+  color: {
+    hue: { light: 174, dark: 170 },
+    saturation: { light: 78, dark: 70 },
+  },
   footer: {
     content: (
       <span style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-        <span>非官方教程 · 个人学习笔记 · 全部内容对照各官方文档独立编写</span>
-        <span>新章节同步更新公众号「Ethan 的 LLM 工程手册」</span>
+        <span>AI Learning · 对照各框架官方文档编写，非官方教程</span>
+        <span>公众号「Ethan 的 LLM 工程手册」同步更新</span>
       </span>
     ),
   },
@@ -28,27 +33,32 @@ const config: DocsThemeConfig = {
     title: '目录',
     backToTop: '回到顶部',
   },
-  feedback: {
-    content: '有问题？提交反馈',
-  },
-  editLink: {
-    content: '',
-  },
+  feedback: { content: null },
   darkMode: true,
+  themeSwitch: {
+    useOptions() {
+      return { light: '浅色', dark: '深色', system: '跟随系统' }
+    },
+  },
+  gitTimestamp: function GitTimestamp({ timestamp }) {
+    return <>最后更新于 {timestamp.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' })}</>
+  },
+  navigation: { prev: true, next: true },
+  editLink: { component: null },
   nextThemes: {
     defaultTheme: 'system',
   },
   head: function useHead() {
     const { asPath } = useRouter()
     const { frontMatter, title: pageTitle } = useConfig()
-    const base = 'AI Learning · 学习手册集合'
+    const base = 'AI Learning'
     const title =
       asPath === '/'
         ? base
         : `${frontMatter.title || pageTitle || ''} – ${base}`
     const desc =
       frontMatter.description ||
-      'LangChain / Pydantic AI 等大模型应用开发系列中文深度教程，含可运行 demo'
+      'LangChain、Pydantic AI、MCP、RAG 与上下文工程的中文手册，对照官方文档编写，代码可运行'
     return (
       <>
         <title>{title}</title>

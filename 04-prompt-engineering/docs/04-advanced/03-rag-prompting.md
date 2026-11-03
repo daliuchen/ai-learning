@@ -1,10 +1,10 @@
-# PE Advanced 03：RAG Prompting —— 检索 + 引用约束
+# PE Advanced 03：RAG Prompting 与引用约束
 
-> **一句话**：RAG 不是把检索结果塞到 prompt 就完事——好 RAG prompt 要让模型**只用检索结果回答**、**明确引用源**、**没找到就 refuse**、**避免幻觉补全**。本篇专讲 prompt 这一层。
+> 把检索结果塞进 prompt 只是 RAG 的第一步。好的 RAG prompt 还要做到四件事：模型只依据检索结果回答，标明引用来源，找不到就拒绝，不拿自己的知识去补全。这篇只讲 prompt 这一层。
 
 ---
 
-## 1. RAG 流程里的 prompt 在哪
+## 1. prompt 在 RAG 流程里的位置
 
 ```
 [用户问题]
@@ -16,7 +16,7 @@
 [LLM 生成答案]
 ```
 
-PE 关注的是第三步——**怎么把检索结果喂给 LLM**。
+Prompt engineering 管的是第三步：怎么把检索结果交给模型。
 
 ---
 
@@ -42,18 +42,18 @@ PE 关注的是第三步——**怎么把检索结果喂给 LLM**。
 4. 不要补全、不要猜测、不要扩展上下文里没有的内容。
 ```
 
-四条规则缺一不可：
+四条规则各防一种问题，缺一不可：
 
 | 规则 | 防止 |
 |------|------|
 | 1. 仅用 context | 幻觉 |
-| 2. 引用 | 可追溯 |
+| 2. 引用 | 无法追溯 |
 | 3. 没找到就拒绝 | 编造 |
 | 4. 不扩展 | 过度推断 |
 
 ---
 
-## 3. 改进版：要求逐句引用
+## 3. 改进版：每句都要有引用
 
 ```
 回答时按以下格式：
@@ -66,11 +66,11 @@ PE 关注的是第三步——**怎么把检索结果喂给 LLM**。
 如果某条信息找不到引用源，删掉那条。
 ```
 
-强制每一句都有引用 → 大幅降低幻觉。
+要求每句话都有出处，幻觉会少很多。
 
 ---
 
-## 4. 多文档时的 context 组织
+## 4. 多文档时怎么组织 context
 
 ```
 <context>
@@ -88,13 +88,13 @@ PE 关注的是第三步——**怎么把检索结果喂给 LLM**。
 </context>
 ```
 
-让模型看到 metadata（source / 更新日期）→ 引用时能精确指。
+把来源、更新日期这些元数据一起给模型，它引用时才能指得准。
 
 ---
 
-## 5. 模型选择 source 的策略
+## 5. 来源冲突时怎么选
 
-多个 source 有冲突时，prompt 应该指导模型怎么选：
+多个来源说法矛盾时，prompt 要告诉模型怎么取舍：
 
 ```
 冲突解决规则：
@@ -104,7 +104,7 @@ PE 关注的是第三步——**怎么把检索结果喂给 LLM**。
 - 引用时标注"基于最新文档"
 ```
 
-或更安全的：
+更保守的做法是：
 
 ```
 如果 source 冲突，列出两种说法 + 各自 source，让用户自己判断。
@@ -112,74 +112,72 @@ PE 关注的是第三步——**怎么把检索结果喂给 LLM**。
 
 ---
 
-## 6. Context 大小管理
+## 6. 控制 context 大小
 
 ```
 context 太短 → 信息不足
 context 太长 → 模型 "lost in the middle"
 ```
 
-实战建议：
+我常用的参数：
 
 | 维度 | 推荐 |
 |------|------|
-| chunk 大小 | 200-500 字 / 段 |
+| chunk 大小 | 每段 200-500 字 |
 | top-k | 3-10 段 |
-| 总 context 长度 | < 10k token（即使模型支持 100k+） |
-| 重要 source 顺序 | 最相关放最前或最后（首尾 attention 红利） |
+| 总 context 长度 | 10k token 以内（即使模型支持 100k+） |
+| 来源顺序 | 最相关的放最前或最后（模型对首尾的注意力更强） |
 
 ---
 
 ## 7. Re-rank 与多轮 RAG
 
 ### 7.1 Re-rank
-拿到 vector search 的 top-20 → 用 cross-encoder 重排 → 取前 5 喂给 prompt。提升相关性。
+向量检索取 top-20，用 cross-encoder 重新排序，再取前 5 放进 prompt，相关性会明显提高。
 
 ### 7.2 Multi-hop RAG
-单次检索不够时，让模型迭代查询：
+一次检索不够时，让模型迭代地发起查询：
 
 ```
 [Q] 公司 Q3 营收同比？
    ↓
 [Retrieve 1] 找到 Q3 营收数字
    ↓
-[Q2 from model] 还需要 Q2 同期数字
+[Q2 from model] 还需要去年 Q3 的数字
    ↓
-[Retrieve 2] 找到 Q2 数字
+[Retrieve 2] 找到去年 Q3 数字
    ↓
 [Answer] 同比 X%
 ```
 
-这就是用 ReAct loop + 检索工具，参考 [01-react.md](./01-react.md)。
+实现上就是 ReAct 循环加一个检索工具，见 [ReAct（Reasoning + Acting）](./01-react.md)。
 
 ### 7.3 HyDE（Hypothetical Document Embedding）
-先让 LLM 生成一个"假设的答案" → 用它做检索（而不是直接用 question）→ 相关性更好。
+先让模型生成一个假设的答案，用这个答案而不是原问题去检索，相关性往往更好。
 
 ---
 
-## 8. RAG evalset 特殊要求
+## 8. RAG 评测要多看几项
 
-RAG 的 evalset 不只看"答案对不对"，还看：
+RAG 的评测集除了看答案对不对，还要看：
 
 | 指标 | 含义 |
 |------|------|
-| **Faithfulness** | 答案是否忠实于 context（没幻觉）|
-| **Context recall** | retrieved context 是否覆盖了 ground truth |
-| **Context precision** | retrieved 里相关的比例 |
-| **Answer relevance** | 答案是否真正回答了 question |
-| **Citation accuracy** | 引用是否准确 |
+| Faithfulness | 答案是否忠实于 context，有没有幻觉 |
+| Context recall | 检索到的 context 是否覆盖了标准答案需要的信息 |
+| Context precision | 检索结果里相关内容的比例 |
+| Answer relevance | 答案是否回答了问题本身 |
+| Citation accuracy | 引用是否准确 |
 
-工具：**Ragas** 是 RAG 评测专门库。
+Ragas 是专门做 RAG 评测的库。
 
 ---
 
-## 9. 防"信息不在 context" 时的编造
+## 9. context 里没有答案时，防止编造
 
-最常见的 RAG 失败：context 没相关信息，模型用训练数据"补全"了答案。
+RAG 最常见的失败是：context 里没有相关信息，模型就用训练数据把答案补上了。两个办法：
 
-对策：
-
-### 9.1 严格的 refusal prompt
+### 9.1 严格的拒绝规则
 
 ```
 重要：如果 <context> 不包含回答问题所需信息，必须返回：
@@ -194,8 +192,8 @@ RAG 的 evalset 不只看"答案对不对"，还看：
 - 给"通用"答案
 ```
 
-### 9.2 Faithfulness check
-答案出来后再调一次 LLM 检查：
+### 9.2 忠实度检查
+答案出来之后，再调一次模型做检查：
 
 ```
 检查下面答案是否完全基于 context（不含外部知识）：
@@ -210,7 +208,7 @@ RAG 的 evalset 不只看"答案对不对"，还看：
 
 ## 10. 多语言 RAG
 
-问 / 答 / context 可能不同语言：
+问题、答案、context 可能是不同语言：
 
 ```
 重要：
@@ -224,7 +222,6 @@ RAG 的 evalset 不只看"答案对不对"，还看：
 ## 11. demo：基础 RAG prompt
 
 ```python
-# demos/advanced/03_rag_prompt.py
 import anthropic
 client = anthropic.Anthropic()
 
@@ -261,16 +258,15 @@ SOURCES = [
 QUESTION = "我能改绑手机号吗？怎么改？"
 
 resp = client.messages.create(
-    model="claude-sonnet-4-6",
-    max_tokens=500,
-    temperature=0,
+    model="claude-sonnet-5-5",
+    max_tokens=1024,
     system=RAG_SYSTEM,
     messages=[{"role": "user", "content": build_prompt(QUESTION, SOURCES)}],
 )
-print(resp.content[0].text)
+print(resp.content[-1].text)
 ```
 
-预期输出（含 [Source 1] / [Source 2] 引用）。
+预期输出里会带 [Source 1] / [Source 2] 引用。
 
 ---
 
@@ -278,29 +274,29 @@ print(resp.content[0].text)
 
 | 坑 | 排查 |
 |----|------|
-| **不写 "仅基于 context"** | 模型用训练数据补 |
-| **不要求引用** | 不可追溯，幻觉混入 |
-| **context 太长** | 中部信息被忘 |
-| **不防"信息不足"** | 模型硬编 |
-| **没 faithfulness check** | 上线后用户投诉幻觉 |
-| **chunk 切得太碎** | 失去语义边界 |
-| **没考虑 source 冲突** | 模型挑了过时信息 |
+| 没写「仅基于 context」 | 模型拿训练数据来补 |
+| 不要求引用 | 无法追溯，幻觉混进来也看不出 |
+| context 太长 | 中间部分的信息被忽略 |
+| 没处理信息不足的情况 | 模型硬编答案 |
+| 没做忠实度检查 | 上线后用户投诉幻觉 |
+| chunk 切得太碎 | 语义边界被切断 |
+| 没考虑来源冲突 | 模型挑了过时的信息 |
 
 ---
 
 ## 13. 跨手册关联
 
-- LangChain RAG 实战：[../../../01-langchain/docs/01-langchain/13-rag.md](../../../01-langchain/docs/01-langchain/13-rag.md)
-- Pydantic AI RAG：[../../../02-pydantic-ai/docs/06-practice/02-project-rag.md](../../../02-pydantic-ai/docs/06-practice/02-project-rag.md)
-- MCP 内部知识库：[../../../03-mcp/docs/07-practice/01-project-internal-kb.md](../../../03-mcp/docs/07-practice/01-project-internal-kb.md)
+- [LangChain 13：RAG 完整实战](../../../01-langchain/docs/01-langchain/13-rag.md)
+- [Pydantic AI 实战 02：RAG 知识库问答 Agent](../../../02-pydantic-ai/docs/06-practice/02-project-rag.md)
+- [MCP Practice 01：内部知识库 MCP Server](../../../03-mcp/docs/07-practice/01-project-internal-kb.md)
 
 ---
 
 ## 14. 下一步
 
-- 📖 多模态 prompt → [04-multimodal.md](./04-multimodal.md)
-- 📖 meta-prompting → [05-meta-prompting.md](./05-meta-prompting.md)
-- 📖 注入防御 → [06-injection-defense.md](./06-injection-defense.md)
+- [多模态 Prompting（图片 / 文档 / 视频）](./04-multimodal.md)
+- [Meta-Prompting，用 LLM 写和优化 Prompt](./05-meta-prompting.md)
+- [Prompt Injection 防御](./06-injection-defense.md)
 
 ## 参考资料
 

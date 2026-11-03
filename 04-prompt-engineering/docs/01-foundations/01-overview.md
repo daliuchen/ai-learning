@@ -1,14 +1,14 @@
 # PE 01：Prompt Engineering 是什么 / 不是什么
 
-> **一句话**：Prompt Engineering 不是"用更花哨的写法骗 LLM 输出更好"，而是「**建立一套以评测为驱动、能持续迭代、可被团队复用的 prompt 工程流程**」。它的核心产物**不是一条 prompt**，而是 prompt + 评测集 + 迭代记录 + 监控指标的组合。
+> 很多人把 Prompt Engineering 理解成换个更巧的写法，让模型多吐出点好东西。我在这本手册里讲的是另一回事：一套以评测驱动、能持续迭代、团队可以接手的工程流程。做完一项 PE 工作，交付的是 prompt、评测集、迭代记录和监控指标这一整套，prompt 文本只是其中一项。
 
 ---
 
 ## 1. 一个很常见的误会
 
-「我也是写 prompt 的」+「PE 不就是写得讲究点吗」+「ChatGPT 不是出几个咒语就行了？」——这种理解会让你卡在"凭感觉调"阶段一辈子。
+「PE 不就是 prompt 写得讲究点吗」「给 ChatGPT 念几句咒语就行了吧」。抱着这种理解，人会一直停在凭感觉调 prompt 的阶段。
 
-PE 真正的工作流是这样的：
+实际的工作流是这样的：
 
 ```
 [需求]
@@ -28,7 +28,7 @@ PE 真正的工作流是这样的：
 [生产监控 → 发现新失败 → 加进评测集 → 再迭代]
 ```
 
-这是一个**闭环工程流程**，不是"想出一句更好的 prompt"。
+这是一个闭环。想出一句更好的 prompt，只是其中一步。
 
 ---
 
@@ -38,16 +38,16 @@ PE 真正的工作流是这样的：
 
 | 问题 | PE 怎么帮 |
 |------|----------|
-| LLM 输出格式不稳定 | 结构化输出（JSON / XML / Schema）+ few-shot anchor |
+| LLM 输出格式不稳定 | 结构化输出（JSON / XML / Schema）+ few-shot 示例锚定格式 |
 | 复杂推理出错 | CoT + 任务拆解 |
-| 角色 / 边界跑偏 | system message 写好 persona 与 refuse 边界 |
+| 角色 / 边界跑偏 | 在 system message 里写清 persona 和拒答边界 |
 | 不知道结果好不好 | 评测集 + LLM-as-judge |
 | 多人协作改坏 | Prompt Hub + 版本化 + 评测把关 |
 | 跨家不兼容 | 抽象 prompt 模板 + 适配层 |
 
 ### 2.2 PE 不能解决的
 
-| 问题 | 真实解法 |
+| 问题 | 该用什么 |
 |------|----------|
 | 模型本身能力不够 | 换更强的模型 / 微调 |
 | 需要私有数据知识 | RAG 或微调 |
@@ -55,7 +55,7 @@ PE 真正的工作流是这样的：
 | 任务太长一次跑不完 | 拆 sub-agent + 工作流 |
 | 性能 / 成本 | 用更小的模型、prompt caching、批处理 |
 
-> ⚠️ **重要**：很多团队把"模型能力问题"误当成"prompt 问题"，疯狂调 prompt 调了三周——最后换了 Sonnet → Opus 就解决了。**先怀疑能力上限，再调 prompt**。
+> 很多团队把模型能力问题当成 prompt 问题，调了三周 prompt，最后从 Sonnet 换成 Opus 就解决了。先怀疑能力上限，再去调 prompt。
 
 ---
 
@@ -63,17 +63,17 @@ PE 真正的工作流是这样的：
 
 | 层 | 表现 | 痛点 |
 |---|------|------|
-| **L1 玄学党** | 凭感觉加"think step by step"、"重要！必须！"等口诀；改了 prompt 不知道有没有变好 | 永远不收敛 |
-| **L2 技法党** | 知道 CoT / Few-shot / XML 标签等技法，会按场景选 | 不知道何时停、不知道 v3 比 v2 好在哪 |
-| **L3 流程党** | 评测驱动、版本化、监控线上漂移 | 工程化基础完备，迭代有收敛 |
+| L1 玄学党 | 凭感觉加"think step by step"、"重要！必须！"之类的口诀；改了 prompt 也说不清有没有变好 | 永远不收敛 |
+| L2 技法党 | 知道 CoT / Few-shot / XML 标签等技法，会按场景选 | 不知道何时停，说不清 v3 比 v2 好在哪 |
+| L3 流程党 | 评测驱动、版本化、监控线上漂移 | 工程基础齐全，迭代能收敛 |
 
-本手册目标：**把你从 L1/L2 带到 L3**。
+这本手册想做的，是把读者从 L1、L2 带到 L3。
 
 ---
 
 ## 4. PE 的产物清单
 
-一个"做完了"的 PE 工作交付的不是一句 prompt，而是这套东西：
+一项做完的 PE 工作，交付物应该长这样：
 
 ```
 my-feature/
@@ -91,7 +91,7 @@ my-feature/
 └── README.md                   # 给团队的使用说明
 ```
 
-这是 PE 工作的"完整可交付物"。一份只有 prompt 文本的 PR 应该被打回。
+只改了 prompt 文本、没有评测结果的 PR，我会直接打回。
 
 ---
 
@@ -99,19 +99,19 @@ my-feature/
 
 | 已有技能 | PE 怎么用上 |
 |---------|------------|
-| 软件工程（git / CI） | prompt 也走 git，CI 跑评测 |
-| 单元测试 | evalset 就是 LLM 时代的"测试集" |
-| 产品迭代（PMF） | prompt 迭代 = baseline → 假设 → 实验 |
+| 软件工程（git / CI） | prompt 也进 git，CI 里跑评测 |
+| 单元测试 | evalset 就是 LLM 应用的测试集 |
+| 产品迭代（PMF） | prompt 迭代也是 baseline → 假设 → 实验 |
 | 数据分析 | 评测结果是数据，要会读 |
-| LLM API 调用 | PE 给你方法论 |
+| LLM API 调用 | PE 补上的是方法 |
 
-PE 不是新东西，是把已有工程方法适配到 LLM 不确定输出场景。
+PE 没有多少新东西，它把已有的工程方法搬到了输出不确定的 LLM 场景里。
 
 ---
 
-## 6. 三家 API 的最小 prompt（建立体感）
+## 6. 三家 API 的最小 prompt
 
-接下来要写代码示例了，先看一下三家最简调用——后续章节都基于这个基础。
+后面的章节都要写代码，先看三家最简单的调用。
 
 ### Anthropic (Claude)
 
@@ -119,12 +119,12 @@ PE 不是新东西，是把已有工程方法适配到 LLM 不确定输出场景
 import anthropic
 client = anthropic.Anthropic()
 resp = client.messages.create(
-    model="claude-sonnet-4-6",
+    model="claude-sonnet-5-5",
     max_tokens=1024,
     system="你是简洁的助手。",
     messages=[{"role": "user", "content": "巴黎是哪国首都？"}],
 )
-print(resp.content[0].text)
+print(resp.content[-1].text)
 ```
 
 ### OpenAI (GPT)
@@ -133,9 +133,9 @@ print(resp.content[0].text)
 from openai import OpenAI
 client = OpenAI()
 resp = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-6.1-terra",
     messages=[
-        {"role": "system", "content": "你是简洁的助手。"},
+        {"role": "developer", "content": "你是简洁的助手。"},
         {"role": "user", "content": "巴黎是哪国首都？"},
     ],
 )
@@ -148,62 +148,58 @@ print(resp.choices[0].message.content)
 from google import genai
 client = genai.Client()
 resp = client.models.generate_content(
-    model="gemini-2.0-flash",
+    model="gemini-3.8-flash",
     contents="巴黎是哪国首都？",
     config={"system_instruction": "你是简洁的助手。"},
 )
 print(resp.text)
 ```
 
-**注意三家差异**：
+三家的差异：
 
 | 维度 | Anthropic | OpenAI | Gemini |
 |------|-----------|--------|--------|
-| system 位置 | 顶级参数 | messages 数组第一条 | config 内 system_instruction |
+| system 位置 | 顶级参数 `system` | developer（新）/ system 消息，或 Responses 的 `instructions` | config 内 system_instruction |
 | 消息格式 | messages 数组 | messages 数组 | contents |
-| 输出格式 | content[0].text | choices[0].message.content | text |
+| 输出格式 | content[-1].text（5.x 默认带 thinking 块，别取 [0]） | choices[0].message.content | text |
 | max_tokens | 必填 | 可选 | 可选 |
 
-这些差异在后续 06-models 章节会展开。
+Claude 5.x 默认开着 adaptive thinking，thinking token 也算在 `max_tokens` 里。简单请求它可能不思考，复杂请求可能想很久，所以本手册里 Claude 的示例都给 `max_tokens` 留了余量；生产代码还应该检查 `stop_reason` 是不是 `max_tokens`。这些差异在 06-models 一章展开。
 
 ---
 
-## 7. 本手册的核心断言
+## 7. 这本手册最想说的
 
-读到这里如果你只能带走一句话，希望是：
-
-> **"Prompt is the new code. Eval is the new test."**
->
-> 不写测试的代码上线会出 bug；不带评测集的 prompt 上线一定出问题。
+评测集是这本手册的主线。写代码要配测试，写 prompt 也要配评测集：没有它，改完 prompt 判断不了是变好还是变坏，上线后出了回归也发现不了。后面每一章的做法都建立在先有评测集这个前提上。
 
 ---
 
 ## 8. 常见误区
 
-| 误区 | 真相 |
+| 误区 | 实际情况 |
 |------|------|
-| "Prompt 加越多 instruction 越好" | 过度 prompting 会和训练数据冲突，反而效果变差 |
-| "好 prompt 一定要 think step by step" | 简单任务加 CoT 是浪费 token + 增延迟 |
-| "把所有边界条件都列上" | 有限的注意力预算，重要约束放最后 |
-| "用更高级的模型就不用调 prompt 了" | 反过来：更强模型对结构化输出 / 指令遵循反而更敏感，要适配 |
-| "prompt 越长越具体越好" | 越长信噪比越低；超过几千 token 模型开始"忽略中间" |
-| "few-shot 不可或缺" | 简单任务 zero-shot 就够；指令清晰比 example 多更重要 |
-| "用别人的 prompt 工程模板套上就行" | 模板告诉你"用什么技法"，不告诉你"你的任务该用哪个" |
+| "Prompt 里 instruction 加得越多越好" | 过度 prompting 会和训练数据的习惯冲突，效果反而变差 |
+| "好 prompt 一定要 think step by step" | 简单任务加 CoT 只是多花 token、多等延迟 |
+| "把所有边界条件都列上" | 注意力预算有限，重要约束放在最后 |
+| "用更高级的模型就不用调 prompt 了" | 正相反：更强的模型对结构化输出和指令遵循更敏感，需要适配 |
+| "prompt 越长越具体越好" | 越长信噪比越低；上下文越长，夹在中间的内容越容易被忽略 |
+| "few-shot 不可或缺" | 简单任务 zero-shot 就够；指令写清楚比多放几个 example 更重要 |
+| "套用别人的 prompt 模板就行" | 模板告诉你有哪些技法，不告诉你自己的任务该用哪个 |
 
-后面每个误区都会有专门章节深入。
+这些误区后面各有章节细讲。
 
 ---
 
 ## 9. 下一步
 
-- 📖 一条 prompt 的解剖 → [02-anatomy.md](./02-anatomy.md)
-- 📖 模型怎么"读" prompt（tokenization / attention） → [03-how-models-read.md](./03-how-models-read.md)
-- 📖 不确定性的源头 → [04-sampling.md](./04-sampling.md)
-- 📖 **评测先于 prompt（本手册中轴线的起点）** → [05-eval-first.md](./05-eval-first.md)
+- [一条 Prompt 的解剖](./02-anatomy.md)
+- [模型如何读 Prompt：Tokenizer、Attention 与训练数据](./03-how-models-read.md)
+- [Temperature、Top-p 与采样](./04-sampling.md)
+- [评测先于 Prompt](./05-eval-first.md)：整本手册流程主线的起点
 
 ## 参考资料
 
-- Anthropic Prompt Engineering Overview: https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview
+- Anthropic Prompt Engineering Overview: https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/overview
 - OpenAI Prompting Guide: https://platform.openai.com/docs/guides/prompt-engineering
 - Google Prompting Handbook: https://ai.google.dev/gemini-api/docs/prompting-intro
-- 跨手册关联：[02-pydantic-ai/06-output-types](../../02-pydantic-ai/docs/01-basics/06-output-types.md) · [01-langchain/02-langsmith/04-prompt-hub](../../01-langchain/docs/02-langsmith/04-prompt-hub.md)
+- 跨手册关联：[Pydantic AI 06：结构化输出（Output Types）](../../../02-pydantic-ai/docs/01-basics/06-output-types.md) · [LangSmith 04：Prompt Hub 与 Playground](../../../01-langchain/docs/02-langsmith/04-prompt-hub.md)

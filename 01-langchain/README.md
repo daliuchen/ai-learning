@@ -1,43 +1,41 @@
 # LangChain 全家桶系列教程
 
-> 一套对照官方文档系统编写的 LangChain / LangSmith / LangGraph 中文深度教程，每一篇都包含核心概念、原理剖析、可运行 demo 与生产建议。
+> 这是我对照官方文档整理的 LangChain / LangSmith / LangGraph 中文笔记。每篇讲概念和原理，配一份能跑的 demo，最后是上线时要注意的事。
+
+以 2026 年 11 月的版本为准：`langchain 1.4` / `langgraph 1.2` / `langsmith 0.14`。1.0 之后构建 agent 统一用 `langchain.agents.create_agent`，旧的 chains、`AgentExecutor`、旧 Memory、`langchain.hub`、`EnsembleRetriever` 等搬进了 `langchain-classic`。demo 默认用千问（`qwen-flash`）的 OpenAI 兼容接口。
 
 ---
 
 ## 一、教程定位
 
-本系列教程的目标读者是：
+适合这几类读者：
 
-- 想从零系统掌握 LangChain 生态的工程师
-- 已用过 LangChain 但卡在某些细节（如 LCEL、Agent、RAG 调优）的开发者
-- 想构建生产级 LLM 应用，需要可观测性（LangSmith）和复杂编排（LangGraph）能力的团队
+- 想从头把 LangChain 生态学一遍的工程师
+- 用过 LangChain，但在 LCEL、Agent、RAG 调优这些细节上卡住的人
+- 要做上线的 LLM 应用，需要 LangSmith 做观测、LangGraph 做复杂编排的团队
 
-不同于官网把内容分散在大量短页面里，本系列把每个主题写成"一篇长文 + 一份可运行代码"，重点放在：
-
-1. **概念-代码-原理**三层结合，不只是 API 调用
-2. **横向对比**，告诉你什么时候该用什么
-3. **生产经验**，包含坑、性能、可观测性、调试技巧
+官网的内容拆在很多短页面里，查 API 方便，系统学习不太顺。这里每个主题写成一篇长文加一份能跑的代码。除了 API 怎么调，我还会讲它背后的原理、同类方案之间怎么选，以及实际用下来遇到的坑、性能和调试问题。
 
 ---
 
 ## 二、目录结构
 
 ```
-lang-chain-demo/
+01-langchain/
 ├── README.md                              # 你正在看的总览
 ├── requirements.txt                       # 所有依赖
 ├── .env.example                           # 环境变量模板
 ├── docs/
 │   ├── 01-langchain/                      # LangChain 框架（14 篇）
-│   │   ├── 01-overview.md                 # 架构与生态
+│   │   ├── 01-overview.md                 # 架构与生态（1.x 新包结构）
 │   │   ├── 02-chat-models.md              # Chat Models & Messages
 │   │   ├── 03-prompts.md                  # Prompt Templates
 │   │   ├── 04-output-parsers.md           # Output Parsers / 结构化输出
 │   │   ├── 05-lcel.md                     # LCEL & Runnable
 │   │   ├── 06-streaming.md                # 流式
 │   │   ├── 07-tools.md                    # Tools
-│   │   ├── 08-agents.md                   # 传统 Agents
-│   │   ├── 09-memory.md                   # Memory
+│   │   ├── 08-agents.md                   # create_agent 与旧 AgentExecutor 迁移
+│   │   ├── 09-memory.md                   # Memory（checkpointer / 旧 Memory 迁移）
 │   │   ├── 10-document-loaders.md         # Loader & Splitter
 │   │   ├── 11-vectorstores.md             # Embedding & VectorStore
 │   │   ├── 12-retrievers.md               # Retrievers
@@ -63,7 +61,7 @@ lang-chain-demo/
 │   │   ├── 11-functional-api.md
 │   │   └── 12-deployment.md
 │   └── 04-comparison/                     # 横向对比与实战（3 篇）
-│       ├── 01-frameworks.md               # vs CrewAI / AutoGen / LlamaIndex
+│       ├── 01-frameworks.md               # vs CrewAI / MAF / LlamaIndex / OpenAI Agents / Pydantic AI
 │       ├── 02-project-rag-agent.md        # 实战 1：RAG 问答 Agent
 │       └── 03-project-research-team.md    # 实战 2：多 Agent 研究助手
 └── demos/                                 # 所有可运行 demo
@@ -82,18 +80,18 @@ lang-chain-demo/
 01-overview → 02-chat-models → 03-prompts → 05-lcel → 07-tools → 13-rag
 ```
 
-跑通这条线，你就能搭出一个具备 RAG 能力的小问答应用。
+走完这条线，能搭出一个带 RAG 的小问答应用。
 
-### 路径 B：系统掌握（推荐，约 1-2 周）
+### 路径 B：系统学一遍（约 1-2 周，我比较推荐）
 
-按目录顺序通读，每篇配套跑 demo。建议节奏：
+按目录顺序读，每篇跑一下配套 demo。节奏可以参考：
 
 1. 第 1-3 天：LangChain 01-07（核心能力）
 2. 第 4-5 天：LangChain 08-14（高级与 RAG）
 3. 第 6 天：LangSmith 全部 5 篇
 4. 第 7-9 天：LangGraph 01-08（核心 + 多 Agent）
 5. 第 10 天：LangGraph 09-12（进阶 + 部署）
-6. 第 11-12 天：04-comparison 三篇 + 自己改造实战项目
+6. 第 11-12 天：04-comparison 三篇，再动手改一改实战项目
 
 ### 路径 C：直奔多 Agent（已有 LangChain 经验）
 
@@ -105,22 +103,24 @@ lang-chain-demo/
 
 ## 四、版本与依赖
 
-本系列基于 2025 年 LangChain 生态的最新稳定 API：
+全书基于 2026 年 11 月的稳定版 API（Python ≥ 3.10）：
 
 | 包 | 版本 | 用途 |
 |----|------|------|
-| `langchain` | `>=0.3.0` | 主包 |
-| `langchain-core` | `>=0.3.0` | 核心抽象 |
-| `langchain-openai` | `>=0.2.0` | OpenAI 集成 |
-| `langchain-anthropic` | `>=0.2.0` | Anthropic 集成 |
-| `langchain-community` | `>=0.3.0` | 社区集成 |
-| `langgraph` | `>=0.2.0` | LangGraph |
-| `langgraph-checkpoint-sqlite` | `>=2.0.0` | SQLite 持久化 |
-| `langsmith` | `>=0.1.0` | LangSmith SDK |
-| `chromadb` | `>=0.5.0` | 向量数据库 |
-| `faiss-cpu` | `>=1.8.0` | FAISS |
+| `langchain` | `>=1.4` | 主包：`create_agent`、middleware、messages、tools |
+| `langchain-core` | `>=1.7` | 核心抽象（LCEL / Runnable 在这里） |
+| `langchain-classic` | `>=1.0` | 旧 chains / AgentExecutor / retrievers / hub（遗留代码用） |
+| `langchain-openai` | `>=1.7` | OpenAI 及一切 OpenAI 兼容接口（千问等） |
+| `langchain-community` | `>=0.4` | 社区集成（Loader、BM25 等） |
+| `langgraph` | `>=1.2` | LangGraph |
+| `langgraph-checkpoint-sqlite` | `>=3.0` | SQLite 持久化 |
+| `langsmith` | `>=0.14` | LangSmith SDK |
+| `chromadb` / `langchain-chroma` | `>=1.0` | 向量数据库 |
+| `faiss-cpu` | `>=1.8` | FAISS |
 
 完整依赖见 `requirements.txt`。
+
+> 1.0 的几处大变化：① 构建 agent 用 `from langchain.agents import create_agent`；② `from langchain.chains / retrievers / memory / hub import ...` 都要改成 `from langchain_classic.xxx import ...`；③ `langgraph.prebuilt.create_react_agent` 已弃用；④ LCEL（`prompt | model | parser`）完全没变。
 
 ---
 
@@ -129,8 +129,8 @@ lang-chain-demo/
 ### 1. 创建虚拟环境
 
 ```bash
-cd lang-chain-demo
-python -m venv .venv
+cd 01-langchain
+python -m venv .venv        # 或 conda create -n lc python=3.12
 source .venv/bin/activate   # macOS / Linux
 # .venv\Scripts\activate    # Windows
 pip install -r requirements.txt
@@ -143,11 +143,13 @@ cp .env.example .env
 # 编辑 .env 填入你的 key
 ```
 
-最少需要的 Key：
+至少要配这几个：
 
-- `OPENAI_API_KEY` 或 `ANTHROPIC_API_KEY`：模型调用
-- `LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true`：开启可观测性（LangSmith 章节必需）
-- `TAVILY_API_KEY`：搜索工具（Agent / 多 Agent 章节需要）
+- `OPENAI_API_KEY` + `OPENAI_BASE_URL`：模型调用。demo 默认接千问（OpenAI 兼容接口，`QWEN_MODEL=qwen-flash`，embedding 用 `text-embedding-v4`），要换成 OpenAI 官方接口，改这几个环境变量就行
+- `LANGSMITH_API_KEY` + `LANGSMITH_TRACING=true`：开启可观测性（LangSmith 章节的云端功能需要；离线评估等不需要）
+- `TAVILY_API_KEY`：搜索工具（可选）
+
+> 踩坑：`langchain-openai` 优先读 `OPENAI_API_BASE`（旧变量名），它会覆盖 `OPENAI_BASE_URL`。如果千问返回 401 / 无效令牌，先 `unset OPENAI_API_BASE`。跑用假模型（fake model）的 demo 时不要开 `LANGSMITH_TRACING` / `LANGCHAIN_TRACING_V2`，tracing 会提前消费假模型的预设回复。
 
 ### 3. 运行第一个 demo
 
@@ -155,24 +157,27 @@ cp .env.example .env
 python demos/langchain/01_hello_lcel.py
 ```
 
-应该看到模型的回复输出。如果配置了 LangSmith，到 https://smith.langchain.com 还能看到一条完整的 trace。
+正常会打印出模型的回复。配了 LangSmith 的话，到 https://smith.langchain.com 还能看到这次调用的完整 trace。
+
+demo 里的模型名统一写成 `os.environ.get("QWEN_MODEL", "qwen-flash")`，想换模型只改环境变量，不用改代码。
 
 ---
 
-## 六、本系列写作约定
+## 六、写作约定
 
-为了让读者读得顺、抄得快：
+几条约定，方便阅读和复制代码：
 
-1. **每篇结构统一**：开头一句话总结 → 概念 → 最小可用代码 → 进阶用法 → 生产建议 → 常见坑
-2. **代码全部可独立运行**：每段代码 import 完整，不依赖前文上下文
-3. **代码块前必标语言**：Python 代码块都标 ` ```python `，便于阅读
-4. **关键 API 路径写完整**：例如 `langchain_core.runnables.RunnableLambda` 而不是只写 `RunnableLambda`
-5. **错误示范有标注**：会用 `# ❌ 错误写法` 和 `# ✅ 正确写法` 对比
+1. 每篇大致按这个顺序：开头导语、概念、最小可用代码、进阶用法、生产建议、常见坑
+2. 「本章 demo」和 `demos/` 里的代码 import 写全，可以直接运行；正文里的片段为了简短，会省略前文出现过的 import 和变量
+3. 代码块都标了语言，Python 代码块标 ` ```python `
+4. 错误示范会用 `# ❌ 错误写法` 和 `# ✅ 正确写法` 对照
 
 ---
 
 ## 七、版权与反馈
 
-教程内容对照 LangChain / LangSmith / LangGraph 官方文档编写，所有示例均为原创，可自由复用。
+内容对照 LangChain / LangSmith / LangGraph 官方文档整理，示例代码均为原创，可以随意复用。
 
-开始你的 LangChain 之旅吧 👉 [01-langchain/01-overview.md](docs/01-langchain/01-overview.md)
+问题和勘误可以在 GitHub 仓库提 issue。
+
+从第一篇开始：[LangChain 01：整体架构与生态全景](docs/01-langchain/01-overview.md)

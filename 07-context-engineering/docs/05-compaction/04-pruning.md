@@ -1,12 +1,12 @@
 # CE 05-04：重要性评分与剪枝（Pruning）
 
-> **一句话**：滑动窗口按「时间」一刀切，剪枝按「价值」精挑细选——给每条消息 / 每个内容块打一个重要性分，然后在 token 预算内贪心保留高分的、丢弃低分的。它的核心是评分函数：相关性、时近性、是否被后文引用、是否含决策。剪枝最实用的一招是**工具结果剪枝**——把工具返回的大 JSON / 长日志只留关键字段，这往往是 Agent 上下文里最大的可压缩空间。
+> 滑动窗口按时间一刀切，剪枝则按价值挑选：给每条消息或每个内容块打一个重要性分，在 token 预算内贪心地保留高分的、丢掉低分的。做好剪枝要靠评分函数，常用的维度有相关性、时近性、是否被后文引用、是否包含决策。最实用的一招是工具结果剪枝，把工具返回的大 JSON 或长日志只留关键字段，这通常是 Agent 上下文里最大的可压缩空间。
 
 ---
 
 ## 1. 为什么需要比滑窗更聪明
 
-滑窗的假设是「越新越重要」，但这个假设经常错：
+滑窗默认越新越重要，这个假设经常不成立：
 
 ```
 [轮1]  用户：「整个项目必须兼容 Python 3.8」   ← 极重要，但最老
@@ -16,23 +16,23 @@
 [轮39] 助手：「依赖装好了」                     ← 废话
 ```
 
-滑窗会保住轮 38 的 8000 行垃圾日志（因为新），却把轮 1 的关键约束砍掉（因为老）。**完全砍反了**。剪枝就是要纠正这种「唯时间论」——按内容价值排序，而不是按位置。
+滑窗会留下轮 38 那 8000 行没用的日志（因为新），砍掉轮 1 的关键约束（因为老），正好弄反了。剪枝要纠正的就是这种只看时间的取舍，按内容的价值排序，而不是按位置。
 
 ---
 
 ## 2. 评分维度：什么样的内容该留
 
-给每条消息打一个 0~1 的重要性分，几个核心维度：
+给每条消息打一个 0~1 的重要性分，主要看这几个维度：
 
 | 维度 | 含义 | 高分信号 | 低分信号 |
 |------|------|----------|----------|
-| **相关性** | 和当前任务 / 当前问题的语义相关度 | 与当前 query embedding 相似 | 跑题、闲聊 |
-| **时近性** | 离现在多近 | 最近几轮 | 很久以前 |
-| **被引用** | 后文是否提到 / 依赖它 | 「按之前说的方案…」 | 没人再提 |
-| **含决策/事实** | 是否是决策、约束、具体值 | 「确定用 X」「key 在第 3 行」 | 「好的」「明白」 |
-| **类型权重** | 消息类型本身的价值 | system / 任务定义 | 寒暄、确认 |
+| 相关性 | 和当前任务 / 当前问题的语义相关度 | 与当前 query embedding 相似 | 跑题、闲聊 |
+| 时近性 | 离现在多近 | 最近几轮 | 很久以前 |
+| 被引用 | 后文是否提到 / 依赖它 | 「按之前说的方案…」 | 没人再提 |
+| 含决策/事实 | 是否是决策、约束、具体值 | 「确定用 X」「key 在第 3 行」 | 「好的」「明白」 |
+| 类型权重 | 消息类型本身的价值 | system / 任务定义 | 寒暄、确认 |
 
-实际评分是这些维度的加权和。下面给一个可解释的启发式打分器（不依赖额外模型，纯规则 + embedding 相似度）。
+实际的分数是这些维度的加权和。下面是一个可解释的启发式打分器，不依赖额外模型，只用规则加 embedding 相似度。
 
 ---
 
@@ -45,7 +45,7 @@ import openai
 import tiktoken
 
 client = openai.OpenAI()
-enc = tiktoken.encoding_for_model("gpt-4o")
+enc = tiktoken.get_encoding("o200k_base")
 
 # 含「决策 / 约束 / 事实」信号的关键词
 DECISION_PAT = re.compile(
@@ -110,16 +110,18 @@ def prune(messages: list[dict], query: str, max_tokens: int) -> list[dict]:
 messages = prune(messages, query="当前用户问题", max_tokens=8000)
 ```
 
-要点：
-- **system / 第 0 条强制加权**，确保任务约束不被剪掉（解决第 1 节的「砍反了」问题）。
-- 剪枝**只删不重排**：按分数挑选，但输出仍按原始时间顺序，否则会破坏对话连贯性和 tool 对配对。
-- embedding 用便宜的 `text-embedding-3-small`，评分这种事不值得用贵模型。
+几点说明：
+
+- system 和第 0 条强制加权，任务约束就不会被剪掉，第 1 节那种弄反的情况也就避免了。
+- 剪枝只删不重排：按分数挑选，输出仍按原始时间顺序，否则会打乱对话的连贯性。
+- 示例为了简洁按单条消息打分，逐条删可能留下孤立的 tool 结果（API 会报错）。实际要把 assistant 的 tool_call 和它对应的结果当成一个单元，一起打分、一起留或一起删。
+- embedding 用便宜的 `text-embedding-3-small`，打分这种事不值得用贵模型。
 
 ---
 
-## 4. 工具结果剪枝：Agent 场景的最大金矿
+## 4. 工具结果剪枝：Agent 场景里收益最大的一招
 
-Agent 上下文里最肥的可压缩空间是**工具返回结果**。一次 API 调用返回的 JSON 可能有几千 token，但模型真正要用的往往就那几个字段。与其整段留着或整段删掉，不如**结构化剪枝**——只留关键字段：
+Agent 上下文里可压缩空间最大的是工具返回结果。一次 API 调用返回的 JSON 可能有几千 token，模型要用的往往就那几个字段。整段留着太浪费，整段删掉又会丢信息，更合适的是做结构化剪枝，只留关键字段：
 
 ```python
 import json
@@ -149,10 +151,11 @@ def prune_tool_result(raw: str, keep_keys: list[str], max_items: int = 5) -> str
 # 例：一个返回 200 个用户、每个 20 字段的 API 结果
 raw = '[{"id":1,"name":"A","email":"...","内部字段...":"一堆"}, ...]'  # 8000 token
 slim = prune_tool_result(raw, keep_keys=["id", "name"], max_items=5)
-# ✅ 压成 [{"id":1,"name":"A"},...] 几十 token，模型要的信息一个不少
+# ✅ 压成前 5 项的 [{"id":1,"name":"A"},...]，几十 token；后面 195 项没了，
+#    任务需要全量时别截前 N 项，至少附上「共 200 项，已截断」
 ```
 
-剪枝工具结果的几条经验：
+不同类型的工具输出，剪法不一样：
 
 | 工具输出类型 | 剪枝策略 |
 |--------------|----------|
@@ -162,13 +165,24 @@ slim = prune_tool_result(raw, keep_keys=["id", "name"], max_items=5)
 | 网页抓取 | 抽正文，去导航/广告/脚本 |
 | SQL 结果 | 限 `LIMIT`，或只回聚合结果 |
 
-**最佳实践是在工具返回时就剪**（源头剪枝），而不是等塞进上下文后再剪——越早剪，下游每一轮都受益。
+**最好在工具返回时就剪**，也就是在源头剪，不要等塞进上下文之后再剪。剪得越早，后面每一轮都跟着受益。
 
 ---
 
-## 5. 剪枝 vs 滑窗 vs 摘要
+## 5. 平台和框架内置的工具结果清理
 
-三者不是竞品，是不同精度的工具：
+清掉旧工具结果、留一个占位符，这件事现在已经有现成实现，语义和上面手写的基本一致：
+
+- Anthropic context editing：`context_management={"edits": [{"type": "clear_tool_uses_20250919", "trigger": {"type": "input_tokens", "value": 30000}, "keep": {"type": "tool_uses", "value": 3}, "clear_at_least": {"type": "input_tokens", "value": 5000}, "exclude_tools": ["web_search"]}]}`，需要 beta header `context-management-2025-06-27`。清理在服务端做，客户端仍保留完整历史；响应里的 `context_management.applied_edits` 会告诉你清了多少。默认 `trigger` 是 100,000 input token，保留最近 3 组。`clear_at_least` 用来权衡清掉这点内容值不值得丢一次 prompt cache。（语法按官方文档整理，运行需要 Anthropic API key）
+- LangChain 1.x：`ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=50000, keep=5, exclude_tools=[...], placeholder="[old result removed]")])`。
+
+什么时候还要自己写：想按重要性而不是时间顺序清理（本篇 §2、§3），或者要给不同工具设不同的保留策略。
+
+---
+
+## 6. 剪枝 vs 滑窗 vs 摘要
+
+三者精度不同，常常配合使用：
 
 | 维度 | 滑动窗口 | 剪枝 | 摘要 |
 |------|----------|------|------|
@@ -178,31 +192,31 @@ slim = prune_tool_result(raw, keep_keys=["id", "name"], max_items=5)
 | 保留形式 | 原文 | 原文（选择性） | 改写后的摘要 |
 | 最擅长 | 无远期依赖的短任务 | 取舍散落各处的关键信息 / 剪工具结果 | 把长历史压成梗概 |
 
-组合拳：**工具结果在源头剪枝 → 旧历史摘要 → 近期滑窗保原文**，三层叠加是生产级 Agent 的常见配置。
+生产级 Agent 的常见配置是三层叠加：工具结果在源头剪枝，旧历史做摘要，近期用滑窗保留原文。
 
 ---
 
-## 6. 常见误区
+## 7. 常见误区
 
-| 误区 | 真相 |
+| 误区 | 实际情况 |
 |------|------|
 | 「剪枝就是按时间删旧的」 | 那是滑窗；剪枝按价值，老但重要的要留 |
 | 「评分必须用 LLM」 | 规则 + embedding 相似度的启发式打分通常够用且便宜 |
 | 「剪完可以重排消息」 | 不行，会破坏连贯性和 tool 对；只删不重排 |
-| 「工具结果整段保留才安全」 | 大 JSON 90% 是噪声，源头剪字段省巨量 token |
-| 「剪掉了就找不回」 | 剪枝前可落盘原文，需要时检索回来 |
+| 「工具结果整段保留才安全」 | 大 JSON 里大部分是噪声，在源头剪字段能省下大量 token |
+| 「剪掉了就找不回」 | 剪枝前可以把原文落盘，需要时检索回来 |
 
 ---
 
-## 7. 下一步
+## 8. 下一步
 
-- 📖 何时触发剪枝 / 压缩：阈值与时机 → [05-when-to-compact.md](./05-when-to-compact.md)
-- 📖 摘要式压缩：剪不动的旧历史就摘要 → [02-summarization.md](./02-summarization.md)
-- 📖 滑动窗口：剪枝的「唯时间」简化版 → [03-sliding-window.md](./03-sliding-window.md)
-- 📖 相关性评分背后的 embedding 检索 → [../03-retrieval/01-rag-as-context.md](../03-retrieval/01-rag-as-context.md)
-- 📖 Agent 工具结果如何累积撑爆窗口 → [../06-agent-context/01-accumulation.md](../06-agent-context/01-accumulation.md)
+- 剪枝和压缩什么时候触发：[何时触发压缩](./05-when-to-compact.md)
+- 剪不动的旧历史就做摘要：[摘要式压缩](./02-summarization.md)
+- 只看时间的简化版：[滑动窗口与截断](./03-sliding-window.md)
+- 相关性评分背后的 embedding 检索：[RAG 作为上下文来源](../03-retrieval/01-rag-as-context.md)
+- Agent 的工具结果如何累积撑爆窗口：[Agent 的上下文累积问题](../06-agent-context/01-accumulation.md)
 
 ## 参考资料
 
 - Anthropic, "Effective context engineering for AI agents"（工具结果裁剪建议）: https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents
-- OpenAI Embeddings 文档（`text-embedding-3-small`）: https://platform.openai.com/docs/guides/embeddings
+- OpenAI Embeddings 文档（`text-embedding-3-small`）: https://developers.openai.com/api/docs/guides/embeddings

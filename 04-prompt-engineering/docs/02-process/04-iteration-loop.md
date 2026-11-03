@@ -1,6 +1,6 @@
-# PE Process 04：迭代闭环 —— 看失败 → 假设 → 改 → 验证
+# PE Process 04：迭代闭环（看失败、提假设、修改、验证）
 
-> **一句话**：Stage 4 是 PE 最耗时的环节——核心是一个严格的循环：**只看失败、只改一处、必须回归**。把这个循环走十次，prompt 通过率从 60% 涨到 90% 比"一次性想出完美 prompt" 现实得多。
+> Stage 4 是 PE 里最花时间的一步。它是一个有严格规矩的循环：只盯失败样本，每次只改一处，每次都跑回归。老老实实把这个循环走上十轮，把通过率从 60% 推到 90%，比指望一次想出完美的 prompt 现实得多。
 
 ---
 
@@ -34,15 +34,15 @@
 
 ---
 
-## 2. Step 1：把失败"归类"
+## 2. Step 1：把失败归类
 
-20 条失败样本一字排开你会无从下手——必须先聚类。
+20 条失败样本一字排开，很难下手，得先聚类。
 
 ### 怎么聚类
 
-人工方式：直接拉 spreadsheet 看每条的 errors 字段，按"看着像一类"归。
+人工做的话，拉一张 spreadsheet，逐条看 errors 字段，看着像一类的放一起。
 
-LLM 辅助：
+也可以让 LLM 帮忙：
 
 ```python
 def cluster_failures(failures: list[dict]) -> dict:
@@ -64,12 +64,11 @@ def cluster_failures(failures: list[dict]) -> dict:
 返回 JSON: [{{...}}, ...]
 """
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
-        temperature=0,
+        model="claude-sonnet-5-5",
         max_tokens=2000,
         messages=[{"role": "user", "content": prompt}],
     )
-    return json.loads(resp.content[0].text)
+    return json.loads(resp.content[-1].text)
 ```
 
 输出大致这样：
@@ -94,11 +93,11 @@ def cluster_failures(failures: list[dict]) -> dict:
 
 ---
 
-## 3. Step 2：提假设——但只针对最大簇
+## 3. Step 2：提假设，只针对最大的簇
 
-很多人看到 5 个失败簇，想一次都修——结果改 5 处，效果不可分析。
+看到 5 个失败簇，很多人想一次全修好，结果改了 5 处，效果没法分析。
 
-**铁律**：每轮迭代只针对**最大的那个簇**。
+每轮迭代只处理最大的那个簇。
 
 ```
 失败聚类:
@@ -108,24 +107,19 @@ def cluster_failures(failures: list[dict]) -> dict:
 
 针对"长度超限"提假设:
   A. 长度约束在中间被忽视 → 移到末尾 + 加 "重要"
-  B. 模型没理解"字"的概念（按 token 算了）→ 改成 "10-30 字（汉字/英文单词）"
+  B. 模型没理解"字"的概念（按 token 算了）→ 改成 "5-20 个汉字（英文按单词算）"
   C. 示例里有 22 字的标题做了正例 → 改示例
 
 挑 A 最容易也最便宜，先试。
 ```
 
-提假设的**好习惯**：
-
-- 假设要**具体**："加约束" → "在末尾加'重要：长度 5-20 字'"
-- 假设要**可验证**：能用 evalset 测出来
-- 假设要**便宜**：每轮成本最低先试
-- 一次**一个**假设，不要绑
+好的假设要具体，"加约束"太笼统，"在末尾加'重要：长度 5-20 字'"才算。它要能用 evalset 验证出来，也要便宜，成本最低的先试。每次只验证一个假设，别几个捆在一起。
 
 ---
 
-## 4. Step 3：改 prompt——只改一处
+## 4. Step 3：改 prompt，只改一处
 
-最难做到的一条：忍住不"顺便"改别的。
+这一条最难做到：忍住，别顺手改别的地方。
 
 ```python
 # v_n
@@ -155,11 +149,11 @@ prompt_vn_plus_1 = """
 """
 ```
 
-**别**顺便改第 2 处约束顺序、第 3 处加 few-shot 示例。
+别顺手调整约束的顺序，也别顺便加个 few-shot 示例。
 
-### "忍不住"怎么办
+### 忍不住想改怎么办
 
-如果脑子里冒出"诶这里顺手也改一下"——记到 TODO 文档：
+冒出"这里顺手也改一下"的念头时，把它记到 TODO 里：
 
 ```markdown
 # Prompt TODO (随手记)
@@ -168,45 +162,40 @@ prompt_vn_plus_1 = """
 - 试试把示例和约束顺序换一下
 ```
 
-下一轮、再下一轮、再下一轮——一次解决一个。
+留到后面几轮，一轮解决一个。
 
 ---
 
 ## 5. Step 4：跑同一份 evalset
 
-evalset 不变 + 只 prompt 变 → 唯一变量。
+evalset 不动，只有 prompt 在变，这样它才是唯一的变量。
 
 ```bash
 python eval_runner.py prompts/v1.txt evalset/v1.0.jsonl > results/v1.json
 python eval_runner.py prompts/v2.txt evalset/v1.0.jsonl > results/v2.json
 ```
 
-注意：
-
-- ❌ 一边改 prompt 一边改 evalset
-- ❌ 一边改 prompt 一边换模型
-- ❌ 一边改 prompt 一边调 temperature
-- ✅ 只 prompt 变，其他全冻结
+改 prompt 的同时，不要改 evalset，不要换模型，也不要调 temperature。除了 prompt，其他全部冻结。
 
 ---
 
 ## 6. Step 5：三向比较
 
-不要只看"总通过率从 80 → 85"——这只告诉你净变化，不告诉你**结构**。
+别只看总通过率从 80 涨到 85。这个数只反映净变化，看不出变化是怎么构成的。
 
-### 必看三个数
+### 必看的三个数
 
 ```python
 def compare(prev: dict, curr: dict) -> dict:
-    prev_pass = {f["id"] for f in prev["failures"]}
-    curr_pass = {f["id"] for f in curr["failures"]}
+    prev_failed = {f["id"] for f in prev["failures"]}
+    curr_failed = {f["id"] for f in curr["failures"]}
 
     # 之前失败现在通过了
-    fixed = prev_pass - curr_pass
+    fixed = prev_failed - curr_failed
     # 之前通过现在挂了（regression！）
-    broken = curr_pass - prev_pass
+    broken = curr_failed - prev_failed
     # 两次都失败
-    still_failing = prev_pass & curr_pass
+    still_failing = prev_failed & curr_failed
 
     return {
         "fixed": list(fixed),
@@ -220,20 +209,16 @@ def compare(prev: dict, curr: dict) -> dict:
 
 | fixed | broken | 决策 |
 |-------|--------|------|
-| 6 | 0 | 完美，接受 ✅ |
-| 6 | 1 | 看 broken 那条严不严重；多半接受 |
-| 6 | 3 | 互有胜负——分析 trade-off |
-| 0 | 0 | 假设不成立；不要 merge |
-| 0 | 3 | 改坏了，回滚 ❌ |
+| 6 | 0 | 理想情况，接受 |
+| 6 | 1 | 看 broken 那条严不严重，多半接受 |
+| 6 | 3 | 互有胜负，分析取舍 |
+| 0 | 0 | 假设不成立，不要 merge |
+| 0 | 3 | 改坏了，回滚 |
 | 3 | 6 | 改坏了，回滚 |
 
-### Regression 是大警报
+### 出现 regression 要警惕
 
-`broken` > 0 意味着改 prompt 让原来好的变差了。这种情况要：
-
-1. **看 broken 的样本** —— 是不是某种 happy path 类被牺牲了
-2. **加进 regression set** —— 防止未来同类问题
-3. **重新假设** —— 也许改的方向不对
+`broken` > 0，说明这次改动把原来正常的样本改坏了。先看 broken 的样本，是不是某一类 happy path 被牺牲了；再把它们加进 regression set，防止同类问题以后再出现；最后重新审视假设，也许改的方向就不对。
 
 ---
 
@@ -248,8 +233,8 @@ def compare(prev: dict, curr: dict) -> dict:
 - 改了什么：末尾加"重要：长度 5-20 字"
 - 假设：长度约束在中间被忽视
 - evalset: v1.0
-- 结果：78% → 84%
-  - fixed: s003, s014, s021, s033, s045
+- 结果：78% → 84%（50 条，39 → 42）
+  - fixed: s003, s014, s021, s033
   - broken: s019（之前通过的，现在长度截断把 keyword 切掉了）
 - 决策：接受；s019 加入 regression set 下轮处理
 
@@ -258,13 +243,13 @@ def compare(prev: dict, curr: dict) -> dict:
 - ...
 ```
 
-CHANGELOG **不是**给老板看的——是给三个月后回来排查的你自己看的。
+CHANGELOG 主要的读者是几个月后回来排查问题的人：哪一版改了什么、为什么改、指标怎么变，都要能从这里查到。
 
 ---
 
 ## 8. 一轮迭代的时间预算
 
-一个**熟练**的迭代轮次：
+熟练以后，一轮迭代大概是这样：
 
 | 步骤 | 时间 |
 |------|------|
@@ -273,17 +258,17 @@ CHANGELOG **不是**给老板看的——是给三个月后回来排查的你自
 | 改 prompt | 5-10 分钟 |
 | 跑 evalset（50 条 + Haiku） | 1-3 分钟 |
 | 看结果 + 决策 + CHANGELOG | 10 分钟 |
-| **合计** | **30-60 分钟** |
+| 合计 | 30-60 分钟 |
 
-一天能跑 5-8 轮。从 60% 通过率到 90% 通常 5-15 轮足够。
+一天能跑 5 到 8 轮。通过率从 60% 到 90%，通常 5 到 15 轮就够。
 
-如果一轮花你 2 小时——多半是没把 evalset 跑起来自动化。
+如果一轮要花 2 小时，多半是评测还没自动化。
 
 ---
 
-## 9. 关键技巧：用 git 管理迭代
+## 9. 用 git 管理迭代
 
-每轮迭代是一个 commit：
+每轮迭代对应一个 commit：
 
 ```bash
 git checkout -b prompt/feedback-classifier-iter
@@ -295,14 +280,13 @@ git add results/v0.3.0.json
 git commit -m "v0.3.0 results"
 ```
 
-任何一版改坏了：`git revert` 秒级回滚。
+哪一版改坏了，`git revert` 就能马上回滚。
 
 ---
 
 ## 10. 完整 demo：迭代一轮
 
 ```python
-# demos/process/04_iteration_one_round.py
 """模拟一轮 PE 迭代：读 evalset、跑 v1 / v2、比较、给建议"""
 import json
 import sys
@@ -376,7 +360,7 @@ if __name__ == "__main__":
     main()
 ```
 
-跑：
+把上面的代码保存为 `demos/process/04_iteration_one_round.py` 后运行：
 
 ```bash
 python demos/process/04_iteration_one_round.py results/v1.json results/v2.json
@@ -388,24 +372,19 @@ python demos/process/04_iteration_one_round.py results/v1.json results/v2.json
 
 | 坑 | 后果 |
 |----|------|
-| **一次改多处** | 不知道哪一处的功劳 / 锅 |
-| **不看 regression** | 隐性退化累积，整体趋势好但用户感知差 |
-| **不写 CHANGELOG** | 三个月后回来不知道当时为什么改 |
-| **失败聚类时人工随便分** | 假设没针对性，改了没用 |
-| **迭代到 92% 死磕到 99%** | 投入产出比急剧下降，详见 [05-when-to-stop.md](./05-when-to-stop.md) |
-| **evalset 一边迭代一边补** | 评测变量改了，前后不可比 |
-| **不版本化 prompt** | 改坏了无法回滚 |
+| 一次改好几处 | 分不清是哪一处起了作用，或者惹了祸 |
+| 不看 regression | 隐性退化越积越多，整体数字在涨，用户感受却变差 |
+| 不写 CHANGELOG | 三个月后回来，不知道当初为什么这么改 |
+| 失败聚类时随手乱分 | 假设没有针对性，改了也没用 |
+| 到了 92% 还死磕 99% | 投入产出比急剧下降，见 [何时停止迭代](./05-when-to-stop.md) |
+| 一边迭代一边补 evalset | 评测本身变了，前后结果没法比 |
+| prompt 没做版本化 | 改坏了没法回滚 |
 
 ---
 
 ## 12. 下一步
 
-- 📖 何时停止迭代 → [05-when-to-stop.md](./05-when-to-stop.md)
-- 📖 反模式合集 → [06-anti-patterns.md](./06-anti-patterns.md)
-- 📖 实战完整闭环 → [08-practice/01-build-classifier.md](../08-practice/01-build-classifier.md)
-- 📖 各种技法（用于"提假设"时挑工具） → 03-techniques / 04-advanced
-
-## 参考资料
-
-- "How to evaluate LLMs in production": https://www.langchain.com/blog/
-- "Iterating on prompts": OpenAI Cookbook
+- [何时停止迭代](./05-when-to-stop.md)
+- [反模式与失败案例](./06-anti-patterns.md)
+- [从需求到一个分类器（完整闭环）](../08-practice/01-build-classifier.md)
+- 提假设时可用的各种技法，见技法章（从 [PE Technique 01：Zero-shot 与 Few-shot，什么时候需要示例](../03-techniques/01-zero-vs-few-shot.md) 开始）和进阶章（从 [PE Advanced 01：ReAct（Reasoning + Acting）](../04-advanced/01-react.md) 开始）

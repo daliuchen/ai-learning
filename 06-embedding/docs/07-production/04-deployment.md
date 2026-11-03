@@ -1,6 +1,6 @@
 # 部署形态选型
 
-> **一句话**：embedding service 不一定是"独立 API 服务"——按规模选 **直接在应用进程 / TEI sidecar / 独立微服务 / 全托管 API** 四种形态，按需选。
+> embedding 服务不一定要做成独立的 API 服务。按规模不同，有四种部署方式可选：直接放在应用进程里、TEI sidecar、独立微服务、全托管 API。这篇比较它们的优缺点和延迟，最后给一个 TEI 的完整部署示例。
 
 ---
 
@@ -8,10 +8,10 @@
 
 | 形态 | 例子 | 适合 |
 |------|------|------|
-| **App 进程内** | 直接 `sentence_transformers.encode` | 单机 / 低 QPS / 简单 |
-| **Sidecar / 共享** | TEI / vLLM 同主机 | 多服务共享 |
-| **独立微服务** | Embedding API Service | 多业务调用、集中管理 |
-| **全托管 API** | OpenAI / Cohere / Voyage | 不想运维 |
+| App 进程内 | 直接 `sentence_transformers.encode` | 单机、低 QPS、追求简单 |
+| Sidecar / 共享 | TEI / vLLM 同主机 | 多个服务共享 |
+| 独立微服务 | Embedding API Service | 多业务调用、集中管理 |
+| 全托管 API | OpenAI / Cohere / Voyage | 不想运维 |
 
 ---
 
@@ -33,33 +33,23 @@ def embed(text: str):
     return {"vector": vec}
 ```
 
-**优**：
-
-- 部署最简单
-- 无网络开销
-- 一份代码 / Dockerfile
-
-**劣**：
-
-- 多服务复用难
-- 模型加载在每个进程
-- 升级模型要重启所有服务
+这种方式部署最简单，没有网络开销，一份代码、一个 Dockerfile 就够了。问题在于多个服务很难复用，每个进程都要各自加载一份模型，升级模型时所有服务都得重启。
 
 ---
 
 ## 3. Text Embeddings Inference (TEI) Sidecar
 
-HuggingFace 官方推理服务，专为 embedding 优化：
+TEI 是 HuggingFace 官方的推理服务，专门为 embedding 做了优化：
 
 ```bash
 docker run -p 8080:80 --gpus all \
   -v ~/.cache/huggingface:/data \
-  ghcr.io/huggingface/text-embeddings-inference:1.5 \
+  ghcr.io/huggingface/text-embeddings-inference:1.8 \
   --model-id BAAI/bge-large-zh-v1.5 \
   --max-batch-tokens 32768
 ```
 
-App 通过 HTTP 调：
+应用通过 HTTP 调用：
 
 ```python
 import httpx
@@ -74,16 +64,7 @@ async def embed(texts: list[str]):
         return resp.json()
 ```
 
-**优**：
-
-- dynamic batching 自动批
-- GPU 跑满
-- 多 app 共享同一 TEI
-- 升级模型只换 TEI
-
-**劣**：
-
-- 网络一跳（同主机 ~1ms 可忽略）
+TEI 自带 dynamic batching，能把 GPU 跑满；多个应用可以共享同一个 TEI，升级模型时也只需要换 TEI。代价只是多一跳网络，同主机大约 1ms，可以忽略。
 
 ---
 
@@ -98,11 +79,17 @@ metadata:
   name: embedding-service
 spec:
   replicas: 3
+  selector:
+    matchLabels:
+      app: embedding-service
   template:
+    metadata:
+      labels:
+        app: embedding-service
     spec:
       containers:
       - name: tei
-        image: ghcr.io/huggingface/text-embeddings-inference:1.5
+        image: ghcr.io/huggingface/text-embeddings-inference:1.8
         args:
         - --model-id=BAAI/bge-large-zh-v1.5
         - --max-batch-tokens=65536
@@ -129,22 +116,16 @@ spec:
 
 ```python
 # 应用调
+import httpx
+
 EMBED_URL = "http://embedding-service.default.svc.cluster.local/embed"
 
 async def embed(texts):
-    return (await httpx.post(EMBED_URL, json={"inputs": texts})).json()
+    async with httpx.AsyncClient() as client:
+        return (await client.post(EMBED_URL, json={"inputs": texts})).json()
 ```
 
-**优**：
-
-- 多业务方共用
-- 独立扩缩容
-- 模型升级影响小
-
-**劣**：
-
-- 多一跳网络
-- 要监控 / 容灾
+独立服务可以让多个业务方共用，能单独扩缩容，模型升级对业务的影响也小。缺点是多一跳网络，并且要自己负责监控和容灾。
 
 ---
 
@@ -162,17 +143,7 @@ async def embed(texts):
     return [d.embedding for d in resp.data]
 ```
 
-**优**：
-
-- 0 运维
-- 跟 SDK 集成最简
-- 模型自动更新
-
-**劣**：
-
-- 贵（量大不划算）
-- 数据出公司（合规问题）
-- 跨地区延迟
+托管 API 不用运维，和 SDK 集成最简单，模型也会自动更新。缺点有三个：量大时不划算；数据要传出公司，可能有合规问题；跨地区调用有延迟。
 
 ---
 
@@ -195,7 +166,7 @@ async def embed(texts):
 
 ---
 
-## 7. Latency 对比（embed 单条 100 字）
+## 7. Latency 对比（embed 单条 100 字，示意量级）
 
 | 形态 | Latency |
 |------|---------|
@@ -206,7 +177,7 @@ async def embed(texts):
 | OpenAI API | 150-400ms |
 | Cohere / Voyage API | 100-300ms |
 
-自部署 GPU 比 API 快 10-30 倍。
+自部署在 GPU 上，延迟比调外部 API 低一个数量级以上，差距主要在网络往返上。
 
 ---
 
@@ -217,7 +188,7 @@ async def embed(texts):
 ```yaml
 services:
   tei:
-    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    image: ghcr.io/huggingface/text-embeddings-inference:1.8
     ports:
       - "8080:80"
     volumes:
@@ -235,7 +206,7 @@ services:
       - --pooling=cls
   
   reranker:
-    image: ghcr.io/huggingface/text-embeddings-inference:1.5
+    image: ghcr.io/huggingface/text-embeddings-inference:1.8
     ports:
       - "8081:80"
     volumes:
@@ -284,16 +255,16 @@ async def rerank(query, docs):
 
 ## 9. CPU 部署
 
-没 GPU 也行（小模型 / 量化）：
+没有 GPU 也能跑，前提是用小模型或量化模型：
 
 ```bash
 docker run -p 8080:80 \
-  ghcr.io/huggingface/text-embeddings-inference:cpu-1.5 \
+  ghcr.io/huggingface/text-embeddings-inference:cpu-1.8 \
   --model-id sentence-transformers/all-MiniLM-L6-v2 \
   --max-batch-tokens 16384
 ```
 
-ONNX / INT8 量化能进一步提速。
+用 ONNX 或 INT8 量化还能再快一些。
 
 ---
 
@@ -321,30 +292,31 @@ spec:
         averageUtilization: 70
 ```
 
+上面按 CPU 利用率扩缩容只是最简单的写法。GPU 推理时 CPU 利用率不能反映真实负载，更合适的是按 QPS、请求排队时间这类自定义指标（Prometheus Adapter / KEDA）扩缩容。
+
 ---
 
 ## 11. Failover
 
 ```python
+# 备用节点必须跑同一个模型、同一个版本：不同模型的向量不在一个空间里，
+# 拿 OpenAI 的 query 向量去查 bge 建的索引，结果没有意义
 PROVIDERS = [
-    ("local_tei", "http://embedding-service/embed"),
-    ("openai", openai_embed),
+    ("tei_primary", "http://embedding-service/embed"),
+    ("tei_backup", "http://embedding-service.backup-cluster/embed"),   # 另一个集群 / 可用区
 ]
 
 
 async def embed_with_failover(texts):
-    for name, provider in PROVIDERS:
+    for name, url in PROVIDERS:
         try:
-            if name == "openai":
-                return await provider(texts)
-            else:
-                return await httpx_call(provider, texts)
+            return await httpx_call(url, texts)
         except Exception as e:
-            log.warn(f"{name} failed: {e}")
+            log.warning(f"{name} failed: {e}")
     raise RuntimeError("all embedding providers failed")
 ```
 
-主用自部署，挂了切 OpenAI。
+平时走主集群，挂了切到备用集群。备用节点只能是同一个模型：如果索引是用 OpenAI 的 text-embedding-3-small 建的，兜底也只能是它（比如换一个 region 或 Azure OpenAI 上的同名部署）；跨模型切换意味着整库重建索引，做不到"挂了临时切"。
 
 ---
 
@@ -352,15 +324,15 @@ async def embed_with_failover(texts):
 
 | 坑 | 解 |
 |----|----|
-| App 进程内每次重启加载模型慢 | warmup + 进程常驻 |
-| TEI 跑老 model 不兼容新版 | 锁定 image tag |
-| K8s GPU node 不够 | nodeSelector + tolerations |
-| OpenAI 限流没 fallback | failover 链路 |
+| 进程内部署，每次重启加载模型都很慢 | 做 warmup，让进程常驻 |
+| TEI 升级后老模型不兼容 | 锁定 image tag |
+| K8s 的 GPU 节点不够 | nodeSelector + tolerations |
+| embedding 服务挂了没有兜底 | 准备一套跑同一模型的备用节点，不能临时切到别的模型 |
 
 ---
 
 ## 13. 下一步
 
-- 📖 监控 → [05-monitoring.md](./05-monitoring.md)
-- 📖 完整 RAG → [08-applications/01-full-rag.md](../08-applications/01-full-rag.md)
-- 📖 跟 LLM 服务一起部署 → [05-openai-agents-sdk/07-production/01-deployment.md](../../../05-openai-agents-sdk/docs/07-production/01-deployment.md)
+- [监控：召回率 / Latency / Cost](./05-monitoring.md)
+- [完整 RAG Pipeline 实战](../08-applications/01-full-rag.md)
+- 和 LLM 服务一起部署：[OpenAI Agents SDK 手册的部署形态选型](../../../05-openai-agents-sdk/docs/07-production/01-deployment.md)

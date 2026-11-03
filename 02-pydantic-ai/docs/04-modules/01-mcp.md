@@ -1,171 +1,171 @@
 # Pydantic AI 04-01：MCP（Model Context Protocol）集成
 
-> **一句话**：MCP 是 Anthropic 主导、Pydantic / OpenAI / Google 都已跟进的"LLM 工具调用统一协议"，Pydantic AI 既能当 **client**（让 Agent 调用别人的 MCP server），也能当 **server**（把 Agent 暴露成 MCP 服务），三种传输方式 Stdio / Streamable HTTP / SSE 都内置。
+> MCP 是一套让 LLM 调用外部工具的统一协议。Pydantic AI 在两头都用得上：作为 client，Agent 通过 `MCPToolset` 或 `MCP` capability 调用别人的 MCP server；作为 server 一侧，可以在 FastMCP 写的 server 里调用 Agent，或者用 MCP sampling 借用 client 的模型。传输方式是 Stdio 和 Streamable HTTP，SSE 已经弃用。
+
+以 `pydantic-ai 2.64.0` 为准。客户端从 `MCPServerStdio` / `MCPServerStreamableHTTP` / `MCPServerSSE` 换成了基于 FastMCP 的 `MCPToolset`；写 server 改用 `from fastmcp import FastMCP`。
 
 ---
 
 ## 1. 为什么会有 MCP
 
-写过 Agent 工具的同学都遇到过这样的场景：
-
-- 想让 Agent 能读本地文件 → 自己写一个 `read_file` tool
-- 想让 Agent 能查 GitHub Issue → 自己写一个 `github_search` tool
-- 想让 Agent 能控制浏览器 → 自己再写一个 `browser_click` tool
-
-每接一个外部能力都要在你的 Agent 代码里加一个 `@agent.tool`，工具数量一多，**Agent 代码就成了万能工具仓库**。更糟的是这些工具完全不通用——你给 Pydantic AI 写的 tool，换 LangChain 写一份，换 Claude Code 又得写一份。
-
-MCP（Model Context Protocol）做的事就是：
-
-> 把"工具"这件事**从 Agent 里抽离**，定义一个**标准协议**，让任何 server 都可以发布自己的 tool / resource / prompt，任何 client（Agent / IDE / CLI）都可以用同一套协议接入。
-
-你可以把它类比成 LSP（Language Server Protocol）：以前 VSCode、Vim、Emacs 各自实现 Python 智能提示，现在大家都用同一个 `pylsp`。MCP 之于 LLM 工具，正是 LSP 之于 IDE。
-
----
+每接一个外部能力（读文件、查 GitHub、控制浏览器），都要在 Agent 代码里加一个 `@agent.tool`。工具一多，Agent 代码就变成了一个什么都往里放的工具仓库，而且这些工具没法复用：给 Pydantic AI 写的，换到 LangChain 或 Claude Code 还得再写一份。MCP 把工具从 Agent 里拆出来，定义了一套标准协议：任何 server 都可以发布 tool、resource、prompt，任何 client（Agent、IDE、CLI）用同一套协议接入。可以拿 LSP 和 IDE 的关系来类比。
 
 ## 2. MCP vs 普通 tool
 
 | 维度 | `@agent.tool` 本地工具 | MCP 工具 |
 |------|----------------------|---------|
 | 部署方式 | 跟 Agent 同进程 | 独立进程（stdio）或独立服务（HTTP） |
-| 跨语言 | ❌ 必须 Python | ✅ 任何语言都行（官方有 TS/Python/Rust SDK） |
-| 跨框架复用 | ❌ Pydantic AI 专属 | ✅ Claude Code / Cursor / Cline 都能用 |
+| 跨语言 | 不行，必须 Python | 任何语言 |
+| 跨框架复用 | 不行 | 可以，Claude Code / Cursor / 各种框架 |
 | 发现机制 | 写死在代码 | Client 启动时 `list_tools()` 动态拉取 |
 | 适合场景 | 紧耦合业务工具 | 通用能力（FS、Git、DB、Browser…） |
 
-**一句话**：业务专属、轻量、跟 deps 紧耦合的工具，仍然用 `@agent.tool`；通用能力（文件系统、浏览器、Slack…）能用现成 MCP server 就别自己写。
+业务专属、轻量、和 deps 紧耦合的工具仍然用 `@agent.tool`；通用能力如果已经有现成的 MCP server，就别自己写。
 
 ---
 
-## 3. Pydantic AI 作 Client
+## 3. Pydantic AI 作 Client：`MCPToolset`
 
-Pydantic AI 提供三个 `MCPServer` 子类，分别对应三种传输方式：
-
-```python
-from pydantic_ai.mcp import (
-    MCPServerStdio,           # 子进程 + stdio 双向管道
-    MCPServerStreamableHTTP,  # 推荐的 HTTP 传输（流式响应）
-    MCPServerSSE,             # 旧版 HTTP+SSE，逐步淘汰
-)
+```bash
+pip install "pydantic-ai-slim[mcp]"      # 装 FastMCP 4（自己写 server 还要 pip install fastmcp）
 ```
 
-它们都实现了 `pydantic_ai.toolsets.AbstractToolset`，注册到 Agent 只需要传 `toolsets=[...]`：
+`MCPToolset` 的第一个参数可以是：
+
+- URL 字符串（Streamable HTTP；以 `/sse` 结尾时走已弃用的 SSE）
+- 本地 Python / Node 脚本路径（走 stdio）
+- FastMCP 的 transport（如 `StdioTransport`）
+- 预先构造好的 `fastmcp.Client`
+- 同一进程里的 FastMCP server 对象（用于测试或单进程部署，没有网络开销）
+
+它本身就是一个 toolset，直接放进 `toolsets=[...]`：
 
 ```python
+from fastmcp.client.transports import StdioTransport
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.mcp import MCPToolset
 
-server = MCPServerStdio(
-    "npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-)
+# stdio：子进程 + 双向管道
+fs = MCPToolset(StdioTransport(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]))
+# Streamable HTTP
+calc = MCPToolset("http://localhost:8000/mcp")
 
-agent = Agent("openai:gpt-4o-mini", toolsets=[server])
+agent = Agent("openai-chat:qwen-flash", toolsets=[fs, calc])
 
 async def main() -> None:
-    async with agent:                       # 进入时启动 server，退出时关闭
+    async with agent:                       # 进入时连接所有 MCP server，退出时关闭
         result = await agent.run("/tmp 下有哪些文件？")
         print(result.output)
 ```
 
-### 3.1 三种传输方式怎么选
+### 3.1 更高层：`MCP` capability（官方推荐）
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import MCP
+
+agent = Agent(
+    "openai:gpt-6.1-sol",
+    capabilities=[
+        MCP("https://mcp.example.com/api"),                       # 本地连接（凭证、hooks、tracing 都在你手里）
+        MCP("https://mcp.example.com/other", native=True),        # 让模型厂商去连；不支持就回退本地
+        MCP(local=my_fastmcp_client),                             # 任意 MCPToolset 输入
+    ],
+)
+```
+
+不给 `id=` 时，capability 用 URL 的主机名当 id。多个 server 的工具重名时，用 `tool_prefix="weather"` 或 `tool_prefix=True`（以 `id` 作前缀）。如果每个用户要用自己的凭证，`authorization_token` / `headers` 可以传一个接收 `RunContext` 的函数，每次运行时现算。
+
+### 3.2 三种传输方式怎么选
 
 | 传输 | 何时用 | 优点 | 缺点 |
 |------|-------|------|------|
-| **Stdio** | 本机工具、个人开发 | 零网络配置、安全 | 单机、子进程模型 |
-| **Streamable HTTP** | 团队/线上部署、跨机器 | 多客户端、可水平扩展、状态可恢复 | 需要部署 |
-| **SSE** | 兼容老 server | — | 已 deprecated，能避就避 |
+| Stdio | 本机工具、个人开发 | 不用配网络、安全 | 单机、子进程模型 |
+| Streamable HTTP | 团队 / 线上部署、跨机器 | 多客户端、可水平扩展 | 需要部署 |
+| SSE | 兼容老 server | — | 已弃用 |
 
-**默认建议**：本地开发用 `MCPServerStdio`，生产用 `MCPServerStreamableHTTP`。
+### 3.3 从配置文件加载
 
-### 3.2 Stdio 详细参数
+格式和 Claude Desktop / Claude Code / Cursor 用的 `mcpServers` JSON 一样：
 
-```python
-server = MCPServerStdio(
-    command="python",          # 启动命令
-    args=["my_server.py"],     # 启动参数
-    env={"DEBUG": "1"},        # 子进程环境变量
-    cwd="/path/to/server",     # 工作目录
-    timeout=10,                # 启动握手超时（秒）
-)
+```json
+{
+  "mcpServers": {
+    "fs": {"command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]},
+    "calculator": {"url": "http://localhost:8000/mcp"},
+    "weather-api": {"url": "https://${SERVER_HOST:-localhost}:${SERVER_PORT:-8080}/sse"}
+  }
+}
 ```
 
-最常见的两类 stdio server：
-
 ```python
-# 1) npx 启动 Node 写的 MCP server（最常见）
-MCPServerStdio("npx", args=["-y", "@modelcontextprotocol/server-github"])
+from pydantic_ai import Agent
+from pydantic_ai.mcp import load_mcp_toolsets
 
-# 2) python 启动自己写的 server
-MCPServerStdio("python", args=["my_mcp_server.py"])
+agent = Agent("openai:gpt-6.1-sol", toolsets=load_mcp_toolsets("mcp_config.json"))
 ```
 
-### 3.3 HTTP 详细参数
-
-```python
-from pydantic_ai.mcp import MCPServerStreamableHTTP
-
-server = MCPServerStreamableHTTP(
-    url="http://localhost:8000/mcp",
-    headers={"Authorization": "Bearer xxx"},   # 鉴权
-    timeout=30,
-)
-```
-
-HTTP 模式下 server 通常长期运行（K8s pod / Docker 容器），多个 Agent 实例共享。
+stdio 条目支持 `command / args / env / cwd`，HTTP 条目支持 `url / headers`，都可以用 `${VAR}`、`${VAR:-default}` 展开环境变量（`${VAR}` 未定义会抛 `ValueError`）。配置文件要当作受信任的输入来对待：它决定了要启动哪个可执行文件，环境变量展开也没有白名单。`load_mcp_toolsets` 返回的每个 toolset 已经按 key 加好了前缀（2 个 server 就得到 2 个 `PrefixedToolset`）。`clai --mcp-config` 用的也是这个格式。
 
 ---
 
-## 4. 生命周期管理：必须 `async with`
-
-MCP server 需要"握手 → 维持连接 → 优雅关闭"。Pydantic AI 用 async context manager 把这一切包好了：
+## 4. 生命周期：用 `async with agent`
 
 ```python
 async with agent:           # 一次进入，N 次 run，最后一次性关闭
     await agent.run("第一句")
     await agent.run("第二句")
-# 退出后 server 已经停掉
 ```
 
-或者直接对单个 server：
-
-```python
-async with server:
-    tools = await server.get_tools(ctx)   # 也可以脱离 Agent 直接调用
-```
-
-❌ **错误示范**：忘了 `async with`，每次 run 都启动一个新子进程：
-
-```python
-agent = Agent(..., toolsets=[MCPServerStdio(...)])
-await agent.run("...")    # 内部隐式启动 + 关闭，慢且容易漏 cleanup
-await agent.run("...")    # 又来一次
-```
-
-✅ **正确**：
-
-```python
-async with agent:
-    for q in questions:
-        await agent.run(q)
-```
+如果忘了 `async with`，每次 `run` 都会隐式建立再关闭一遍连接，stdio 的话就是每次起一个子进程，既慢又容易漏掉清理。整个会话用一个 `async with agent:` 包到底就行。
 
 ---
 
-## 5. Pydantic AI 作 Server：FastMCP
+## 5. 工具出错：`tool_error_behavior`
 
-Pydantic AI 没有自己重新发明 MCP server，而是直接用官方 SDK 里的 `FastMCP`（类似 FastAPI 风格的装饰器）：
+MCP server 报告工具错误时，处理方式由这个参数决定：
+
+| `tool_error_behavior` | 行为 |
+|------|------|
+| `'retry'`（默认） | 当作 `ModelRetry`：把服务器报错作为 `outcome='retried'` 的工具结果回给模型，让它改了再试（消耗工具重试预算） |
+| `'failed'` | 当作 `ToolFailed`：记录为 `outcome='failed'`，模型自己决定下一步，不消耗预算 |
+| `'error'` | 直接抛出底层异常、中断运行，交给应用代码处理 |
+
+协议层和传输层的错误不走这条路。举个例子：模型给 `list_issues` 传了一个不存在的 repo，服务器返回 404，默认行为就是重试、重试预算（默认 1 次）耗尽、抛 `UnexpectedModelBehavior`。如果希望模型看到失败就如实报告，用 `MCPToolset(..., tool_error_behavior='failed')`。
+
+## 6. 命名冲突、前缀、过滤
 
 ```python
-from mcp.server.fastmcp import FastMCP
+weather = MCPToolset("http://localhost:3001/mcp").prefixed("weather")     # weather_*
+calculator = MCPToolset("http://localhost:3002/mcp").prefixed("calc")       # calc_*
+agent = Agent("openai:gpt-6.1-sol", toolsets=[weather, calculator])
+```
+
+V1 `MCPServerStdio(tool_prefix=..., allow_tools=...)` 的这两个参数已经没有了，改用 toolset 的组合方法：`.prefixed(...)` 加前缀，`.filtered(lambda ctx, td: td.name in {...})` 只保留需要的工具（也可以按 MCP 工具的 `meta` / `annotations` 过滤）。
+
+## 7. 其它客户端能力（按需）
+
+- server instructions：`MCPToolset(url, include_instructions=True)` 会把服务器初始化时给出的使用说明注入 agent 指令。默认关闭，因为这段文字是服务器写的，模型收到时会把它和你写的指令同等对待，只对信任的服务器打开；
+- `process_tool_call`：在每次工具调用前后插回调（比如注入服务器 handler 要读的 metadata）；
+- resources / prompts：MCP 的资源和提示词模板；`MCP Apps`：服务器声明只给自己 UI 用的工具，对模型不可见；
+- 后台任务：两种 MCP Tasks 都支持。FastMCP 3 的 Server 用 2025-11-25 版（SEP-1686），按工具的 `execution.taskSupport` 决定是否以任务模式调用，`prefer_tasks=False` 可以强制普通调用；FastMCP 4 的 Server 用新的 Tasks 扩展（SEP-2663），由 Server 决定是否创建任务，普通调用会自动把任务驱动到完成；
+- 认证：`auth=` 可以是 bearer token 字符串、`httpx2.Auth`、字面量 `'oauth'`（FastMCP OAuth），或者一个接收 `RunContext` 的函数，用来做每用户凭证；
+- 自定义 TLS / 客户端标识：`verify=`、`client_info=`；
+- sampling / elicitation：`sampling_model=` 让服务器借客户端的模型生成；`elicitation_handler` 处理服务器向用户的提问。FastMCP 4 的「现代协议模式」不支持服务器发起的 sampling 和 elicitation，也不能设 `log_level`，需要这些功能得用 FastMCP 3。
+
+---
+
+## 8. Pydantic AI 作 Server 的"大脑"：FastMCP
+
+Pydantic AI 没有自己实现 MCP server，而是借用 FastMCP（装饰器写法和 FastAPI 很像），在工具函数里调用 Agent。这里的 `FastMCP` 来自第三方 `fastmcp` 包；官方 SDK 2.x 里对应的是 `mcp.server.MCPServer`，见 MCP 手册的[写第一个 MCP Server 和 Client](../../../03-mcp/docs/01-basics/06-first-server.md)。
+
+```python
+from fastmcp import FastMCP            # ⚠️ 不是 mcp.server.fastmcp（mcp 2.x 里已更名）
 from pydantic_ai import Agent
 
 mcp = FastMCP("my-server")
 
-# 用 Pydantic AI 的 Agent 作为底层"大脑"
-poet_agent = Agent(
-    "anthropic:claude-3-5-haiku-latest",
-    system_prompt="你是一位押韵诗人，回答必须押韵。",
-)
+poet_agent = Agent("openai-chat:qwen-flash", instructions="你是一位押韵诗人，回答必须押韵。")
 
 @mcp.tool()
 async def write_poem(theme: str) -> str:
@@ -184,47 +184,31 @@ def summarize_prompt(text: str) -> str:
     return f"请用一句话总结：{text}"
 
 if __name__ == "__main__":
-    mcp.run()    # 默认 stdio
+    mcp.run(show_banner=False)                                          # 默认 stdio
+    # mcp.run(transport="http", host="127.0.0.1", port=8000)           # HTTP 端点默认在 /mcp
 ```
 
-### 5.1 装饰器三件套
-
-| 装饰器 | 暴露给 client | 典型用途 |
+| 装饰器 | 暴露给 client | 常见用途 |
 |--------|--------------|---------|
 | `@mcp.tool()` | tool 列表 | 让 LLM 调用执行动作 |
-| `@mcp.resource("uri")` | resource 列表 | 暴露只读数据（配置、文档） |
+| `@mcp.resource("uri")` | resource 列表 | 暴露只读数据 |
 | `@mcp.prompt()` | prompt 列表 | 暴露可复用模板 |
 
-### 5.2 HTTP 模式启动
+> stdio server 的日志必须走 **stderr**，往 stdout 打印会污染协议流。demo 04（GitHub Issue 查询）里用的就是 `logging.basicConfig(stream=sys.stderr)`。FastMCP 的启动横幅可以用 `show_banner=False` 关掉。
+
+### 8.1 双向：Agent 同时是 Client 和 Server
 
 ```python
-mcp.run(transport="streamable-http")  # 监听 0.0.0.0:8000/mcp
-```
-
-或者用 `uvicorn`：
-
-```bash
-uvicorn my_server:mcp.streamable_http_app --port 8000
-```
-
----
-
-## 6. 双向：Agent 同时是 Client 和 Server
-
-最有意思的玩法：你的 Pydantic AI Agent 既调用别的 MCP server（作 client），又把自己暴露成 MCP server（让别的 Agent 调用）。
-
-```python
+from fastmcp import FastMCP
+from fastmcp.client.transports import StdioTransport
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
-from mcp.server.fastmcp import FastMCP
+from pydantic_ai.mcp import MCPToolset
 
 # 1) 作 client：用 filesystem server 读文件
-fs_server = MCPServerStdio(
-    "npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-)
-agent = Agent("openai:gpt-4o-mini", toolsets=[fs_server])
+fs = MCPToolset(StdioTransport(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]))
+agent = Agent("openai-chat:qwen-flash", toolsets=[fs])
 
-# 2) 作 server：暴露 read_summary 工具给外面
+# 2) 作 server：把"读文件并总结"暴露给外面
 mcp = FastMCP("file-summarizer")
 
 @mcp.tool()
@@ -235,77 +219,60 @@ async def summarize_file(path: str) -> str:
         return result.output
 
 if __name__ == "__main__":
-    mcp.run()
+    mcp.run(show_banner=False)
 ```
 
-这就是"**Agent 编排 Agent**"的标准模式——你的服务对内是 Pydantic AI Agent，对外只暴露 MCP 协议，client 是 Claude Code 还是 Cursor 都无所谓。
+这样就成了 Agent 编排 Agent：服务内部是 Pydantic AI Agent，对外只暴露 MCP，client 用 Claude Code 还是 Cursor 都可以。
+
+### 8.2 同进程测试：把 FastMCP server 直接交给 `MCPToolset`
+
+```python
+toolset = MCPToolset(mcp)            # 传 FastMCP 对象：不起进程、不走网络
+agent = Agent("test", toolsets=[toolset])
+async with agent:
+    await agent.run("hi")
+```
+
+demo 04 就是用这个办法确认 server 的 3 个工具都注册上了。
 
 ---
 
-## 7. MCP Sampling：让 server 反过来调 client 的 LLM
+## 9. MCP Sampling：让 server 反过来调 client 的 LLM
 
-某些场景下 server 需要调用 LLM 但**不想自己持 API Key**——比如插件市场里别人写的 MCP server。MCP 协议允许 server 通过 client 的连接"反向"调用 LLM，叫 **Sampling**。
-
-Pydantic AI 提供了对应的 `MCPSamplingModel`：
+有些 server 需要调 LLM，但又不想自己持有 API Key，比如插件市场里别人写的 server。MCP 允许它通过 client 的连接反向调用 LLM，这叫 Sampling。Pydantic AI 里对应的是 `MCPSamplingModel`：
 
 ```python
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp import Context, FastMCP     # 这个例子来自官方文档，用的是官方 mcp SDK 1.x 的 FastMCP
 from pydantic_ai import Agent
 from pydantic_ai.models.mcp_sampling import MCPSamplingModel
 
-mcp = FastMCP("sampling-demo")
-agent = Agent(system_prompt="你只会押韵")  # 注意没传 model！
+server = FastMCP("sampling-demo")
+agent = Agent(instructions="你只会押韵")            # 注意没传 model
 
-@mcp.tool()
+@server.tool()
 async def write_poem(ctx: Context, theme: str) -> str:
-    result = await agent.run(
-        f"写一首关于 {theme} 的诗",
-        model=MCPSamplingModel(session=ctx.session),  # ← 用 client 的 LLM
-    )
+    result = await agent.run(f"写一首关于 {theme} 的诗", model=MCPSamplingModel(session=ctx.session))
     return result.output
 ```
 
-server 自己不需要任何 API Key，所有 LLM 费用都由 client 承担。这对"零信任的 MCP 市场"非常关键。
+这样 server 不需要 API Key，LLM 费用全由 client 承担。注意这段代码依赖 `mcp` 1.x 的 `Context`，FastMCP 4 的现代协议模式不支持 sampling，在 2.64 的依赖组合下不一定能直接运行。官方文档里 client 侧是用 `MCPToolset(..., sampling_model=...)` 提供模型的。
 
 ---
 
-## 8. 工具发现与过滤
-
-Agent 启动时会调用每个 server 的 `list_tools()` 拉所有工具，你可以**过滤**只用其中一部分：
-
-```python
-from pydantic_ai.mcp import MCPServerStdio
-
-server = MCPServerStdio(
-    "npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-    tool_prefix="fs_",        # 给所有工具加前缀，避免重名
-    allow_tools=["fs_read_file", "fs_list_directory"],  # 只允许这两个
-)
-```
-
-`tool_prefix` 在多个 server 工具重名时特别有用。
-
----
-
-## 9. 实战：用 filesystem server 让 Agent 操作本地文件
-
-完整 demo 见 [`demos/modules/01_mcp.py`](../../demos/modules/01_mcp.py)。核心思路：
+## 10. 实战：用 filesystem server 让 Agent 操作本地文件
 
 ```python
 import asyncio
+from fastmcp.client.transports import StdioTransport
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.mcp import MCPToolset
 
-# 用官方 filesystem MCP server（Node 实现，npx 自动下载）
-fs = MCPServerStdio(
-    "npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp/mcp-demo"],
-)
+fs = MCPToolset(StdioTransport(command="npx", args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp/mcp-demo"]))
 
 agent = Agent(
-    "openai:gpt-4o-mini",
+    "openai-chat:qwen-flash",
     toolsets=[fs],
-    system_prompt="你是文件管家，回答问题时可以读写 /tmp/mcp-demo 下的文件。",
+    instructions="你是文件管家，回答问题时可以读写 /tmp/mcp-demo 下的文件。",
 )
 
 async def main() -> None:
@@ -318,51 +285,48 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-跑起来你会观察到：
-
-1. 第一次启动时 `npx` 会下载 `@modelcontextprotocol/server-filesystem`
-2. Agent 自动发现了 `read_file` / `write_file` / `list_directory` 等十几个工具
-3. 一次问答可能调用 3-5 次 tool，最后输出结果
+第一次运行时 `npx` 要下载包，会多等几秒。
 
 ---
 
-## 10. 常见坑
+## 11. 常见坑
 
 | 现象 | 原因 | 解决 |
 |------|------|------|
-| `MCPServerStdio` 启动慢 5-10 秒 | 第一次 `npx` 在下载包 | 提前 `npx -y <pkg> --version` 预热 |
-| 报错 `connection closed` | server 子进程崩溃 | 加 `env={"DEBUG":"*"}` 看 server stderr |
-| 工具调用后 hang 住 | 忘了 `async with agent` | 永远用 `async with`，别裸调 |
-| 一次 run 启动一个 server | 没复用 context | 整个会话一个 `async with agent` 包到底 |
-| 多个 server 工具重名 | 名字撞了 | 给每个 server 加 `tool_prefix=` |
-| HTTP server `401` | header 没传 | `MCPServerStreamableHTTP(headers={"Authorization": ...})` |
-| 二级模型也想用 sampling | 想嵌套 | `MCPSamplingModel(session=ctx.session)` |
-| 工具描述太啰嗦烧 token | server tool 的 description 没控制 | client 侧用 `allow_tools=` 只挑要的 |
-| Stdio 进程残留 | 异常退出没 cleanup | 用 `async with`，或捕获 `KeyboardInterrupt` 后 `await server.__aexit__(...)` |
+| `ImportError: cannot import name 'MCPServerStdio'` | V2 去掉了旧客户端类 | 用 `MCPToolset` / `MCP` capability |
+| `ModuleNotFoundError: mcp.server.fastmcp` | `mcp` 2.x 把 FastMCP 改名为 `MCPServer` | 用 `from fastmcp import FastMCP`（`pip install fastmcp`），或锁 `mcp<2` |
+| `ImportError: FastMCP server support is not installed` | 只装了 `fastmcp-slim` | `pip install "fastmcp-slim[server]"` 或 `pip install fastmcp` |
+| 启动慢 5-10 秒 | 第一次 `npx` 在下载包 | 提前 `npx -y <pkg> --version` 预热 |
+| 报错 `connection closed` | server 子进程崩溃 | 单独运行 server 脚本看 stderr |
+| 工具调用后卡住 / 每次 run 都重启 server | 没写 `async with agent` | 整个会话包一个 `async with agent:` |
+| 多个 server 工具重名 | 名字冲突 | `.prefixed("xxx")` 或 `MCP(..., tool_prefix=...)` |
+| HTTP server `401` | 没带认证 | `MCPToolset(url, auth="token")` / `headers={...}`（每用户用函数） |
+| 模型传错参数后运行直接失败 | 默认 `tool_error_behavior='retry'`，预算 1 次 | 调大 `max_retries` / 设 `'failed'` |
+| stdio server 日志污染协议 | 往 stdout 打印 | 日志走 stderr |
+| sampling / elicitation 不工作 | FastMCP 4 现代协议模式不支持 | 用 FastMCP 3，或让 server 直接持 key |
+| 工具描述太长、费 token | server tool 的 description 没控制 | `.filtered(...)` 只挑要的；工具多时用 `defer_loading` |
 
 ---
 
-## 11. 何时该用 MCP，何时别用
+## 12. 何时该用 MCP，何时别用
 
 | 场景 | 用 MCP | 用 `@agent.tool` |
 |------|-------|-----------------|
-| 文件系统、Git、Browser、Slack 等通用能力 | ✅ 大概率有现成 server | — |
-| 业务 DB 查询、内部 RPC | — | ✅ 拼 deps 注入更简单 |
-| 想让 Claude Code / Cursor 也能用同一个能力 | ✅ MCP 是唯一选项 | — |
-| 强类型校验、和 Pydantic Model 紧耦合 | — | ✅ 本地 tool 类型链路完整 |
-| 跨语言（server 用 Go/Rust 写） | ✅ 协议无关 | — |
-| 性能敏感（每次调用都要快） | — | ✅ 同进程零开销 |
+| 文件系统、Git、Browser、Slack 等通用能力 | 适合，大概率有现成 server | — |
+| 业务 DB 查询、内部 RPC | — | 适合，配合 deps 注入更简单 |
+| 想让 Claude Code / Cursor 也能用同一个能力 | 适合 | — |
+| 强类型校验、和 Pydantic Model 紧耦合 | — | 适合 |
+| 跨语言（server 用 Go/Rust 写） | 适合 | — |
+| 性能敏感 | — | 适合，同进程没有额外开销 |
 
 ---
 
-## 12. 本章 demo
+## 13. 本章 demo
 
-完整可运行代码：[`demos/modules/01_mcp.py`](../../demos/modules/01_mcp.py)
+完整可运行代码：[`demos/modules/01_mcp.py`](../../demos/modules/01_mcp.py)，包含三个例子：
 
-里面包含三个例子：
+1. Demo A（`client`）：Agent 作 client，调用 `filesystem` MCP server 读写文件
+2. Demo B（`server`）：用 FastMCP 写一个最小的 MCP server
+3. Demo C（`test`，默认）：没有 API Key 时，用 `TestModel` + 子进程 stdio server 验证注册流程
 
-1. **Demo A**：Agent 作 client，调用 `filesystem` MCP server 读写文件
-2. **Demo B**：用 `FastMCP` 自己写一个最小 MCP server 暴露 `echo` 工具
-3. **Demo C**：没有 API Key 时用 `TestModel` 验证 MCP 注册流程
-
-跑通后下一篇：[02-evals.md](02-evals.md) —— 用 Pydantic Evals 把 Agent 的回答质量当单元测试来跑。
+完整的实战版见 [`demos/practice/04_project_mcp_server.py`](../../demos/practice/04_project_mcp_server.py)。下一篇：[Pydantic Evals 评测框架](02-evals.md)。
