@@ -268,32 +268,42 @@ function shortTitle(rawTitle, slug) {
   return m ? `${m[1]} · ${t}` : t
 }
 
-async function genMeta(dir, depth = 0) {
+async function genMeta(dir, depth = 0, title = '') {
   // depth=0 表示 pages/docs/ 顶层（列各手册），用 MANUAL_TITLES
   // depth>=1 表示手册内部目录（章节、子文件），用 SECTION_TITLES
   const entries = await fs.readdir(dir, { withFileTypes: true })
   const sorted = entries
-    .filter((e) => !e.name.startsWith('_'))
+    .filter((e) => !e.name.startsWith('_') && e.name !== 'index.mdx')
     .sort((a, b) => a.name.localeCompare(b.name))
 
   const meta = {}
+  const items = [] // 给目录页用：[标题, 路由]
+  const route = '/' + path.relative(path.join(DST_DOCS, '..'), dir).split(path.sep).join('/')
   for (const e of sorted) {
     if (e.isDirectory()) {
-      if (depth === 0) {
-        meta[e.name] = MANUAL_TITLES[e.name] || e.name
-      } else {
-        meta[e.name] = SECTION_TITLES[e.name] || e.name
-      }
-      await genMeta(path.join(dir, e.name), depth + 1)
+      const t = depth === 0 ? MANUAL_TITLES[e.name] || e.name : SECTION_TITLES[e.name] || e.name
+      meta[e.name] = t
+      items.push([t, `${route}/${e.name}`])
+      await genMeta(path.join(dir, e.name), depth + 1, t)
     } else if (e.name.endsWith('.md') || e.name.endsWith('.mdx')) {
       const slug = e.name.replace(/\.(md|mdx)$/, '')
       const raw = (await readH1(path.join(dir, e.name))) || slug
       meta[slug] = shortTitle(raw, slug)
+      items.push([raw.replace(/^#\s*/, ''), `${route}/${slug}`])
     }
   }
+  // 手册和章节目录生成一个目录页，面包屑点进来不会 404；侧栏里隐藏
+  if (depth >= 1) {
+    const lines = items.map(([t, r]) => `- [${t.replace(/[[\]]/g, '')}](${r})`).join('\n')
+    await fs.writeFile(
+      path.join(dir, 'index.mdx'),
+      `---\ntitle: ${JSON.stringify(title)}\n---\n\n# ${title}\n\n${lines}\n`,
+    )
+  }
+  const out = depth >= 1 ? { index: { display: 'hidden' }, ...meta } : meta
   await fs.writeFile(
     path.join(dir, '_meta.ts'),
-    `export default ${JSON.stringify(meta, null, 2)}\n`,
+    `export default ${JSON.stringify(out, null, 2)}\n`,
   )
 }
 
